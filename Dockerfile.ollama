@@ -1,0 +1,49 @@
+FROM nvidia/cuda:12.8.0-base-ubuntu22.04
+
+# Install system utilities and GPU detection tools
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    gnupg \
+    apt-transport-https \
+    ca-certificates \
+    pciutils \
+    lshw \
+    nvidia-utils-560 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add NVIDIA repository
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i cuda-keyring_1.1-1_all.deb && \
+    rm cuda-keyring_1.1-1_all.deb
+
+# Install NVIDIA tools
+RUN apt-get update && \
+    apt-get install -y nvidia-container-toolkit && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Ollama
+RUN curl -fsSL https://ollama.com/install.sh | sh
+
+# Set environment variables
+ENV PATH=/usr/local/nvidia/bin:/usr/local/cuda/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics
+ENV CUDA_VISIBLE_DEVICES=all
+ENV OLLAMA_HOST=0.0.0.0:11434
+ENV OLLAMA_ORIGINS=*
+
+# Create necessary directories
+RUN mkdir -p /usr/local/nvidia/lib64
+
+# Create startup script
+RUN echo '#!/bin/bash\n\
+lspci | grep -i nvidia\n\
+nvidia-smi\n\
+ollama serve' > /start.sh && \
+chmod +x /start.sh
+
+EXPOSE 11434
+
+CMD ["/start.sh"]

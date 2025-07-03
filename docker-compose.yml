@@ -1,0 +1,129 @@
+# Updated docker-compose.yml with properly configured monitoring
+services:
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: echat-backend
+    ports:
+      - "127.0.0.1:8000:8000"  # API server
+      - "127.0.0.1:8001:8001"  # Metrics endpoint
+    volumes:
+      - ./backend:/app
+      - sqlite_data:/app/data/db:rw        # Persistent SQLite database
+      - chroma_data:/app/data/chroma_db:rw # Persistent Chroma database
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PIP_DEFAULT_TIMEOUT=100
+      - OLLAMA_HOST=http://ollama:11434
+      - CHROMA_DB_PATH=/app/data/chroma_db
+      - SQLITE_DB_PATH=/app/data/db/chat.db
+      - HOST_IP=0.0.0.0
+      - UVICORN_TIMEOUT=600
+      - REQUEST_TIMEOUT=600
+      - METRICS_PORT=8001
+      - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_metrics
+    networks:
+      - echat-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    command: bash init_ollama.sh
+    depends_on:
+      - ollama
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: echat-frontend
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NODE_ENV=production
+      - REACT_APP_API_URL=/api
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - backend
+    networks:
+      - echat-network
+    restart: unless-stopped
+
+  ollama:
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    container_name: echat-ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    pid: "host"
+    privileged: true
+    volumes:
+      - ollama_data:/root/.ollama
+      - /usr/lib/x86_64-linux-gnu/nvidia:/usr/lib/x86_64-linux-gnu/nvidia:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.560.35.03:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libcuda.so.560.35.03:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro
+      - /usr/local/cuda:/usr/local/cuda:ro
+      - /usr/local/nvidia:/usr/local/nvidia:ro
+      - /dev:/dev:ro
+    networks:
+      - echat-network
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - OLLAMA_HOST=0.0.0.0:11434
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-modeset:/dev/nvidia-modeset
+      - /dev/nvidia-caps:/dev/nvidia-caps
+    restart: unless-stopped
+
+
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: echat-minio
+    user: "${UID}:${GID}" 
+    ports:
+      - "9100:9000"
+      - "9101:9001"
+    environment:
+      - MINIO_ROOT_USER=minio_user
+      - MINIO_ROOT_PASSWORD=minio_password
+      - MINIO_ADDRESS=:9000
+      - MINIO_CONSOLE_ADDRESS=:9001
+    volumes:
+      - ./minio_data:/minio_data
+    networks:
+      - echat-network
+    command: server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9100/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+networks:
+  echat-network:
+    driver: bridge
+
+volumes:
+  sqlite_data:
+    driver: local
+  chroma_data:
+    driver: local
+  ollama_data:
+    driver: local

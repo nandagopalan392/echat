@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+@layer base {
+    body {
+        @apply antialiased bg-gray-50;
+    }
+}
+
+/* Add styling for thinking content */
+.thinking-content {
+  @apply bg-indigo-50 border-l-4 border-indigo-500 pl-3 py-2 my-2 text-gray-700;
+}
+
+/* Add animated cursor for streaming content */
+.streaming-cursor {
+  @apply inline-block w-2 h-4 bg-indigo-500;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Style think bubbles with special color */
+.think-bubble {
+  @apply bg-indigo-50 text-indigo-800 border border-indigo-200 rounded-lg p-3 my-2;
+  position: relative;
+}
+
+.think-bubble:before {
+  content: "💡";
+  @apply absolute -top-2 -left-1;
+}
+
+@layer components {
+    .btn-primary {
+        @apply px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-200;
+    }
+    
+    .input-primary {
+        @apply block w-full px-4 py-3 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent;
+    }
+}

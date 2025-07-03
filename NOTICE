@@ -1,0 +1,18 @@
+# NOTICE
+
+## Third-Party Licenses
+
+This software may include third-party components that are subject to their own license terms. 
+
+### Dependencies
+
+Please refer to the respective package managers' documentation and dependency files for complete license information:
+
+- **Backend (Python)**: See `backend/requirements.txt`
+- **Frontend (JavaScript)**: See `frontend/package.json`
+
+### Important Notes
+
+All third-party components retain their original licenses. This dual-license applies only to the original code written for this project, not to any third-party dependencies or libraries.
+
+If you discover any licensing conflicts or have questions about third-party component licenses, please contact us at the address provided in the main LICENSE file.

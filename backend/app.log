@@ -1,0 +1,75 @@
+2025-02-11 21:30:19,448 - main - INFO - Starting up the application...
+2025-02-11 21:30:19,450 - chat_db - INFO - Admin user created with password: admin123
+2025-02-11 21:30:19,451 - chat_db - INFO - Database initialized successfully
+2025-02-11 21:30:19,451 - main - INFO - Database initialized successfully
+2025-02-11 21:32:21,122 - main - INFO - Shutting down the application...
+2025-02-11 21:32:21,122 - main - INFO - Cleanup completed successfully
+2025-02-11 21:32:22,388 - main - INFO - Starting up the application...
+2025-02-11 21:32:22,390 - chat_db - INFO - Admin user created with password: admin123
+2025-02-11 21:32:22,391 - chat_db - INFO - Database initialized successfully
+2025-02-11 21:32:22,391 - main - INFO - Database initialized successfully
+2025-02-11 21:32:27,109 - main - INFO - Shutting down the application...
+2025-02-11 21:32:27,109 - main - INFO - Cleanup completed successfully
+2025-02-11 21:32:29,719 - main - INFO - Starting up the application...
+2025-02-11 21:32:29,721 - chat_db - INFO - Admin user created with password: admin123
+2025-02-11 21:32:29,722 - chat_db - INFO - Database initialized successfully
+2025-02-11 21:32:29,722 - main - INFO - Database initialized successfully
+2025-02-11 21:32:35,558 - main - DEBUG - Incoming request: GET http://localhost:8000/health
+2025-02-11 21:32:35,558 - main - DEBUG - Request body: 
+2025-02-11 21:32:35,560 - main - DEBUG - Incoming request: GET http://localhost:8000/health
+2025-02-11 21:32:35,560 - main - DEBUG - Request body: 
+2025-02-11 21:32:41,278 - main - DEBUG - Incoming request: POST http://localhost:8000/api/auth/login
+2025-02-11 21:32:41,279 - main - DEBUG - Request body: {"username":"admin","password":"admin123"}
+2025-02-11 21:32:41,279 - main - DEBUG - Starting login process
+2025-02-11 21:33:02,049 - main - INFO - Shutting down the application...
+2025-02-11 21:33:02,049 - main - INFO - Cleanup completed successfully
+2025-02-11 21:33:02,051 - main - ERROR - Login error: name 'json' is not defined
+Traceback (most recent call last):
+  File "/home/econsys/nanda/echat/echat_repo/backend/main.py", line 122, in login
+    data = await request.json()
+  File "/home/econsys/nanda/echat/echat_repo/venv/lib/python3.8/site-packages/starlette/requests.py", line 243, in json
+    body = await self.body()
+  File "/home/econsys/nanda/echat/echat_repo/venv/lib/python3.8/site-packages/starlette/requests.py", line 236, in body
+    async for chunk in self.stream():
+  File "/home/econsys/nanda/echat/echat_repo/venv/lib/python3.8/site-packages/starlette/requests.py", line 221, in stream
+    message = await self._receive()
+  File "/home/econsys/nanda/echat/echat_repo/venv/lib/python3.8/site-packages/starlette/middleware/base.py", line 47, in receive_or_disconnect
+    message = await wrap(request.receive)
+  File "/home/econsys/nanda/echat/echat_repo/venv/lib/python3.8/site-packages/anyio/_backends/_asyncio.py", line 593, in __aexit__
+    raise CancelledError
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/econsys/nanda/echat/echat_repo/backend/main.py", line 123, in login
+    except json.JSONDecodeError as e:
+NameError: name 'json' is not defined
+2025-02-11 21:34:27,806 - main - INFO - Starting up the application...
+2025-02-11 21:34:27,808 - chat_db - INFO - Admin user created with password: admin123
+2025-02-11 21:34:27,809 - chat_db - INFO - Database initialized successfully
+2025-02-11 21:34:27,809 - main - INFO - Database initialized successfully
+2025-02-11 21:34:40,472 - main - DEBUG - Incoming request: GET http://localhost:8000/health
+2025-02-11 21:34:40,472 - main - DEBUG - Request body: 
+2025-02-11 21:34:40,474 - main - DEBUG - Incoming request: GET http://localhost:8000/health
+2025-02-11 21:34:40,474 - main - DEBUG - Request body: 
+2025-02-11 21:34:45,628 - main - DEBUG - Incoming request: POST http://localhost:8000/api/auth/login
+2025-02-11 21:34:45,629 - main - DEBUG - Request body: {"username":"admin","password":"admin123"}
+2025-02-11 21:34:45,632 - main - DEBUG - Starting login process
+2025-02-11 21:34:50,205 - main - DEBUG - Incoming request: POST http://localhost:8000/api/auth/login
+2025-02-11 21:34:50,205 - main - DEBUG - Request body: {"username":"admin","password":"admin123"}
+2025-02-11 21:34:50,206 - main - DEBUG - Starting login process
+2025-02-11 21:34:51,253 - main - DEBUG - Incoming request: POST http://localhost:8000/api/auth/login
+2025-02-11 21:34:51,253 - main - DEBUG - Request body: {"username":"admin","password":"admin123"}
+2025-02-11 21:34:51,254 - main - DEBUG - Starting login process
+2025-02-11 21:34:51,596 - main - DEBUG - Incoming request: POST http://localhost:8000/api/auth/login
+2025-02-11 21:34:51,596 - main - DEBUG - Request body: {"username":"admin","password":"admin123"}
+2025-02-11 21:34:51,597 - main - DEBUG - Starting login process
+2025-02-11 21:34:51,804 - main - DEBUG - Incoming request: POST http://localhost:8000/api/auth/login
+2025-02-11 21:34:51,804 - main - DEBUG - Request body: {"username":"admin","password":"admin123"}
+2025-02-11 21:34:51,805 - main - DEBUG - Starting login process
+2025-02-11 21:34:52,012 - main - DEBUG - Incoming request: POST http://localhost:8000/api/auth/login
+2025-02-11 21:34:52,012 - main - DEBUG - Request body: {"username":"admin","password":"admin123"}
+2025-02-11 21:34:52,013 - main - DEBUG - Starting login process
+2025-02-11 21:35:12,892 - main - INFO - Shutting down the application...
+2025-02-11 21:35:12,892 - main - INFO - Cleanup completed successfully

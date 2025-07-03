@@ -1,0 +1,126 @@
+.chat-container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+.chat-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem;
+    background: white;
+    border-bottom: 1px solid var(--border-color);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+}
+
+.chat-sidebar {
+    position: fixed;
+    left: 0;
+    top: 60px;
+    bottom: 0;
+    width: 260px;
+    padding: 1rem;
+    background: var(--bg-color);
+    border-right: 1px solid var(--border-color);
+    overflow-y: auto;
+}
+
+.chat-main {
+    margin-left: 260px;
+    margin-top: 60px;
+    padding: 2rem;
+    height: calc(100vh - 120px);
+    overflow-y: auto;
+}
+
+.messages {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-bottom: 70px;
+}
+
+.message {
+    padding: 1rem;
+    border-radius: 8px;
+    max-width: 80%;
+}
+
+.message.user {
+    align-self: flex-end;
+    background: var(--primary-color);
+    color: white;
+}
+
+.message.assistant {
+    align-self: flex-start;
+    background: var(--bg-color);
+}
+
+.input-container {
+    position: fixed;
+    bottom: 0;
+    left: 260px;
+    right: 0;
+    padding: 1rem 2rem;
+    background: white;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    gap: 1rem;
+}
+
+.message-input {
+    flex: 1;
+    padding: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    font-size: 1rem;
+}
+
+.send-btn, .new-chat {
+    padding: 0.75rem 1.5rem;
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.session-btn {
+    width: 100%;
+    padding: 0.75rem;
+    text-align: left;
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-bottom: 0.5rem;
+}
+
+.session-btn:hover, .session-btn.active {
+    background: white;
+    border-color: var(--border-color);
+}
+
+.file-upload {
+    margin: 1rem 0;
+}
+
+.file-upload input {
+    display: none;
+}
+
+.file-upload label {
+    display: block;
+    padding: 0.75rem;
+    background: white;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: center;
+}

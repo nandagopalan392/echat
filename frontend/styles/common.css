@@ -1,0 +1,153 @@
+.logo-container {
+    display: flex;
+    align-items: center;
+    gap: 8px;            /* Reduced gap */
+    padding: 0.5rem;     /* Reduced padding */
+}
+
+.logo {
+    width: 24px;         /* Reduced from 32px */
+    height: 24px;        /* Reduced from 32px */
+    display: block;
+    margin: 0 auto;
+}
+
+.app-title {
+    font-size: 20px;     /* Reduced from 24px */
+    font-weight: bold;
+    color: #4A90E2;
+    margin: 0;
+}
+
+.login-container {
+    max-width: 400px;
+    margin: 100px auto;
+    padding: 2rem;
+    text-align: center;
+}
+
+.login-title {
+    font-size: 2rem;
+    color: #4A90E2;
+    margin-bottom: 2rem;
+}
+
+.login-form-container {
+    background: white;
+    padding: 2rem;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.form-field {
+    margin-bottom: 1.5rem;
+}
+
+.form-field input {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 1rem;
+}
+
+.auth-button {
+    width: 100%;
+    padding: 0.75rem;
+    background: #4A90E2;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+    margin-bottom: 1rem;
+}
+
+.auth-button:hover {
+    background: #357ABD;
+}
+
+.chat-container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 1rem;
+}
+
+.chat-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    background: white;
+    border-bottom: 1px solid #e5e5e5;
+    z-index: 100;
+    padding: 0.5rem 1rem;
+}
+
+.chat-sidebar {
+    position: fixed;
+    left: 0;
+    top: 60px;
+    bottom: 0;
+    width: 260px;
+    background: #f7f7f8;
+    border-right: 1px solid #e5e5e5;
+    padding: 1rem;
+    overflow-y: auto;
+}
+
+.chat-main {
+    margin-left: 260px;
+    margin-top: 60px;
+    padding: 2rem;
+    max-width: 800px;
+}
+
+.message {
+    padding: 1.5rem;
+    margin: 1rem 0;
+    border-radius: 0.5rem;
+}
+
+.message.user {
+    background: #f7f7f8;
+}
+
+.message.assistant {
+    background: white;
+}
+
+.input-container {
+    position: fixed;
+    bottom: 0;
+    left: 260px;
+    right: 0;
+    padding: 1rem 2rem;
+    background: white;
+    border-top: 1px solid #e5e5e5;
+}
+
+.input-box {
+    max-width: 800px;
+    margin: 0 auto;
+    background: white;
+    border: 1px solid #e5e5e5;
+    border-radius: 0.5rem;
+    padding: 0.75rem;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+}
+
+.sidebar-button {
+    width: 100%;
+    padding: 0.75rem;
+    margin-bottom: 0.5rem;
+    background: white;
+    border: 1px solid #e5e5e5;
+    border-radius: 0.5rem;
+    text-align: left;
+    cursor: pointer;
+}
+
+.sidebar-button:hover {
+    background: #f0f0f0;
+}
