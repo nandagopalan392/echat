@@ -384,101 +384,125 @@ class ChatPDF:
             
             context = "\n".join(doc.page_content for doc in context_docs[:3]) if context_docs else ""
             
-            # Create style-specific prompts
+            # Create style-specific prompts with more distinctive differences
             if style == "conversational":
-                # Create thinking prompt with conversational style
-                thinking_prompt = f"""
-                Think about this question in a conversational way:
+                # Create a prompt that encourages detailed, friendly explanations
+                full_prompt = f"""
+                You are a helpful and friendly assistant. Your goal is to explain things clearly and engagingly.
+
                 Context: {context}
                 Question: {query}
-                Consider how you would explain this to a friend. Think step by step about the key points.
+
+                Instructions for your response:
+                - Use a warm, conversational tone as if talking to a friend
+                - Include examples and analogies to make concepts clear
+                - Use phrases like "Let me explain", "Think of it this way", "Here's what I think"
+                - Break down complex ideas into simple steps
+                - Be thorough and detailed in your explanations
+                - Include practical tips or insights when relevant
+
+                Please provide a comprehensive, friendly response that thoroughly addresses the question.
                 """
-                
-                # Create answer prompt with conversational style
-                answer_prompt = f"""
-                Now answer the question in a friendly, conversational tone:
+            elif style == "detailed":
+                # Create a prompt that encourages comprehensive, analytical responses
+                full_prompt = f"""
+                You are an expert analyst providing comprehensive technical analysis. Your goal is to provide thorough, detailed information.
+
                 Context: {context}
                 Question: {query}
-                
-                Answer as if you're talking to a friend - use simple language, be engaging, and include personal touches like "I think" or "Let me explain".
+
+                Instructions for your response:
+                - Provide a comprehensive, technical analysis
+                - Include multiple perspectives and considerations
+                - Use precise technical terminology
+                - Structure your response with clear sections or bullet points
+                - Include background information and context
+                - Discuss implications, pros/cons, or related concepts
+                - Be thorough and leave no important detail unaddressed
+
+                Please provide a detailed, analytical response that covers all aspects of the question.
                 """
-            else:  # standard style
-                # Create thinking prompt with standard style
-                thinking_prompt = f"""
-                Think about this question based on the context:
+            else:  # standard style (concise)
+                # Create a prompt that encourages brief, precise responses
+                full_prompt = f"""
+                You are a professional assistant focused on providing clear, concise answers. Your goal is efficiency and precision.
+
                 Context: {context}
                 Question: {query}
-                Think step by step with technical precision.
-                """
-                
-                # Create answer prompt with standard style
-                answer_prompt = f"""
-                Now answer the question professionally and concisely:
-                Context: {context}
-                Question: {query}
-                
-                Provide a clear, professional response with accurate technical details.
+
+                Instructions for your response:
+                - Be direct and to the point
+                - Use professional, formal language
+                - Focus on the most essential information
+                - Avoid unnecessary elaboration
+                - Structure your response clearly and logically
+                - Use bullet points or numbered lists when appropriate
+                - Get straight to the answer without lengthy introductions
+
+                Please provide a concise, professional response that directly addresses the question.
                 """
             
-            print(f"[RAG] Will send answer prompt to DeepSeek: {answer_prompt[:200]}...")
+            print(f"[RAG] Will send prompt to DeepSeek ({style} style): {full_prompt[:200]}...")
             
-            # Get thinking process as complete response
-            thinking_content = ""
-            content = ""
-            
+            # Get the complete response using the single comprehensive prompt
             try:
                 llm_start = time.time()
                 # Create timeout configuration for longer AI responses
                 timeout = aiohttp.ClientTimeout(total=300)  # 5 minutes total timeout
                 async with aiohttp.ClientSession(timeout=timeout) as session:
-                    # First get thinking process as a single response
+                    # Get the complete response with DeepSeek's natural thinking + content
                     async with session.post(
                         f"{os.getenv('OLLAMA_HOST', 'http://ollama:11434')}/api/generate",
                         json={
                             "model": self.llm_model,
-                            "prompt": thinking_prompt,
+                            "prompt": full_prompt,
                             "stream": False,  # Get complete response
                         }
-                    ) as think_response:
-                        result = await think_response.json()
-                        thinking_content = result.get("response", "")
+                    ) as response:
+                        result = await response.json()
+                        full_response = result.get("response", "")
                         
-                        # Record thinking time
-                        thinking_time = time.time() - llm_start
-                        logger.debug(f"Thinking process took {thinking_time:.3f}s")
-                    
-                    # Yield the thinking result
-                    yield json.dumps({
-                        "thinking": thinking_content,
-                        "content": ""
-                    })
-                    
-                    # Get the final answer
-                    answer_start = time.time()
-                    async with session.post(
-                        f"{os.getenv('OLLAMA_HOST', 'http://ollama:11434')}/api/generate",
-                        json={
-                            "model": self.llm_model,
-                            "prompt": answer_prompt,
-                            "stream": False,  # Get complete response
-                        }
-                    ) as answer_response:
-                        result = await answer_response.json()
-                        content = result.get("response", "")
+                        # Record generation time
+                        generation_time = time.time() - llm_start
+                        logger.debug(f"Response generation took {generation_time:.3f}s")
                         
-                        # Record answer generation time
-                        answer_time = time.time() - answer_start
-                        logger.debug(f"Answer generation took {answer_time:.3f}s")
+                        # Try to split thinking and content if DeepSeek naturally provides it
+                        thinking_content = ""
+                        content = full_response
+                        
+                        # Look for thinking patterns that DeepSeek might use
+                        thinking_markers = ["<think>", "<thinking>", "Let me think", "I need to think", "My thinking:"]
+                        content_markers = ["</think>", "</thinking>", "Now,", "So,", "Therefore,", "In conclusion"]
+                        
+                        for marker in thinking_markers:
+                            if marker.lower() in full_response.lower():
+                                # Try to extract thinking section
+                                parts = full_response.lower().split(marker.lower(), 1)
+                                if len(parts) > 1:
+                                    remaining = parts[1]
+                                    # Look for content markers
+                                    for content_marker in content_markers:
+                                        if content_marker.lower() in remaining:
+                                            thinking_part, content_part = remaining.split(content_marker.lower(), 1)
+                                            thinking_content = thinking_part.strip()
+                                            content = content_part.strip()
+                                            break
+                                break
+                        
+                        # If no thinking section was found, use the full response as content
+                        if not thinking_content:
+                            content = full_response
                     
                     # Evaluate hallucination rate
                     hallucination_score = estimate_hallucination(content, context_docs)
                     logger.debug(f"Hallucination score: {hallucination_score:.3f}")
                     
-                    # Yield the complete answer
+                    # Yield the complete response with both thinking and content
                     yield json.dumps({
                         "thinking": thinking_content,
                         "content": content,
-                        "isComplete": True
+                        "isComplete": True,
+                        "style": style
                     })
                     
                 # Record top-k accuracy based on context presence

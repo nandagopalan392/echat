@@ -422,10 +422,10 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
         try:
             logger.info(f"Getting responses for prompt: {user_prompt[:50]}...")
             
-            # Get the first response with standard style
+            # Get the first response with conversational style (friendly, detailed explanations)
             response_a_chunks = []
             rag = get_rag()
-            async for chunk in rag.stream_response(user_prompt, style="standard"):
+            async for chunk in rag.stream_response(user_prompt, style="conversational"):
                 response_a_chunks.append(chunk)
             
             # Parse the final response from chunks
@@ -446,14 +446,14 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
             if not response_a_content:
                 response_a_content = "".join(response_a_chunks)
             
-            logger.info(f"Response A - Thinking: {len(response_a_thinking)} chars, Content: {len(response_a_content)} chars")
+            logger.info(f"Response A (conversational) - Thinking: {len(response_a_thinking)} chars, Content: {len(response_a_content)} chars")
             
             # Add a small delay between requests
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
-            # Get second response with conversational style
+            # Get second response with detailed/analytical style
             response_b_chunks = []
-            async for chunk in rag.stream_response(user_prompt, style="conversational"):
+            async for chunk in rag.stream_response(user_prompt, style="detailed"):
                 response_b_chunks.append(chunk)
             
             # Parse the final response from chunks
@@ -474,19 +474,19 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
             if not response_b_content:
                 response_b_content = "".join(response_b_chunks)
             
-            logger.info(f"Response B - Thinking: {len(response_b_thinking)} chars, Content: {len(response_b_content)} chars")
+            logger.info(f"Response B (detailed) - Thinking: {len(response_b_thinking)} chars, Content: {len(response_b_content)} chars")
             
             # Prepare the response options for RLHF with structured data
             response_options = [
                 {
                     "thinking": response_a_thinking,
                     "content": response_a_content,
-                    "style": "standard"
+                    "style": "conversational"
                 },
                 {
                     "thinking": response_b_thinking,
                     "content": response_b_content,
-                    "style": "conversational"
+                    "style": "detailed"
                 }
             ]
             
@@ -505,13 +505,13 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
             
             # Return a proper JSON response with structured data
             return JSONResponse(content={
-                "content": "I've generated two possible responses from different approaches. Please select the one you prefer:",
-                "full_response": "I've generated two possible responses from different approaches. Please select the one you prefer:",
+                "content": "I've generated two different responses for you to choose from: one conversational and friendly, the other detailed and analytical. Please select your preferred approach:",
+                "full_response": "I've generated two different responses for you to choose from: one conversational and friendly, the other detailed and analytical. Please select your preferred approach:",
                 "is_final": True,
                 "session_id": session_id,
                 "response_options": response_options,
                 "rlhf_enabled": True,  # Signal to frontend this is for RLHF
-                "message": "Please choose between the following responses:",
+                "message": "Choose between conversational (friendly explanations) and detailed (comprehensive analysis) responses:",
                 "thinking_included": bool(response_a_thinking or response_b_thinking)
             })
             
