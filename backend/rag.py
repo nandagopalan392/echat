@@ -384,22 +384,41 @@ class ChatPDF:
             
             context = "\n".join(doc.page_content for doc in context_docs[:3]) if context_docs else ""
             
-            # Create thinking prompt
-            thinking_prompt = f"""
-            Think about this question based on the context:
-            Context: {context}
-            Question: {query}
-            Think step by step.
-            """
-            
-            print(f"[RAG] Sending thinking prompt to DeepSeek: {thinking_prompt[:200]}...")
-            
-            # Create answer prompt
-            answer_prompt = f"""
-            Now answer the question concisely:
-            Context: {context}
-            Question: {query}
-            """
+            # Create style-specific prompts
+            if style == "conversational":
+                # Create thinking prompt with conversational style
+                thinking_prompt = f"""
+                Think about this question in a conversational way:
+                Context: {context}
+                Question: {query}
+                Consider how you would explain this to a friend. Think step by step about the key points.
+                """
+                
+                # Create answer prompt with conversational style
+                answer_prompt = f"""
+                Now answer the question in a friendly, conversational tone:
+                Context: {context}
+                Question: {query}
+                
+                Answer as if you're talking to a friend - use simple language, be engaging, and include personal touches like "I think" or "Let me explain".
+                """
+            else:  # standard style
+                # Create thinking prompt with standard style
+                thinking_prompt = f"""
+                Think about this question based on the context:
+                Context: {context}
+                Question: {query}
+                Think step by step with technical precision.
+                """
+                
+                # Create answer prompt with standard style
+                answer_prompt = f"""
+                Now answer the question professionally and concisely:
+                Context: {context}
+                Question: {query}
+                
+                Provide a clear, professional response with accurate technical details.
+                """
             
             print(f"[RAG] Will send answer prompt to DeepSeek: {answer_prompt[:200]}...")
             

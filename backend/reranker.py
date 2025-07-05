@@ -97,10 +97,10 @@ class CrossEncoderReranker:
             # Use sentence-transformers cross-encoder API
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self.ollama_base_url}/api/embeddings",
+                    f"{self.ollama_base_url}/api/embed",
                     json={
                         "model": "mxbai-embed-large",
-                        "prompt": json.dumps(pairs)
+                        "input": json.dumps(pairs)
                     },
                     timeout=30
                 ) as response:

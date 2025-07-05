@@ -8,24 +8,41 @@ const getAuthHeader = () => {
 export const api = {
     // RLHF feedback
     submitRLHFFeedback: async (sessionId, chosenIndex) => {
+        console.log('=== RLHF FEEDBACK SUBMISSION ===');
+        console.log('Session ID:', sessionId);
+        console.log('Chosen Index:', chosenIndex);
+        console.log('API Base URL:', API_BASE_URL);
+        
         try {
+            const payload = {
+                session_id: sessionId,
+                chosen_index: chosenIndex
+            };
+            
+            console.log('Payload:', payload);
+            console.log('Auth Header:', getAuthHeader());
+            
             const response = await fetch(`${API_BASE_URL}/api/chat/rlhf-feedback`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     ...getAuthHeader()
                 },
-                body: JSON.stringify({
-                    session_id: sessionId,
-                    chosen_index: chosenIndex
-                })
+                body: JSON.stringify(payload)
             });
             
+            console.log('Response status:', response.status);
+            console.log('Response ok:', response.ok);
+            
             if (!response.ok) {
-                throw new Error('Failed to submit RLHF feedback');
+                const errorText = await response.text();
+                console.error('Response error text:', errorText);
+                throw new Error(`Failed to submit RLHF feedback: ${response.status} - ${errorText}`);
             }
             
-            return await response.json();
+            const result = await response.json();
+            console.log('RLHF feedback success:', result);
+            return result;
         } catch (error) {
             console.error('RLHF feedback error:', error);
             throw error;

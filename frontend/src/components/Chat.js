@@ -685,10 +685,20 @@ const cleanSelectedResponse = (response) => {
         // Handle structured response object (new format)
         if (typeof response === 'object' && response !== null) {
             console.log("Processing structured response object");
-            // For structured responses, return the object as-is to preserve structure
-            // This will allow proper rendering with thinking/content separation
-            console.log("Returning structured object:", response);
-            return response;
+            // For structured responses, preserve the full structure with thinking and content
+            if (response.thinking && response.content) {
+                console.log("Preserving structured response with thinking and content");
+                // Format as expected by the frontend (with think tags)
+                return `<think>${response.thinking}</think>${response.content}`;
+            }
+            // If only content field, return just content
+            if (response.content) {
+                console.log("Extracting content from structured object:", response.content);
+                return response.content;
+            }
+            // If no content field, stringify the whole object as fallback
+            console.log("No content field found, using whole object");
+            return JSON.stringify(response);
         }
         
         // Handle legacy string responses
@@ -698,9 +708,17 @@ const cleanSelectedResponse = (response) => {
             if (response.startsWith('{') || response.startsWith('[')) {
                 try {
                     const parsed = JSON.parse(response);
-                    if (parsed.content || parsed.thinking) {
-                        console.log("Extracted structured object from JSON string:", parsed);
-                        return parsed;
+                    if (parsed.thinking && parsed.content) {
+                        console.log("Parsed structured response with thinking and content");
+                        return `<think>${parsed.thinking}</think>${parsed.content}`;
+                    }
+                    if (parsed.content) {
+                        console.log("Extracted content from JSON string:", parsed.content);
+                        return parsed.content;
+                    }
+                    if (parsed.thinking) {
+                        console.log("Only thinking found, using full parsed object");
+                        return JSON.stringify(parsed);
                     }
                 } catch (e) {
                     // Not valid JSON, continue with string cleaning
@@ -708,12 +726,11 @@ const cleanSelectedResponse = (response) => {
                 }
             }
             
-            // Clean any remaining JSON/SSE formatting and remove think tags
+            // Clean any remaining JSON/SSE formatting but preserve think tags
             const cleaned = response
                 .replace(/\{"type":[^}]*\}/g, '')                // Remove type markers
                 .replace(/\{"content":\s*"([^"]*)"\}/g, '$1')    // Extract content values
                 .replace(/^data:\s*/, '')                        // Remove SSE prefix
-                .replace(/<think>[\s\S]*?<\/think>/g, '')        // Remove think tags
                 .replace(/\\n/g, '\n')                           // Fix newlines
                 .replace(/\\\\/g, '\\')                          // Fix backslashes
                 .replace(/\\"/g, '"')                            // Fix quotes
@@ -945,7 +962,19 @@ const Chat = () => {
             console.log("Selected response type:", typeof selectedResponse);
             
             const optionMessage = messages.find(msg => msg.id === optionsMessageId);
-            const isRLHF = optionMessage?.rlhf_enabled;
+            console.log("FULL MESSAGE DEBUG:", optionMessage);
+            console.log("Message properties:", optionMessage ? Object.keys(optionMessage) : 'No message found');
+            console.log("Message rlhfEnabled:", optionMessage?.rlhfEnabled);
+            console.log("Message rlhf_enabled:", optionMessage?.rlhf_enabled);
+            console.log("optionsMessageId:", optionsMessageId);
+            console.log("showResponseOptions:", showResponseOptions);
+            console.log("responseOptions.length:", responseOptions.length);
+            
+            // Make isRLHF true by default since this function is only called for RLHF scenarios
+            const isRLHF = true;
+            
+            console.log("RLHF check - optionMessage:", optionMessage);
+            console.log("RLHF check - isRLHF:", isRLHF);
             
             // Process the selected response using the updated cleaning function
             const finalContent = cleanSelectedResponse(selectedResponse);
@@ -953,8 +982,8 @@ const Chat = () => {
             console.log("Final content type:", typeof finalContent);
             console.log("Original message content:", optionMessage?.content);
             
-            // Ensure finalContent is always a string
-            const safeContent = typeof finalContent === 'string' ? finalContent : JSON.stringify(finalContent);
+            // Keep the full structured content (including think tags) for proper rendering
+            const safeContent = finalContent;
             console.log("Safe content to store:", safeContent);
             
             // Update message with cleaned response
@@ -991,21 +1020,31 @@ const Chat = () => {
             
             // Handle RLHF feedback and save selected response to backend
             if (isRLHF && sessionId) {
+                console.log('=== STARTING RLHF FEEDBACK PROCESS ===');
+                console.log('Session ID:', sessionId);
+                console.log('Selected Index:', index);
+                console.log('Is RLHF:', isRLHF);
+                console.log('Safe Content:', safeContent);
+                
                 setIsProcessing(true);
                 try {
                     // Submit RLHF feedback
+                    console.log('About to call api.submitRLHFFeedback...');
                     const feedbackResponse = await api.submitRLHFFeedback(sessionId, index);
-                    console.log('RLHF feedback response:', feedbackResponse);
+                    console.log('RLHF feedback response received:', feedbackResponse);
                     
                     // Save the selected response content to the database
+                    console.log('About to call api.updateMessage...');
                     const updateResponse = await api.updateMessage(sessionId, safeContent);
-                    console.log('Message update response:', updateResponse);
+                    console.log('Message update response received:', updateResponse);
                     
                     showNotification('Thanks for your feedback!');
                 } catch (error) {
                     console.error('Error submitting RLHF feedback or updating message:', error);
                     showNotification('Failed to submit feedback', true);
                 }
+            } else {
+                console.log('RLHF feedback skipped - isRLHF:', isRLHF, 'sessionId:', sessionId);
             }
         } catch (error) {
             console.error('Error handling response selection:', error);
@@ -1120,7 +1159,12 @@ const Chat = () => {
                 );
             }
             
-            // For string content, return as-is
+            // For string content with think tags, use formatMessage to render properly
+            if (typeof content === 'string' && content.includes('<think>')) {
+                return formatMessage(content);
+            }
+            
+            // For other string content, return as-is
             return content;
         }
         
@@ -1172,7 +1216,7 @@ const Chat = () => {
           .replace(/\\"/g, '"')
           .trim();
         
-        // Apply formatMessage to handle think blocks
+        // Apply formatMessage to handle think blocks - this works for all content with think tags
         const formattedContent = formatMessage(
           cleanedContent,
           message.isInThinkBlock,
@@ -1193,8 +1237,8 @@ const Chat = () => {
     };
 
     // Improved updateMessage function to be used in handleSubmit
-    const updateMessageContent = (id, content, isStreaming, setMessages) => {
-        console.log("updateMessageContent called with:", { id, content, isStreaming });
+    const updateMessageContent = (id, content, isStreaming, setMessages, rlhfEnabled = false) => {
+        console.log("updateMessageContent called with:", { id, content, isStreaming, rlhfEnabled });
         
         // Handle different content types
         let processedContent = content;
@@ -1234,7 +1278,8 @@ const Chat = () => {
               ? { 
                   ...msg, 
                   content: processedContent,
-                  isStreaming 
+                  isStreaming,
+                  rlhfEnabled: rlhfEnabled  // Use camelCase for consistency
                 } 
               : msg
           )
@@ -1301,26 +1346,52 @@ const handleSubmit = async (e) => {
     const responseData = await response.json();
     console.log("Response data:", responseData);
     
+    // URGENT DEBUG: Add immediate debug
+    console.log("URGENT DEBUG - response_options:", responseData.response_options);
+    console.log("URGENT DEBUG - rlhf_enabled:", responseData.rlhf_enabled);
+    
     // Handle errors from the backend
     if (responseData.error) {
       throw new Error(responseData.error);
     }
     
-    // Check if we have RLHF options
-    if (responseData.response_options && responseData.response_options.length >= 2) {
-      // Format the message content without options
+    // DEBUG: Log the RLHF condition check
+    console.log("=== RLHF CONDITION DEBUG ===");
+    console.log("responseData.response_options:", responseData.response_options);
+    console.log("responseData.response_options.length:", responseData.response_options ? responseData.response_options.length : 'N/A');
+    console.log("responseData.rlhf_enabled:", responseData.rlhf_enabled);
+    console.log("Condition 1 (response_options exists):", !!responseData.response_options);
+    console.log("Condition 2 (length >= 1):", responseData.response_options && responseData.response_options.length >= 1);
+    console.log("Condition 3 (rlhf_enabled):", !!responseData.rlhf_enabled);
+    console.log("Overall condition result:", !!(responseData.response_options && responseData.response_options.length >= 1 && responseData.rlhf_enabled));
+    console.log("=========================");
+    
+    // Check if we have RLHF options to display - simplified condition
+    const hasResponseOptions = responseData.response_options && Array.isArray(responseData.response_options) && responseData.response_options.length > 0;
+    const isRlhfEnabled = responseData.rlhf_enabled === true;
+    
+    console.log("RLHF Check - hasResponseOptions:", hasResponseOptions);
+    console.log("RLHF Check - isRlhfEnabled:", isRlhfEnabled);
+    console.log("RLHF Check - should show RLHF:", hasResponseOptions && isRlhfEnabled);
+    
+    if (hasResponseOptions && isRlhfEnabled) {
+      console.log("DEBUG: Entering RLHF branch - showing options");
+      // Show the prompt message asking for user to select/review
       updateMessageContent(
         aiMessageId, 
-        responseData.content || "Please select your preferred response:", 
+        responseData.content || "Please review this response and provide feedback:", 
         false, 
-        setMessages
+        setMessages,
+        true  // Enable RLHF for this message
       );
       
       // Show RLHF options UI
+      console.log("DEBUG: Setting response options and showing RLHF UI");
       setResponseOptions(responseData.response_options);
       setOptionsMessageId(aiMessageId);
       setShowResponseOptions(true);
     } else {
+      console.log("DEBUG: Entering regular response branch - no RLHF");
       // Regular response - just use content without think tags
       // The thinking information is typically not shown for regular responses
       const displayContent = responseData.content || '';

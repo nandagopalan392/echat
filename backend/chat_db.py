@@ -247,6 +247,9 @@ class ChatDB:
 
     def get_session_messages(self, session_id):
         try:
+            # First, debug what's actually in the database
+            self.debug_session_data(session_id)
+            
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute(
@@ -258,6 +261,29 @@ class ChatDB:
                 )
                 messages = cursor.fetchall()
                 logger.debug(f"Retrieved {len(messages)} messages for session {session_id}")
+                
+                # Check if we're missing AI responses due to RLHF issue
+                user_messages = [msg for msg in messages if msg[1]]  # is_user = True
+                ai_messages = [msg for msg in messages if not msg[1]]  # is_user = False
+                
+                logger.info(f"Session {session_id}: {len(user_messages)} user messages, {len(ai_messages)} AI messages")
+                
+                # If we have user messages but no AI messages, try to recover from RLHF data
+                if len(user_messages) > len(ai_messages):
+                    logger.warning(f"Session {session_id} has missing AI responses, attempting recovery...")
+                    self.recover_missing_rlhf_responses(session_id)
+                    
+                    # Re-fetch messages after recovery attempt
+                    cursor.execute(
+                        """SELECT content, is_user, timestamp 
+                           FROM messages 
+                           WHERE session_id = ? 
+                           ORDER BY timestamp ASC, id ASC""",
+                        (session_id,)
+                    )
+                    messages = cursor.fetchall()
+                    logger.info(f"After recovery: Retrieved {len(messages)} messages for session {session_id}")
+                
                 return messages
         except Exception as e:
             logger.error(f"Get session messages error: {str(e)}")
@@ -654,3 +680,198 @@ class ChatDB:
         finally:
             duration = time.time() - start_time
             logger.debug(f"DB operation - cache_stats took {duration:.3f}s")
+
+    def get_session_messages_with_preferences(self, session_id):
+        """
+        Get session messages enhanced with preference data showing both questions and selected responses
+        """
+        try:
+            # Get the basic messages first
+            messages = self.get_session_messages(session_id)
+            logger.debug(f"Retrieved {len(messages)} basic messages for session {session_id}")
+            
+            # Initialize enhanced messages with basic format
+            enhanced_messages = []
+            for msg in messages:
+                content, is_user, timestamp = msg
+                message_data = {
+                    "content": content,
+                    "isUser": bool(is_user),
+                    "timestamp": timestamp,
+                    "hasPreference": False
+                }
+                enhanced_messages.append(message_data)
+            
+            # Try to enhance with preference data
+            try:
+                from rlhf import RLHF
+                rlhf_db = RLHF()
+                preferences = rlhf_db.get_session_preferences(session_id)
+                logger.debug(f"Retrieved {len(preferences)} preferences for session {session_id}")
+                
+                if preferences:
+                    # Create a map of preferences by chosen response content
+                    preference_map = {}
+                    for pref in preferences:
+                        if pref.get('chosen_response'):
+                            preference_map[pref['chosen_response'].strip()] = pref
+                    
+                    # Enhanced processing: match AI messages with preferences
+                    for i, message_data in enumerate(enhanced_messages):
+                        if not message_data["isUser"]:  # AI message
+                            content_key = message_data["content"].strip()
+                            if content_key in preference_map:
+                                pref_data = preference_map[content_key]
+                                message_data.update({
+                                    "hasPreference": True,
+                                    "preferenceData": {
+                                        "question": pref_data.get('question', ''),
+                                        "responseOption0": pref_data.get('response_option_0', ''),
+                                        "responseOption1": pref_data.get('response_option_1', ''),
+                                        "chosenIndex": pref_data.get('chosen_index', 0),
+                                        "chosenResponse": pref_data.get('chosen_response', '')
+                                    }
+                                })
+                                logger.debug(f"Enhanced message {i} with preference data")
+                            
+            except Exception as pref_error:
+                logger.warning(f"Could not enhance messages with preferences: {str(pref_error)}")
+                # Continue with basic messages
+            
+            logger.info(f"Returning {len(enhanced_messages)} messages for session {session_id}")
+            
+            # Debug: log the messages we're returning
+            for i, msg in enumerate(enhanced_messages):
+                logger.debug(f"Message {i+1}: isUser={msg['isUser']}, hasPreference={msg['hasPreference']}, content={msg['content'][:50]}...")
+                
+            return enhanced_messages
+            
+        except Exception as e:
+            logger.error(f"Get enhanced session messages error: {str(e)}")
+            # Ultimate fallback: return basic messages in the expected format
+            try:
+                basic_messages = self.get_session_messages(session_id)
+                return [
+                    {
+                        "content": msg[0], 
+                        "isUser": bool(msg[1]),
+                        "timestamp": msg[2] if len(msg) > 2 else None,
+                        "hasPreference": False
+                    } 
+                    for msg in basic_messages
+                ]
+            except Exception as fallback_error:
+                logger.error(f"Even fallback failed: {str(fallback_error)}")
+                return []
+
+    def debug_session_data(self, session_id):
+        """Debug method to see what's actually in the database for a session"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Check messages table
+                cursor.execute(
+                    """SELECT id, content, is_user, timestamp 
+                       FROM messages 
+                       WHERE session_id = ? 
+                       ORDER BY timestamp ASC""",
+                    (session_id,)
+                )
+                messages = cursor.fetchall()
+                logger.info(f"=== DEBUG SESSION {session_id} ===")
+                logger.info(f"Messages in messages table: {len(messages)}")
+                for i, msg in enumerate(messages):
+                    logger.info(f"  Message {i+1}: ID={msg[0]}, is_user={msg[2]}, content='{msg[1][:50]}...', timestamp={msg[3]}")
+                
+                # Check if there are any RLHF options for this session
+                try:
+                    # Import RLHF to check response options
+                    from rlhf import RLHF
+                    rlhf_db = RLHF()
+                    with sqlite3.connect(rlhf_db.db_path) as rlhf_conn:
+                        rlhf_cursor = rlhf_conn.cursor()
+                        rlhf_cursor.execute(
+                            """SELECT id, question, response_option_0, response_option_1, chosen_response, chosen_index 
+                               FROM rlhf_response_options 
+                               WHERE session_id = ?""",
+                            (session_id,)
+                        )
+                        rlhf_data = rlhf_cursor.fetchall()
+                        logger.info(f"RLHF options for session: {len(rlhf_data)}")
+                        for i, rlhf in enumerate(rlhf_data):
+                            logger.info(f"  RLHF {i+1}: ID={rlhf[0]}, chosen_index={rlhf[5]}, chosen_response='{rlhf[4][:50] if rlhf[4] else 'None'}...'")
+                except Exception as e:
+                    logger.info(f"Could not check RLHF data: {str(e)}")
+                
+                logger.info("=== END DEBUG ===")
+                return messages
+                
+        except Exception as e:
+            logger.error(f"Debug session data error: {str(e)}")
+            return []
+
+    def recover_missing_rlhf_responses(self, session_id):
+        """Recover missing AI responses from RLHF data and save them to messages table"""
+        try:
+            from rlhf import RLHF
+            rlhf_db = RLHF()
+            
+            with sqlite3.connect(rlhf_db.db_path) as rlhf_conn:
+                rlhf_cursor = rlhf_conn.cursor()
+                
+                # Get all RLHF records for this session that have chosen responses
+                rlhf_cursor.execute(
+                    """SELECT chosen_response, created_at 
+                       FROM rlhf_response_options 
+                       WHERE session_id = ? AND chosen_response IS NOT NULL
+                       ORDER BY created_at ASC""",
+                    (session_id,)
+                )
+                rlhf_responses = rlhf_cursor.fetchall()
+                
+                logger.info(f"Found {len(rlhf_responses)} chosen RLHF responses for session {session_id}")
+                
+                # Save each chosen response as an AI message
+                recovered_count = 0
+                for chosen_response, created_at in rlhf_responses:
+                    if chosen_response and chosen_response.strip():
+                        # Check if this response is already in the messages table
+                        with sqlite3.connect(self.db_path) as conn:
+                            cursor = conn.cursor()
+                            cursor.execute(
+                                """SELECT COUNT(*) FROM messages 
+                                   WHERE session_id = ? AND content = ? AND is_user = 0""",
+                                (session_id, chosen_response)
+                            )
+                            
+                            if cursor.fetchone()[0] == 0:  # Response not found in messages
+                                # Save the chosen response as an AI message
+                                # Use the RLHF creation time or current time
+                                from datetime import datetime
+                                timestamp = created_at if created_at else datetime.now()
+                                
+                                cursor.execute(
+                                    "INSERT INTO messages (session_id, content, is_user, timestamp) VALUES (?, ?, ?, ?)",
+                                    (session_id, chosen_response, False, timestamp)
+                                )
+                                conn.commit()
+                                recovered_count += 1
+                                logger.info(f"Recovered RLHF response for session {session_id}: '{chosen_response[:50]}...'")
+                            else:
+                                logger.debug(f"RLHF response already exists in messages for session {session_id}")
+                
+                if recovered_count > 0:
+                    logger.info(f"Successfully recovered {recovered_count} missing AI responses for session {session_id}")
+                    
+                    # Update session last_updated timestamp
+                    with sqlite3.connect(self.db_path) as conn:
+                        cursor = conn.cursor()
+                        cursor.execute(
+                            "UPDATE chat_sessions SET last_updated = ? WHERE id = ?",
+                            (datetime.now(), session_id)
+                        )
+                        conn.commit()
+                        
+        except Exception as e:
+            logger.error(f"Error recovering RLHF responses for session {session_id}: {str(e)}")

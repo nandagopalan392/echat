@@ -490,6 +490,19 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
                 }
             ]
             
+            # Save the response options to the RLHF database for later retrieval
+            try:
+                rlhf_db.save_response_options(
+                    session_id=session_id,
+                    question=user_prompt,
+                    response_option_0=response_a_content,
+                    response_option_1=response_b_content,
+                    username=username
+                )
+                logger.info(f"Saved RLHF response options for session {session_id}")
+            except Exception as e:
+                logger.error(f"Failed to save RLHF response options: {str(e)}")
+            
             # Return a proper JSON response with structured data
             return JSONResponse(content={
                 "content": "I've generated two possible responses from different approaches. Please select the one you prefer:",
@@ -603,18 +616,26 @@ async def get_sessions(token: str = Depends(oauth2_scheme)):
 async def get_session_messages(session_id: int, token: str = Depends(oauth2_scheme)):
     try:
         user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        logger.info(f"Fetching messages for session {session_id} by user {user['sub']}")
+        
         messages = chat_db.get_session_messages(session_id)
         
         # Ensure messages are properly ordered and formatted
+        formatted_messages = []
+        for i, msg in enumerate(messages):
+            formatted_msg = {
+                "id": f"{session_id}-{i}",  # Create a unique ID
+                "content": msg[0], 
+                "isUser": bool(msg[1]),
+                "timestamp": msg[2] if len(msg) > 2 else None
+            }
+            formatted_messages.append(formatted_msg)
+            logger.debug(f"Message {i+1}: isUser={formatted_msg['isUser']}, content='{formatted_msg['content'][:50]}...'")
+        
+        logger.info(f"Returning {len(formatted_messages)} messages for session {session_id}")
+        
         return {
-            "messages": [
-                {
-                    "content": msg[0], 
-                    "isUser": bool(msg[1]),
-                    "timestamp": msg[2] if len(msg) > 2 else None
-                } 
-                for msg in messages
-            ],
+            "messages": formatted_messages,
             "session_id": session_id
         }
     except Exception as e:
@@ -630,25 +651,84 @@ async def submit_rlhf_feedback(feedback: RLHFFeedback, token: str = Depends(oaut
         user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = user["sub"]
         
-        # Simply save the user's preference directly without regenerating responses
-        success = rlhf_db.save_preference(
+        logger.info(f"Processing RLHF feedback for session {feedback.session_id}, chosen_index: {feedback.chosen_index}")
+        
+        # First, get the response options for this session to find the chosen response
+        chosen_response_content = None
+        try:
+            with sqlite3.connect(rlhf_db.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''
+                    SELECT response_option_0, response_option_1 
+                    FROM rlhf_response_options 
+                    WHERE session_id = ? AND username = ?
+                    ORDER BY created_at DESC LIMIT 1
+                    ''',
+                    (feedback.session_id, username)
+                )
+                
+                result = cursor.fetchone()
+                if result:
+                    response_options = [result[0], result[1]]
+                    if 0 <= feedback.chosen_index < len(response_options):
+                        chosen_response_content = response_options[feedback.chosen_index]
+                        logger.info(f"Found chosen response: {chosen_response_content[:100]}...")
+                    else:
+                        logger.error(f"Invalid chosen_index {feedback.chosen_index}, defaulting to 0")
+                        chosen_response_content = response_options[0]
+                        feedback.chosen_index = 0
+                else:
+                    logger.error(f"No response options found for session {feedback.session_id}")
+        
+        except Exception as e:
+            logger.error(f"Error retrieving response options: {str(e)}")
+        
+        # Save the user's preference
+        success = rlhf_db.save_selected_response(
             session_id=feedback.session_id,
             chosen_index=feedback.chosen_index,
             user_id=username
         )
         
-        logger.info(f"RLHF preference saved for session {feedback.session_id}")
-        
         if not success:
+            logger.error(f"Failed to save RLHF preference for session {feedback.session_id}")
             raise HTTPException(status_code=500, detail="Failed to save RLHF feedback")
         
-        # Return immediately without calling Ollama
+        # CRITICAL: Save the chosen response as a regular chat message for chat history
+        if chosen_response_content:
+            try:
+                # Check if this response is already saved to avoid duplicates
+                with sqlite3.connect(chat_db.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        """SELECT COUNT(*) FROM messages 
+                           WHERE session_id = ? AND content = ? AND is_user = 0""",
+                        (feedback.session_id, chosen_response_content)
+                    )
+                    
+                    if cursor.fetchone()[0] == 0:  # Response not found, save it
+                        chat_db.save_message(feedback.session_id, chosen_response_content, False)  # False = AI message
+                        logger.info(f"✅ Successfully saved chosen RLHF response as chat message for session {feedback.session_id}")
+                    else:
+                        logger.info(f"✅ Chosen RLHF response already exists in chat history for session {feedback.session_id}")
+                        
+            except Exception as e:
+                logger.error(f"❌ Error saving chosen response as chat message: {str(e)}")
+                # This is critical - if we can't save the response, the user won't see it in history
+                raise HTTPException(status_code=500, detail="Failed to save response to chat history")
+        else:
+            logger.error(f"❌ No chosen response content to save for session {feedback.session_id}")
+            raise HTTPException(status_code=500, detail="No response content found to save")
+        
+        logger.info(f"✅ RLHF feedback processing completed successfully for session {feedback.session_id}")
+        
         return {"status": "success", "message": "Feedback received and processed"}
         
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error(f"Error processing RLHF feedback: {str(e)}")
+        logger.error(f"❌ Error processing RLHF feedback: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class MessageUpdate(BaseModel):
