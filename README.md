@@ -1,12 +1,71 @@
 # eChat - AI Chat Application
 
-A modern chat application with AI capabilities using Ollama, MLflow, and monitoring.
+A modern chat application with AI capabilities using DeepSeek R1, Ollama, and RLHF (Reinforcement Learning from Human Feedback).
+
+## System Requirements
+
+### Minimum Requirements
+- **CPU**: 4+ cores (Intel i5 or AMD Ryzen 5 equivalent)
+- **RAM**: 8GB (16GB recommended for optimal performance)
+- **Storage**: 20GB free disk space (SSD recommended)
+- **OS**: Linux (Ubuntu 20.04+), macOS, or Windows with WSL2
+
+### Recommended Configuration
+- **CPU**: 8+ cores (Intel i7-12700 or equivalent)
+- **RAM**: 16GB+ 
+- **GPU**: NVIDIA GPU with 8GB+ VRAM (RTX 3050 or better)
+- **Storage**: 50GB+ SSD space
+- **Network**: Stable internet connection for model downloads
 
 ## Prerequisites
 
-1. Docker and Docker Compose
-2. NVIDIA GPU with CUDA support (for optimal performance)
-3. NVIDIA Container Toolkit
+### Required Software
+1. **Docker** (version 20.10+ recommended)
+2. **Docker Compose** (version 2.0+ recommended)
+
+### For GPU Acceleration (Optional but Recommended)
+3. **NVIDIA GPU** with CUDA support
+4. **NVIDIA Container Toolkit** for Docker GPU access
+5. **CUDA** version 12.0+ (automatically handled by containers)
+
+### For Development (Optional)
+6. **Python** 3.10+ (for backend development)
+7. **Node.js** 18+ and npm (for frontend development)
+8. **Git** for version control
+
+## Installation Guide
+
+### 1. Install Docker and Docker Compose
+```bash
+# Ubuntu/Debian
+sudo apt update
+sudo apt install docker.io docker-compose-plugin
+
+# Enable Docker service
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+```
+
+### 2. Install NVIDIA Container Toolkit (for GPU support)
+```bash
+# Add NVIDIA package repository
+distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
+   && curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add - \
+   && curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+
+# Install nvidia-container-toolkit
+sudo apt update
+sudo apt install -y nvidia-container-toolkit
+
+# Restart Docker service
+sudo systemctl restart docker
+```
+
+### 3. Verify GPU Setup (Optional)
+```bash
+# Test NVIDIA runtime
+docker run --rm --gpus all nvidia/cuda:12.0-runtime-ubuntu20.04 nvidia-smi
+```
 
 ## Quick Start
 
@@ -21,19 +80,47 @@ cd echat
 # Start all services
 docker compose up -d
 
-# Wait for all services to initialize (about 1-2 minutes)
+# First-time setup: Wait for model downloads (5-10 minutes)
+# Monitor progress with:
+docker compose logs -f ollama
+
+# Application will be ready when you see "Ollama server is running"
 ```
+
+3. **First-time model setup**: The system will automatically download the DeepSeek R1 model (~7GB). This may take several minutes depending on your internet connection.
+
+4. **Access the application**: Open http://localhost:3000 in your browser.
 
 ## Accessing Services
 
-
 All services are configured to run on localhost:
 
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8000
-- Ollama: http://localhost:11434
-- MinIO API: http://localhost:9100
-- MinIO Console: http://localhost:9101
+- **Frontend**: http://localhost:3000 (Main chat interface)
+- **Backend API**: http://localhost:8000 (REST API)
+- **Ollama**: http://localhost:11434 (AI model server)
+- **MinIO API**: http://localhost:9100 (File storage API)
+- **MinIO Console**: http://localhost:9101 (File management UI)
+
+## Performance Expectations
+
+### Response Times (Typical)
+- **With GPU (RTX 3050+)**: 2-5 seconds per response
+- **CPU Only**: 10-30 seconds per response
+- **First Response**: Additional 30-60 seconds for model loading
+
+### Memory Usage
+- **Total System**: ~4-6GB RAM during operation
+- **GPU VRAM**: ~4-6GB for DeepSeek R1 model
+- **Disk Space**: ~15GB after initial setup
+
+## Features
+
+- 🤖 **DeepSeek R1 Integration** - Advanced reasoning AI model
+- 🧠 **RLHF Support** - Choose between different response styles
+- 📄 **Document Processing** - Upload and chat with PDFs, DOCX, etc.
+- 👥 **Multi-user Support** - User management and session tracking
+- 📊 **Real-time Monitoring** - Performance metrics and logging
+- 🔒 **Security** - JWT authentication and secure file handling
 
 ## Development
 
@@ -56,16 +143,65 @@ python main.py
 
 ## Troubleshooting
 
-1. If services fail to start, check logs:
+### Common Issues
+
+1. **Services fail to start**:
 ```bash
+# Check logs for specific errors
 docker compose logs -f
+
+# Check system resources
+docker system df
+free -h
 ```
 
-2. Reset everything and start fresh:
+2. **Slow AI responses**:
 ```bash
+# Verify GPU is being used
+docker compose exec ollama nvidia-smi
+
+# Check if models are properly loaded
+docker compose logs ollama | grep -i "model"
+```
+
+3. **Out of memory errors**:
+```bash
+# Check container memory usage
+docker stats
+
+# Reduce memory usage by stopping other applications
+# Or increase Docker memory limits in Docker Desktop
+```
+
+4. **Model download issues**:
+```bash
+# Manually pull the model
+docker compose exec ollama ollama pull deepseek-r1:latest
+
+# Check available disk space
+df -h
+```
+
+5. **Complete reset** (if all else fails):
+```bash
+# Stop and remove everything
 docker compose down -v
+
+# Remove downloaded models and data
+docker volume prune
+
+# Clean Docker system
+docker system prune -a
+
+# Start fresh
 docker compose up -d
 ```
+
+### Performance Optimization
+
+- **For CPU-only systems**: Consider using smaller models or increasing timeout values
+- **For low memory systems**: Close other applications before starting eChat
+- **For slow networks**: Use `docker compose up` (without -d) to monitor download progress
 
 ## Contribution
 
