@@ -5,6 +5,7 @@ import ChatSidebar from './ChatSidebar';
 import UserDashboard from './UserDashboard';
 import ActivityDashboard from './ActivityDashboard';  // Add this import
 import FileListDashboard from './FileListDashboard';  // Add this import
+import ModelSettings from './ModelSettings';  // Add ModelSettings import
 import echatLogo from '../assets/echat_logo.svg';
 import CircularProgress from '@mui/material/CircularProgress';
 import LoadingSpinner from './LoadingSpinner';
@@ -773,6 +774,8 @@ const Chat = () => {
     const [showResponseOptions, setShowResponseOptions] = useState(false);
     const [responseOptions, setResponseOptions] = useState([]);
     const [optionsMessageId, setOptionsMessageId] = useState(null);
+    const [showKnowledgeHub, setShowKnowledgeHub] = useState(false);
+    const [showModelSettings, setShowModelSettings] = useState(false);
 
     const roles = ['Engineer', 'Manager', 'Business Development', 'Associate'];
 
@@ -783,16 +786,37 @@ const Chat = () => {
         // eslint-disable-next-line
     }, []);
 
+    // Close Knowledge Hub dropdown when clicking outside
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (showKnowledgeHub && !event.target.closest('.knowledge-hub-container')) {
+                setShowKnowledgeHub(false);
+            }
+        };
+
+        if (showKnowledgeHub) {
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => {
+                document.removeEventListener('mousedown', handleClickOutside);
+            };
+        }
+    }, [showKnowledgeHub]);
+
     const checkAdminStatus = async () => {
+        console.log("Checking admin status...");
         try {
             const response = await api.get('/api/admin/users');
+            console.log("Admin check response:", response);
             if (response && response.users) {
+                console.log("Setting isAdmin to true");
                 setIsAdmin(true);
                 setUsers(response.users);
             } else {
+                console.log("Setting isAdmin to false - no users in response");
                 setIsAdmin(false);
             }
         } catch (error) {
+            console.log("Setting isAdmin to false - error occurred:", error);
             setIsAdmin(false);
             // Optionally show a notification or log
             console.warn('Admin check failed:', error?.message || error);
@@ -1453,45 +1477,91 @@ const handleSubmit = async (e) => {
                         </div>
                         <h1 className="text-xl font-semibold text-gray-900">eChat</h1>
                         <div className="flex items-center space-x-4">
+                            {/* Debug admin status */}
+                            {console.log("Admin status in render:", isAdmin)}
+                            
                             {/* Only show upload button for admin */}
                             {isAdmin && (
                                 <div className="relative">
-                                    <div className="flex space-x-4">
-                                        {/* File Upload Button */}
-                                        <label className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg cursor-pointer hover:bg-indigo-100">
+                                    {/* Knowledge Hub Button with Dropdown */}
+                                    <div className="relative inline-block knowledge-hub-container">
+                                        <button
+                                            onClick={() => setShowKnowledgeHub(!showKnowledgeHub)}
+                                            className="flex items-center px-4 py-2 bg-purple-50 text-purple-600 rounded-lg cursor-pointer hover:bg-purple-100 transition-colors duration-200"
+                                        >
                                             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                                             </svg>
-                                            Upload File
-                                            <input
-                                                type="file"
-                                                accept=".xlsx,.csv,.docx,.pdf"
-                                                onChange={(e) => handleFileUpload(e, false)}
-                                                className="hidden"
-                                            />
-                                        </label>
-
-                                        {/* Folder Upload Button */}
-                                        <label className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg cursor-pointer hover:bg-indigo-100">
-                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                                            Knowledge Hub
+                                            <svg className={`ml-2 h-4 w-4 transition-transform duration-200 ${showKnowledgeHub ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                                             </svg>
-                                            Upload Folder
-                                            <input
-                                                type="file"
-                                                webkitdirectory="true"
-                                                directory="true"
-                                                multiple
-                                                onChange={(e) => handleFileUpload(e, true)}
-                                                className="hidden"
-                                            />
-                                        </label>
+                                        </button>
+                                        
+                                        {/* Dropdown Menu */}
+                                        {showKnowledgeHub && (
+                                            <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-50 border border-gray-200">
+                                                <div className="py-1">
+                                                    {/* Upload Files Option */}
+                                                    <label className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                                        </svg>
+                                                        Upload Files
+                                                        <input
+                                                            type="file"
+                                                            accept=".xlsx,.csv,.docx,.pdf"
+                                                            multiple
+                                                            onChange={(e) => {
+                                                                handleFileUpload(e, false);
+                                                                setShowKnowledgeHub(false);
+                                                            }}
+                                                            className="hidden"
+                                                        />
+                                                    </label>
+                                                    
+                                                    {/* Upload Folder Option */}
+                                                    <label className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                                                        </svg>
+                                                        Upload Folder
+                                                        <input
+                                                            type="file"
+                                                            webkitdirectory="true"
+                                                            directory="true"
+                                                            multiple
+                                                            onChange={(e) => {
+                                                                handleFileUpload(e, true);
+                                                                setShowKnowledgeHub(false);
+                                                            }}
+                                                            className="hidden"
+                                                        />
+                                                    </label>
+                                                    
+                                                    {/* View Files Option */}
+                                                    <button
+                                                        onClick={() => {
+                                                            setShowFileList(true);
+                                                            setShowKnowledgeHub(false);
+                                                        }}
+                                                        className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                                        </svg>
+                                                        View Knowledge Base
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                     
                                     {uploadStatus && (
                                         <div className={`absolute top-full left-0 right-0 mt-1 px-2 py-1 text-sm text-center rounded ${
                                             uploadStatus.isError ? 'bg-red-500' : 'bg-green-500'
-                                        } text-white`}>
+                                        } text-white z-40`}>
                                             {uploadStatus.message}
                                         </div>
                                     )}
@@ -1521,14 +1591,17 @@ const handleSubmit = async (e) => {
                                         </svg>
                                         Manage Users
                                     </button>
+                                    
+                                    {/* Model Settings Button */}
                                     <button
-                                        onClick={() => setShowFileList(true)}
-                                        className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100"
+                                        onClick={() => setShowModelSettings(true)}
+                                        className="flex items-center px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors duration-200"
                                     >
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                                         </svg>
-                                        View Files
+                                        Model Settings
                                     </button>
                                 </>
                             ) : (
@@ -1692,6 +1765,22 @@ const handleSubmit = async (e) => {
             {/* Show UserDashboard as modal only when a user is selected from the list */}
             {selectedUsername && (
                 <UserDashboard username={selectedUsername} onClose={() => setSelectedUsername(null)} />
+            )}
+            {/* Model Settings Modal */}
+            {showModelSettings && (
+                <ModelSettings 
+                    isOpen={showModelSettings}
+                    onClose={() => setShowModelSettings(false)}
+                    onSave={(settings) => {
+                        console.log('Model settings saved:', settings);
+                        // Optionally show a success notification
+                        setNotification({
+                            message: 'Model settings saved successfully!',
+                            type: 'success'
+                        });
+                        setTimeout(() => setNotification(null), 3000);
+                    }}
+                />
             )}
         </div>
     );

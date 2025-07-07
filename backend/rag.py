@@ -81,6 +81,18 @@ class ChatPDF:
     """A class for handling PDF ingestion and question answering using RAG."""
 
     def __init__(self, llm_model: str = "deepseek-r1:latest", embedding_model: str = "mxbai-embed-large"):
+        # Try to load model settings from config file first
+        try:
+            config_path = "model_settings.json"
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    settings = json.load(f)
+                    llm_model = settings.get('llm', llm_model)
+                    embedding_model = settings.get('embedding', embedding_model)
+                    logger.info(f"Loaded model settings from config: LLM={llm_model}, Embedding={embedding_model}")
+        except Exception as e:
+            logger.warning(f"Could not load model settings from config: {e}")
+        
         # Initialize base attributes
         self.llm_model = llm_model
         self.embedding_model = embedding_model

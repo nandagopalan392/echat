@@ -24,6 +24,8 @@ from contextlib import contextmanager
 import shutil
 from pathlib import Path
 import random
+import requests
+import requests
 
 app = FastAPI(
     title="Chat API",
@@ -328,6 +330,17 @@ async def check_if_admin(token: str = Depends(oauth2_scheme)):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Admin access required"
             )
+        return user
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+
+# Add user authentication function
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return user
     except Exception as e:
         raise HTTPException(
@@ -953,6 +966,115 @@ async def get_rlhf_data(limit: int = 100, admin: dict = Depends(check_if_admin))
     except Exception as e:
         logger.error(f"Error getting RLHF data: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Model settings endpoints
+@app.get("/api/models/available")
+async def get_available_models(current_user: dict = Depends(get_current_user)):
+    """Get available models from Ollama"""
+    try:
+        import requests
+        
+        # Get models from Ollama API
+        ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+        response = requests.get(f"{ollama_url}/api/tags")
+        
+        if response.status_code == 200:
+            ollama_data = response.json()
+            models = []
+            
+            for model in ollama_data.get('models', []):
+                models.append({
+                    'name': model.get('name', ''),
+                    'size': model.get('size', 0),
+                    'modified_at': model.get('modified_at', ''),
+                    'details': model.get('details', {})
+                })
+            
+            logger.info(f"Found {len(models)} available models from Ollama")
+            return {"models": models}
+        else:
+            logger.error(f"Failed to fetch models from Ollama: {response.status_code}")
+            return {"models": []}
+            
+    except Exception as e:
+        logger.error(f"Error fetching available models: {str(e)}")
+        # Return some default models if Ollama is not accessible
+        default_models = [
+            {"name": "deepseek-r1:latest", "size": "Built-in", "details": {}},
+            {"name": "mxbai-embed-large", "size": "Built-in", "details": {}},
+            {"name": "BAAI/bge-reranker-large", "size": "Built-in", "details": {}}
+        ]
+        return {"models": default_models}
+
+@app.get("/api/models/current")
+async def get_current_model_settings(current_user: dict = Depends(get_current_user)):
+    """Get current model settings"""
+    try:
+        # Get current model settings from RAG instance
+        rag = get_rag()
+        
+        # Get reranker model from reranker module
+        from reranker import get_current_reranker_model
+        current_reranker = get_current_reranker_model()
+        
+        settings = {
+            "llm": rag.llm_model,
+            "embedding": rag.embedding_model,
+            "reranker": current_reranker
+        }
+        
+        logger.info(f"Current model settings: {settings}")
+        return settings
+        
+    except Exception as e:
+        logger.error(f"Error getting current model settings: {str(e)}")
+        # Return default settings
+        return {
+            "llm": "deepseek-r1:latest",
+            "embedding": "mxbai-embed-large", 
+            "reranker": "BAAI/bge-reranker-large"
+        }
+
+class ModelSettings(BaseModel):
+    llm: str
+    embedding: str
+    reranker: str
+
+@app.post("/api/models/settings")
+async def save_model_settings(settings: ModelSettings, current_user: dict = Depends(get_current_user)):
+    """Save model settings"""
+    try:
+        logger.info(f"Saving model settings: {settings}")
+        
+        # Update RAG instance with new models
+        rag = get_rag()
+        rag.llm_model = settings.llm
+        rag.embedding_model = settings.embedding
+        
+        # Update reranker model
+        from reranker import set_reranker_model
+        set_reranker_model(settings.reranker)
+        
+        # Reset models loaded flag to force reload with new settings
+        rag.models_loaded = False
+        rag.model = None
+        rag.embeddings = None
+        
+        # Save settings to a config file for persistence
+        config_path = "model_settings.json"
+        with open(config_path, 'w') as f:
+            json.dump({
+                "llm": settings.llm,
+                "embedding": settings.embedding,
+                "reranker": settings.reranker
+            }, f, indent=2)
+        
+        logger.info(f"Model settings saved successfully to {config_path}")
+        return {"success": True, "message": "Model settings saved successfully"}
+        
+    except Exception as e:
+        logger.error(f"Error saving model settings: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to save model settings: {str(e)}")
 
 @app.get("/")
 async def root():
