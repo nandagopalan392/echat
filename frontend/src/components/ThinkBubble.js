@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import MarkdownRenderer from './MarkdownRenderer';
 
 const ThinkBubble = ({ content, isStreaming = false }) => {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -19,11 +20,11 @@ const ThinkBubble = ({ content, isStreaming = false }) => {
         <span className="font-medium text-indigo-600">Thinking Process</span>
       </div>
       
-      <div className="whitespace-pre-wrap text-gray-700">
-        {displayContent}
+      <div className="text-gray-700">
+        <MarkdownRenderer content={displayContent} className="think-bubble-content" />
         {isStreaming && <span className="ml-1 animate-pulse">▎</span>}
       </div>
-      
+
       {safeContent.length > 200 && (
         <button
           onClick={() => setIsExpanded(!isExpanded)}

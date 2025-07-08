@@ -1,4 +1,5 @@
 import React from 'react';
+import MarkdownRenderer from './MarkdownRenderer';
 
 const ResponseOptions = ({ options, onSelect }) => {
   // Helper function to safely convert any value to string
@@ -34,12 +35,12 @@ const ResponseOptions = ({ options, onSelect }) => {
           {hasThinking && (
             <div className="text-sm text-gray-600 bg-gray-50 p-3 rounded-lg border-l-4 border-blue-300">
               <div className="font-semibold text-blue-700 mb-1">Thinking Process:</div>
-              <div className="whitespace-pre-wrap">{safeString(option.thinking)}</div>
+              <MarkdownRenderer content={safeString(option.thinking)} className="text-sm" />
             </div>
           )}
           {hasContent && (
             <div className="text-gray-800">
-              <div className="whitespace-pre-wrap break-words">{safeString(option.content)}</div>
+              <MarkdownRenderer content={safeString(option.content)} />
             </div>
           )}
           {hasStyle && (
@@ -53,9 +54,7 @@ const ResponseOptions = ({ options, onSelect }) => {
     
     // Handle legacy string options
     return (
-      <div className="whitespace-pre-wrap break-words">
-        {safeString(option)}
-      </div>
+      <MarkdownRenderer content={safeString(option)} />
     );
   };
 

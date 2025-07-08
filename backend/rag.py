@@ -136,33 +136,15 @@ class ChatPDF:
         # Initialize models with retries
         self.ensure_models_loaded()
         
-        # Try to load existing vector store
-        try:
-            if os.path.exists(self.chroma_path):
-                # Use PersistentClient with Python 3.10+ which supports the required type annotations
-                settings = Settings(
-                    anonymized_telemetry=False,
-                    allow_reset=True
-                )
-                client = chromadb.PersistentClient(
-                    path=self.chroma_path,
-                    settings=settings
-                )
-                self.vector_store = Chroma(
-                    client=client,
-                    embedding_function=self.embeddings,
-                )
-                logger.info(f"Loaded existing vector store from {self.chroma_path}")
-                
-                # Initialize retriever immediately
-                self.retriever = self.vector_store.as_retriever(
-                    search_type="similarity",
-                    search_kwargs={"k": 3}
-                )
-        except Exception as e:
-            logger.warning(f"Could not load existing vector store: {str(e)}")
-            self.vector_store = None
-            self.retriever = None
+        # Try to load existing vector store with embedding-specific collection
+        self._initialize_vector_store()
+
+    def _get_collection_name(self):
+        """Get collection name based on current embedding model"""
+        # Create a collection name based on the embedding model
+        # Replace problematic characters with underscores
+        safe_model_name = self.embedding_model.replace(":", "_").replace("-", "_").replace("/", "_")
+        return f"embeddings_{safe_model_name}"
 
     def _ensure_chroma_dir(self):
         """Ensure Chroma directory exists with proper permissions"""
@@ -176,26 +158,191 @@ class ChatPDF:
             logger.error(f"Error creating Chroma directory: {str(e)}")
             raise
 
-    # Commented out Ollama model pulling - will be re-enabled later
+    def _initialize_vector_store(self):
+        """Initialize vector store with existing data if available"""
+        try:
+            if not self.embeddings:
+                logger.warning("Embeddings not loaded, skipping vector store initialization")
+                return
+                
+            # Create settings for ChromaDB client
+            settings = Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
+            
+            # Create client and get collection name
+            client = chromadb.PersistentClient(
+                path=self.chroma_path,
+                settings=settings
+            )
+            collection_name = self._get_collection_name()
+            
+            try:
+                # Try to load existing collection
+                existing_collection = client.get_collection(collection_name)
+                logger.info(f"Found existing collection '{collection_name}' with {existing_collection.count()} documents")
+                
+                # Initialize vector store with existing collection
+                self.vector_store = Chroma(
+                    client=client,
+                    collection_name=collection_name,
+                    embedding_function=self.embeddings,
+                )
+                
+                # Initialize retriever if vector store has data
+                if existing_collection.count() > 0:
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    logger.info("Initialized retriever with existing data")
+                else:
+                    logger.info("Collection exists but is empty")
+                    
+            except Exception as e:
+                # Collection doesn't exist, that's fine - it will be created when needed
+                logger.info(f"No existing collection '{collection_name}' found: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"Error initializing vector store: {str(e)}")
+            # Don't raise the error - let the system continue without existing data
+
+    def _migrate_or_recreate_vector_store(self):
+        """Migrate or recreate vector store when embedding model changes"""
+        try:
+            logger.info("Migrating or recreating vector store")
+            
+            # Reset current vector store and retriever
+            self.vector_store = None
+            self.retriever = None
+            
+            # Get new collection name
+            collection_name = self._get_collection_name()
+            
+            # Create settings for ChromaDB client
+            settings = Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
+            
+            # Create client
+            client = chromadb.PersistentClient(
+                path=self.chroma_path,
+                settings=settings
+            )
+            
+            try:
+                # Try to delete old collection if it exists with different embedding
+                existing_collections = client.list_collections()
+                for collection in existing_collections:
+                    if collection.name != collection_name:
+                        try:
+                            client.delete_collection(collection.name)
+                            logger.info(f"Deleted old collection: {collection.name}")
+                        except Exception as e:
+                            logger.warning(f"Could not delete collection {collection.name}: {str(e)}")
+            except Exception as e:
+                logger.warning(f"Error cleaning up old collections: {str(e)}")
+            
+            # Create new vector store with current embedding model
+            if self.embeddings:
+                self.vector_store = Chroma(
+                    client=client,
+                    collection_name=collection_name,
+                    embedding_function=self.embeddings,
+                )
+                logger.info(f"Created new vector store with collection '{collection_name}'")
+            else:
+                logger.error("Cannot create vector store: embeddings not loaded")
+                
+        except Exception as e:
+            logger.error(f"Error migrating vector store: {str(e)}")
+            raise
+
     async def pull_models(self):
         """Pull required models if not available"""
         try:
             import httpx
-            async with httpx.AsyncClient() as client:
-                # Pull embedding model first
-                await client.post(
-                    f"{os.getenv('OLLAMA_HOST', 'http://ollama:11434')}/api/pull",
-                    json={"name": self.embedding_model},
-                    timeout=600  # Increase timeout for large model
-                )
+            ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+            
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                # Pull embedding model first (usually smaller)
+                logger.info(f"Pulling embedding model: {self.embedding_model}")
+                try:
+                    response = await client.post(
+                        f"{ollama_host}/api/pull",
+                        json={"name": self.embedding_model},
+                        timeout=600.0  # 10 minutes for large models
+                    )
+                    if response.status_code == 200:
+                        logger.info(f"Successfully pulled embedding model: {self.embedding_model}")
+                    else:
+                        logger.warning(f"Failed to pull embedding model: {response.status_code}")
+                except Exception as e:
+                    logger.error(f"Error pulling embedding model: {str(e)}")
+                    
                 # Pull LLM model
-                await client.post(
-                    f"{os.getenv('OLLAMA_HOST', 'http://ollama:11434')}/api/pull",
-                    json={"name": self.llm_model}
-                )
-                logger.info(f"Successfully pulled models: {self.embedding_model, self.llm_model}")
+                logger.info(f"Pulling LLM model: {self.llm_model}")
+                try:
+                    response = await client.post(
+                        f"{ollama_host}/api/pull",
+                        json={"name": self.llm_model},
+                        timeout=600.0  # 10 minutes for large models
+                    )
+                    if response.status_code == 200:
+                        logger.info(f"Successfully pulled LLM model: {self.llm_model}")
+                    else:
+                        logger.warning(f"Failed to pull LLM model: {response.status_code}")
+                except Exception as e:
+                    logger.error(f"Error pulling LLM model: {str(e)}")
+                    
+                logger.info(f"Model pulling completed")
+                
         except Exception as e:
             logger.error(f"Error pulling models: {str(e)}")
+            raise
+
+    def update_models(self, llm_model: str, embedding_model: str):
+        """Update models and reload them, handling embedding dimension changes"""
+        try:
+            logger.info(f"Updating models - LLM: {llm_model}, Embedding: {embedding_model}")
+            
+            # Check if embedding model is changing
+            embedding_changed = self.embedding_model != embedding_model
+            
+            # Update model names
+            self.llm_model = llm_model
+            self.embedding_model = embedding_model
+            
+            # Reset models to force reload
+            self.models_loaded = False
+            self.model = None
+            self.embeddings = None
+            
+            # Force reload with new models
+            self.ensure_models_loaded()
+            
+            # Handle vector store migration if embedding model changed
+            if embedding_changed:
+                logger.info("Embedding model changed, migrating vector store")
+                self._migrate_or_recreate_vector_store()
+            elif self.vector_store and self.embeddings:
+                # If only LLM changed, just reinitialize retriever
+                try:
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    logger.info("Vector store retriever updated")
+                except Exception as e:
+                    logger.warning(f"Could not update vector store retriever: {str(e)}")
+            
+            logger.info("Models updated successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating models: {str(e)}")
             raise
 
     def ensure_models_loaded(self, max_retries=3):
@@ -294,10 +441,10 @@ class ChatPDF:
             # Clean metadata
             chunks = filter_complex_metadata(chunks)
 
-            # Create or update vector store
+            # Create or update vector store with embedding-specific collection
             try:
                 if not self.vector_store:
-                    logger.debug("Creating new vector store")
+                    logger.debug("Creating new vector store with embedding-specific collection")
                     # Use PersistentClient with Python 3.10+ which supports the required type annotations
                     settings = Settings(
                         anonymized_telemetry=False,
@@ -307,14 +454,28 @@ class ChatPDF:
                         path=self.chroma_path,
                         settings=settings
                     )
+                    
+                    # Use embedding-specific collection name
+                    collection_name = self._get_collection_name()
+                    
                     self.vector_store = Chroma(
                         client=client,
+                        collection_name=collection_name,
                         embedding_function=self.embeddings,
                     )
-                    self.vector_store.add_documents(chunks)
-                else:
-                    logger.debug("Adding documents to existing vector store")
-                    self.vector_store.add_documents(chunks)
+                    logger.info(f"Created new vector store with collection '{collection_name}'")
+                
+                # Add documents to vector store
+                logger.debug("Adding documents to vector store")
+                self.vector_store.add_documents(chunks)
+                
+                # Initialize or update retriever
+                if not self.retriever:
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    logger.debug("Initialized retriever")
                 
                 # No need to call persist() with PersistentClient - it auto-persists
                 logger.info(f"Successfully processed PDF: {pdf_file_path}")
@@ -322,6 +483,26 @@ class ChatPDF:
                 
             except Exception as e:
                 logger.error(f"Vector store operation failed: {str(e)}")
+                # Check if this is a dimension mismatch error
+                if "dimension" in str(e).lower():
+                    logger.info("Dimension mismatch detected, attempting to migrate vector store")
+                    try:
+                        # Force recreation of vector store
+                        self._migrate_or_recreate_vector_store()
+                        
+                        # Retry ingestion with new vector store
+                        if self.vector_store:
+                            self.vector_store.add_documents(chunks)
+                            if not self.retriever:
+                                self.retriever = self.vector_store.as_retriever(
+                                    search_type="similarity",
+                                    search_kwargs={"k": 3}
+                                )
+                            logger.info(f"Successfully processed PDF after migration: {pdf_file_path}")
+                            return True
+                    except Exception as migration_error:
+                        logger.error(f"Vector store migration failed: {str(migration_error)}")
+                        raise
                 raise
 
         except Exception as e:
@@ -872,6 +1053,91 @@ class ChatPDF:
             logger.debug("Updated monitoring metrics")
         except Exception as e:
             logger.error(f"Error updating monitoring metrics: {str(e)}")
+    
+    def list_available_collections(self):
+        """List all available collections in the vector database"""
+        try:
+            if not os.path.exists(self.chroma_path):
+                return []
+                
+            settings = Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
+            client = chromadb.PersistentClient(
+                path=self.chroma_path,
+                settings=settings
+            )
+            
+            collections = client.list_collections()
+            collection_info = []
+            
+            for collection in collections:
+                try:
+                    count = collection.count()
+                    collection_info.append({
+                        'name': collection.name,
+                        'count': count,
+                        'is_current': collection.name == self._get_collection_name()
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not get info for collection {collection.name}: {str(e)}")
+                    
+            return collection_info
+            
+        except Exception as e:
+            logger.error(f"Error listing collections: {str(e)}")
+            return []
+
+    def get_vector_store_stats(self):
+        """Get comprehensive statistics about the vector store"""
+        try:
+            stats = {
+                "current_embedding_model": self.embedding_model,
+                "current_collection": self._get_collection_name(),
+                "vector_count": 0,
+                "collections": self.list_available_collections(),
+                "status": "ready" if self.vector_store else "not_initialized"
+            }
+            
+            if self.vector_store:
+                try:
+                    # Try different ways to get collection size depending on Chroma version
+                    if hasattr(self.vector_store, '_collection') and hasattr(self.vector_store._collection, 'count'):
+                        stats["vector_count"] = self.vector_store._collection.count()
+                    else:
+                        # Fallback method
+                        try:
+                            # Try to get collection via client
+                            settings = Settings(
+                                anonymized_telemetry=False,
+                                allow_reset=True
+                            )
+                            client = chromadb.PersistentClient(
+                                path=self.chroma_path,
+                                settings=settings
+                            )
+                            collection = client.get_collection(self._get_collection_name())
+                            stats["vector_count"] = collection.count()
+                        except Exception:
+                            stats["vector_count"] = "unknown"
+                except Exception as e:
+                    logger.warning(f"Could not get vector count: {str(e)}")
+                    stats["vector_count"] = "error"
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Error getting vector store stats: {str(e)}")
+            return {
+                "current_embedding_model": self.embedding_model,
+                "current_collection": self._get_collection_name(),
+                "vector_count": "error",
+                "collections": [],
+                "status": "error",
+                "error": str(e)
+            }
+        
 
 # Add a singleton instance to be used throughout the application
 _chatpdf_instance = None

@@ -25,7 +25,6 @@ import shutil
 from pathlib import Path
 import random
 import requests
-import requests
 
 app = FastAPI(
     title="Chat API",
@@ -970,41 +969,97 @@ async def get_rlhf_data(limit: int = 100, admin: dict = Depends(check_if_admin))
 # Model settings endpoints
 @app.get("/api/models/available")
 async def get_available_models(current_user: dict = Depends(get_current_user)):
-    """Get available models from Ollama"""
+    """Get available models from Ollama API and Ollama library"""
     try:
-        import requests
+        from ollama_scraper import get_available_ollama_models
         
-        # Get models from Ollama API
+        # Get models from local Ollama API (installed models)
+        local_models = []
         ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-        response = requests.get(f"{ollama_url}/api/tags")
         
-        if response.status_code == 200:
-            ollama_data = response.json()
-            models = []
-            
-            for model in ollama_data.get('models', []):
-                models.append({
-                    'name': model.get('name', ''),
-                    'size': model.get('size', 0),
-                    'modified_at': model.get('modified_at', ''),
-                    'details': model.get('details', {})
-                })
-            
-            logger.info(f"Found {len(models)} available models from Ollama")
-            return {"models": models}
-        else:
-            logger.error(f"Failed to fetch models from Ollama: {response.status_code}")
-            return {"models": []}
+        try:
+            response = requests.get(f"{ollama_url}/api/tags", timeout=10)
+            if response.status_code == 200:
+                ollama_data = response.json()
+                for model in ollama_data.get('models', []):
+                    local_models.append({
+                        'name': model.get('name', ''),
+                        'size': model.get('size', 0),
+                        'modified_at': model.get('modified_at', ''),
+                        'details': model.get('details', {}),
+                        'source': 'local',
+                        'category': _categorize_model_name(model.get('name', ''))
+                    })
+                logger.info(f"Found {len(local_models)} local models from Ollama")
+        except Exception as e:
+            logger.warning(f"Could not fetch local Ollama models: {e}")
+        
+        # Get models from Ollama library (available for download)
+        library_models = []
+        try:
+            library_models = get_available_ollama_models()
+            # Ensure all models are dictionaries and add source
+            processed_library_models = []
+            for model in library_models:
+                if isinstance(model, dict):
+                    model['source'] = 'library'
+                    processed_library_models.append(model)
+                elif isinstance(model, str):
+                    # Handle case where model is just a string name
+                    processed_library_models.append({
+                        'name': model,
+                        'source': 'library',
+                        'category': _categorize_model_name(model)
+                    })
+            library_models = processed_library_models
+            logger.info(f"Found {len(library_models)} models from Ollama library")
+        except Exception as e:
+            logger.warning(f"Could not fetch Ollama library models: {e}")
+        
+        # Combine and deduplicate models
+        all_models = local_models + library_models
+        
+        # Remove duplicates (prefer local over library)
+        seen_names = set()
+        unique_models = []
+        
+        # First add local models
+        for model in local_models:
+            if model['name'] not in seen_names:
+                unique_models.append(model)
+                seen_names.add(model['name'])
+        
+        # Then add library models that aren't already local
+        for model in library_models:
+            if model['name'] not in seen_names:
+                unique_models.append(model)
+                seen_names.add(model['name'])
+        
+        logger.info(f"Returning {len(unique_models)} total models ({len(local_models)} local, {len(library_models)} library)")
+        return {"models": unique_models}
             
     except Exception as e:
         logger.error(f"Error fetching available models: {str(e)}")
-        # Return some default models if Ollama is not accessible
+        # Return some default models if everything fails
         default_models = [
-            {"name": "deepseek-r1:latest", "size": "Built-in", "details": {}},
-            {"name": "mxbai-embed-large", "size": "Built-in", "details": {}},
-            {"name": "BAAI/bge-reranker-large", "size": "Built-in", "details": {}}
+            {"name": "deepseek-r1:latest", "size": "Built-in", "details": {}, "source": "default", "category": "llm"},
+            {"name": "mxbai-embed-large", "size": "Built-in", "details": {}, "source": "default", "category": "embedding"}
         ]
         return {"models": default_models}
+
+def _categorize_model_name(name: str) -> str:
+    """Categorize model based on name"""
+    if not name:
+        return 'other'
+    
+    name_lower = name.lower()
+    
+    if any(keyword in name_lower for keyword in ['embed', 'embedding', 'bge', 'nomic']):
+        return 'embedding'
+    elif any(keyword in name_lower for keyword in ['llama', 'mistral', 'phi', 'gemma', 'qwen', 'deepseek', 'codellama']):
+        return 'llm'
+    else:
+        return 'other'
 
 @app.get("/api/models/current")
 async def get_current_model_settings(current_user: dict = Depends(get_current_user)):
@@ -1013,14 +1068,9 @@ async def get_current_model_settings(current_user: dict = Depends(get_current_us
         # Get current model settings from RAG instance
         rag = get_rag()
         
-        # Get reranker model from reranker module
-        from reranker import get_current_reranker_model
-        current_reranker = get_current_reranker_model()
-        
         settings = {
             "llm": rag.llm_model,
-            "embedding": rag.embedding_model,
-            "reranker": current_reranker
+            "embedding": rag.embedding_model
         }
         
         logger.info(f"Current model settings: {settings}")
@@ -1031,51 +1081,158 @@ async def get_current_model_settings(current_user: dict = Depends(get_current_us
         # Return default settings
         return {
             "llm": "deepseek-r1:latest",
-            "embedding": "mxbai-embed-large", 
-            "reranker": "BAAI/bge-reranker-large"
+            "embedding": "mxbai-embed-large"
         }
 
 class ModelSettings(BaseModel):
     llm: str
     embedding: str
-    reranker: str
 
 @app.post("/api/models/settings")
 async def save_model_settings(settings: ModelSettings, current_user: dict = Depends(get_current_user)):
-    """Save model settings"""
+    """Save model settings and download models if needed"""
     try:
         logger.info(f"Saving model settings: {settings}")
         
+        # Download models if they don't exist locally
+        await download_models_if_needed(settings.llm, settings.embedding)
+        
         # Update RAG instance with new models
         rag = get_rag()
-        rag.llm_model = settings.llm
-        rag.embedding_model = settings.embedding
-        
-        # Update reranker model
-        from reranker import set_reranker_model
-        set_reranker_model(settings.reranker)
-        
-        # Reset models loaded flag to force reload with new settings
-        rag.models_loaded = False
-        rag.model = None
-        rag.embeddings = None
+        rag.update_models(settings.llm, settings.embedding)
         
         # Save settings to a config file for persistence
         config_path = "model_settings.json"
         with open(config_path, 'w') as f:
             json.dump({
                 "llm": settings.llm,
-                "embedding": settings.embedding,
-                "reranker": settings.reranker
+                "embedding": settings.embedding
             }, f, indent=2)
         
         logger.info(f"Model settings saved successfully to {config_path}")
-        return {"success": True, "message": "Model settings saved successfully"}
+        return {"success": True, "message": "Model settings saved and models updated successfully"}
         
     except Exception as e:
         logger.error(f"Error saving model settings: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to save model settings: {str(e)}")
 
+async def download_models_if_needed(llm_model: str, embedding_model: str):
+    """Download models to Ollama if they don't exist locally"""
+    try:
+        import httpx
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            # Check if LLM model exists
+            try:
+                response = await client.get(f"{ollama_host}/api/tags")
+                if response.status_code == 200:
+                    data = response.json()
+                    existing_models = [model['name'] for model in data.get('models', [])]
+                    
+                    # Check if LLM model needs to be downloaded
+                    if llm_model not in existing_models:
+                        logger.info(f"Downloading LLM model: {llm_model}")
+                        await client.post(
+                            f"{ollama_host}/api/pull",
+                            json={"name": llm_model},
+                            timeout=600.0  # 10 minutes for large models
+                        )
+                        logger.info(f"Successfully downloaded LLM model: {llm_model}")
+                    else:
+                        logger.info(f"LLM model {llm_model} already exists locally")
+                    
+                    # Check if embedding model needs to be downloaded
+                    if embedding_model not in existing_models:
+                        logger.info(f"Downloading embedding model: {embedding_model}")
+                        await client.post(
+                            f"{ollama_host}/api/pull",
+                            json={"name": embedding_model},
+                            timeout=600.0  # 10 minutes for large models
+                        )
+                        logger.info(f"Successfully downloaded embedding model: {embedding_model}")
+                    else:
+                        logger.info(f"Embedding model {embedding_model} already exists locally")
+                        
+            except Exception as e:
+                logger.error(f"Error checking/downloading models: {str(e)}")
+                # Try to download anyway
+                logger.info(f"Attempting to download models anyway...")
+                try:
+                    await client.post(
+                        f"{ollama_host}/api/pull",
+                        json={"name": llm_model},
+                        timeout=600.0
+                    )
+                    await client.post(
+                        f"{ollama_host}/api/pull",
+                        json={"name": embedding_model},
+                        timeout=600.0
+                    )
+                    logger.info("Model downloads completed")
+                except Exception as download_error:
+                    logger.error(f"Failed to download models: {str(download_error)}")
+                    raise
+                    
+    except Exception as e:
+        logger.error(f"Error in download_models_if_needed: {str(e)}")
+        raise
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to Chat API"}
+
+@app.get("/api/models/status")
+async def get_model_status(current_user: dict = Depends(get_current_user)):
+    """Get status of models in Ollama"""
+    try:
+        import httpx
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{ollama_host}/api/tags")
+            if response.status_code == 200:
+                data = response.json()
+                models = data.get('models', [])
+                
+                # Get current settings
+                rag = get_rag()
+                current_llm = rag.llm_model
+                current_embedding = rag.embedding_model
+                
+                # Check if current models are available
+                model_names = [model['name'] for model in models]
+                llm_available = current_llm in model_names
+                embedding_available = current_embedding in model_names
+                
+                return {
+                    "success": True,
+                    "current_llm": current_llm,
+                    "current_embedding": current_embedding,
+                    "llm_available": llm_available,
+                    "embedding_available": embedding_available,
+                    "available_models": model_names,
+                    "total_models": len(models)
+                }
+            else:
+                raise HTTPException(status_code=500, detail="Could not connect to Ollama")
+                
+    except Exception as e:
+        logger.error(f"Error getting model status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get model status: {str(e)}")
+
+@app.get("/api/vector-store/stats")
+async def get_vector_store_stats(current_user: dict = Depends(get_current_user)):
+    """Get detailed statistics about the vector store and collections"""
+    try:
+        rag = get_rag()
+        stats = rag.get_vector_store_stats()
+        
+        return {
+            "success": True,
+            "stats": stats
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting vector store stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get vector store stats: {str(e)}")

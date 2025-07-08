@@ -11,6 +11,7 @@ tokenizers>=0.14.0
 torch
 transformers
 sentence-transformers
+beautifulsoup4>=4.12.0
 
 # Document Processing
 python-magic
@@ -49,6 +50,10 @@ python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.4
 SQLAlchemy>=2.0.0
 asyncio>=3.4.3
+
+# Web scraping
+beautifulsoup4>=4.11.0
+lxml>=4.9.0
 
 # UI
 streamlit

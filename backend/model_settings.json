@@ -1,5 +1,4 @@
 {
-  "llm": "deepseek-r1:latest",
-  "embedding": "mxbai-embed-large:latest",
-  "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  "llm": "gemma3n:e2b",
+  "embedding": "granite-embedding"
 }

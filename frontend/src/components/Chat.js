@@ -12,6 +12,7 @@ import LoadingSpinner from './LoadingSpinner';
 import FileUploadProgress from './FileUploadProgress';
 import ThinkBubble from './ThinkBubble';
 import ResponseOptions from './ResponseOptions';
+import MarkdownRenderer from './MarkdownRenderer';
 
 // Add this at the very top to check if your changes are showing up
 console.log("UPDATED CHAT.JS VERSION - TIMESTAMP:", new Date().toString());
@@ -1092,9 +1093,14 @@ const Chat = () => {
         
         // Process all complete <think>...</think> tags
         while ((match = regex.exec(processedContent)) !== null) {
-            // Add content before the <think> tag
+            // Add content before the <think> tag with markdown rendering
             if (match.index > lastIndex) {
-                parts.push(<span key={`text-${lastIndex}-${match.index}`}>{processedContent.slice(lastIndex, match.index)}</span>);
+                const textContent = processedContent.slice(lastIndex, match.index);
+                parts.push(
+                    <div key={`text-${lastIndex}-${match.index}`}>
+                        <MarkdownRenderer content={textContent} />
+                    </div>
+                );
             }
             
             // Add the think bubble component with the content inside the tags
@@ -1115,12 +1121,13 @@ const Chat = () => {
             const incompleteThinkStart = processedContent.slice(lastIndex).indexOf("<think>");
             
             if (incompleteThinkStart !== -1 && isInThinkBlock) {
-                // Add content before the incomplete <think> tag
+                // Add content before the incomplete <think> tag with markdown rendering
                 if (incompleteThinkStart > 0) {
+                    const textContent = processedContent.slice(lastIndex, lastIndex + incompleteThinkStart);
                     parts.push(
-                        <span key={`text-end-incomplete`}>
-                            {processedContent.slice(lastIndex, lastIndex + incompleteThinkStart)}
-                        </span>
+                        <div key={`text-end-incomplete`}>
+                            <MarkdownRenderer content={textContent} />
+                        </div>
                     );
                 }
                 
@@ -1136,8 +1143,13 @@ const Chat = () => {
                     />
                 );
             } else {
-                // No incomplete think tag, just add remaining content
-                parts.push(<span key="text-end">{processedContent.slice(lastIndex)}</span>);
+                // No incomplete think tag, just add remaining content with markdown rendering
+                const textContent = processedContent.slice(lastIndex);
+                parts.push(
+                    <div key="text-end">
+                        <MarkdownRenderer content={textContent} />
+                    </div>
+                );
             }
         }
         
@@ -1145,7 +1157,7 @@ const Chat = () => {
             <div className="flex flex-col gap-2">
                 {parts}
             </div>
-        ) : processedContent;
+        ) : <MarkdownRenderer content={processedContent} />;
     };
 
     // Add a helper function to render messages with streaming effect
@@ -1166,12 +1178,12 @@ const Chat = () => {
                         {hasThinking && (
                             <div className="text-sm text-gray-600 bg-gray-50 p-3 rounded-lg border-l-4 border-blue-300">
                                 <div className="font-semibold text-blue-700 mb-1">Thinking Process:</div>
-                                <div className="whitespace-pre-wrap">{String(content.thinking)}</div>
+                                <MarkdownRenderer content={String(content.thinking)} className="text-sm" />
                             </div>
                         )}
                         {hasContent && (
                             <div className="text-gray-800">
-                                <div className="whitespace-pre-wrap break-words">{String(content.content)}</div>
+                                <MarkdownRenderer content={String(content.content)} />
                             </div>
                         )}
                         {hasStyle && (
@@ -1188,8 +1200,8 @@ const Chat = () => {
                 return formatMessage(content);
             }
             
-            // For other string content, return as-is
-            return content;
+            // For other string content, use MarkdownRenderer
+            return <MarkdownRenderer content={String(content)} />;
         }
         
         // Ensure content is always a string before processing
@@ -1632,10 +1644,18 @@ const handleSubmit = async (e) => {
                                                         ? 'bg-red-100 text-red-800'
                                                         : 'bg-white shadow-md text-gray-800'
                                             }`}>
-                                                <div className="whitespace-pre-wrap break-words">
-                                                    {typeof message.content === 'string' 
-                                                        ? renderMessageContent(message)
-                                                        : String(message.content || '')}
+                                                <div className="break-words">
+                                                    {message.isUser ? (
+                                                        // For user messages, keep simple text rendering
+                                                        <div className="whitespace-pre-wrap">
+                                                            {String(message.content || '')}
+                                                        </div>
+                                                    ) : (
+                                                        // For AI messages, use markdown rendering
+                                                        typeof message.content === 'string' 
+                                                            ? renderMessageContent(message)
+                                                            : <MarkdownRenderer content={String(message.content || '')} />
+                                                    )}
                                                 </div>
                                                 {message.processingTime && (
                                                     <div className="text-xs mt-2 opacity-75">
