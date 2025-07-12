@@ -62,3 +62,6 @@ streamlit-chat
 # Monitoring
 prometheus-client>=0.17.0  # Added for monitoring
 psutil>=5.9.5  # Added for system resource monitoring
+
+# Storage and database
+minio>=7.1.0
