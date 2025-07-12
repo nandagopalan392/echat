@@ -19,7 +19,6 @@ const UserDashboard = ({ username, onClose }) => {
         try {
             setLoading(true);
             const response = await api.get(`/api/admin/user-stats/${username}`);
-            console.log('User stats response:', response); // Debug log
             
             if (response && response.data) {
                 setUserStats(response.data);

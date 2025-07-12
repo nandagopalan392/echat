@@ -18,7 +18,6 @@ const FileListDashboard = ({ onClose }) => {
     const fetchFiles = async () => {
         try {
             const response = await api.get('/api/admin/files');
-            console.log('Files response:', response); // Debug log
             
             // The API returns data directly, not wrapped in a data field
             if (response && typeof response === 'object') {

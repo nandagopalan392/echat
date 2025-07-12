@@ -2,20 +2,18 @@
 
 A modern chat application with AI capabilities using DeepSeek R1, Ollama, and RLHF (Reinforcement Learning from Human Feedback).
 
+![Demo](assets/demo.gif)
+
 ## System Requirements
 
-### Minimum Requirements
-- **CPU**: 4+ cores (Intel i5 or AMD Ryzen 5 equivalent)
-- **RAM**: 8GB (16GB recommended for optimal performance)
-- **Storage**: 20GB free disk space (SSD recommended)
-- **OS**: Linux (Ubuntu 20.04+), macOS, or Windows with WSL2
-
-### Recommended Configuration
+### Minimum Configuration
 - **CPU**: 8+ cores (Intel i7-12700 or equivalent)
 - **RAM**: 16GB+ 
 - **GPU**: NVIDIA GPU with 8GB+ VRAM (RTX 3050 or better)
 - **Storage**: 50GB+ SSD space
 - **Network**: Stable internet connection for model downloads
+- **OS**: Linux (Ubuntu 20.04+)
+
 
 ## Prerequisites
 
@@ -115,7 +113,7 @@ All services are configured to run on localhost:
 
 ## Features
 
-- 🤖 **DeepSeek R1 Integration** - Advanced reasoning AI model
+- 🤖 **Ollama Integration** - Supports all the model in ollama
 - 🧠 **RLHF Support** - Choose between different response styles
 - 📄 **Document Processing** - Upload and chat with PDFs, DOCX, etc.
 - 👥 **Multi-user Support** - User management and session tracking
@@ -197,11 +195,6 @@ docker system prune -a
 docker compose up -d
 ```
 
-### Performance Optimization
-
-- **For CPU-only systems**: Consider using smaller models or increasing timeout values
-- **For low memory systems**: Close other applications before starting eChat
-- **For slow networks**: Use `docker compose up` (without -d) to monitor download progress
 
 ## Contribution
 

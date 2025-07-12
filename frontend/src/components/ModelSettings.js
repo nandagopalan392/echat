@@ -1,6 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
 
+// ========================================
+// DEBUG CONFIGURATION
+// ========================================
+// Set DEBUG_MODE to true to enable console logs for debugging
+// Set to false in production to reduce console noise
+const DEBUG_MODE = false;
+
+// ========================================
+
+// Debug helper function
+const debugLog = (message, ...args) => {
+  if (DEBUG_MODE) {
+    console.log(message, ...args);
+  }
+};
+
 const ModelSettings = ({ isOpen, onClose, onSave }) => {
     const [availableModels, setAvailableModels] = useState([]);
     const [selectedModels, setSelectedModels] = useState({
@@ -61,9 +77,7 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
         setError('');
         
         try {
-            console.log('Loading available models from Ollama...');
             const response = await api.get('/api/models/available');
-            console.log('Available models response:', response);
             
             if (response && response.models) {
                 setAvailableModels(response.models);
@@ -87,9 +101,7 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
 
     const loadCurrentSettings = async () => {
         try {
-            console.log('Loading current model settings...');
             const response = await api.get('/api/models/current');
-            console.log('Current settings response:', response);
             
             if (response) {
                 const llmModel = response.llm || 'deepseek-r1:latest';
@@ -237,7 +249,6 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
         setError('');
         
         try {
-            console.log('Checking GPU compatibility...');
             
             // First check GPU compatibility
             const selectedLlmModel = filterModelsByType('llm').find(model => 
@@ -259,11 +270,8 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
                 embedding_size: getModelSizeInGB(selectedEmbeddingModel, embeddingVariant)
             };
             
-            console.log('Compatibility check payload:', compatibilityPayload);
-            
             try {
                 const compatibilityResponse = await api.post('/api/models/check-compatibility', compatibilityPayload);
-                console.log('Compatibility response:', compatibilityResponse);
                 
                 if (!compatibilityResponse.compatible) {
                     // Show detailed error with recommendations
@@ -289,13 +297,11 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
                 }
             }
             
-            console.log('Saving model settings:', selectedModels);
             const response = await api.post('/api/models/settings', {
                 ...selectedModels,
                 llm_size: compatibilityPayload.llm_size,
                 embedding_size: compatibilityPayload.embedding_size
             });
-            console.log('Save response:', response);
             
             if (response && response.success) {
                 // Reload ingestion status if embedding model changed
@@ -614,12 +620,6 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
                                         <div className="text-sm whitespace-pre-line">{error}</div>
                                     </div>
                                 </div>
-                            </div>
-                        )}
-
-                        {!isLoadingModels && availableModels.length > 0 && (
-                            <div className="mb-4 p-3 bg-green-50 border border-green-200 text-green-700 rounded text-sm">
-                                ✓ Successfully loaded {availableModels.length} models from Ollama
                             </div>
                         )}
 

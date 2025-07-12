@@ -1,6 +1,22 @@
 import React from 'react';
 import MarkdownRenderer from './MarkdownRenderer';
 
+// ========================================
+// DEBUG CONFIGURATION
+// ========================================
+// Set DEBUG_MODE to true to enable console logs for debugging
+// Set to false in production to reduce console noise
+const DEBUG_MODE = false;
+
+// ========================================
+
+// Debug helper function
+const debugLog = (message, ...args) => {
+  if (DEBUG_MODE) {
+    console.log(message, ...args);
+  }
+};
+
 const ResponseOptions = ({ options, onSelect }) => {
   // Helper function to safely convert any value to string
   const safeString = (value) => {
@@ -14,14 +30,13 @@ const ResponseOptions = ({ options, onSelect }) => {
 
   // Helper function to render option content
   const renderOptionContent = (option) => {
-    // Debug logging
-    console.log("ResponseOptions - rendering option:", option);
-    console.log("Option type:", typeof option);
+    debugLog("ResponseOptions - rendering option:", option);
+    debugLog("Option type:", typeof option);
     if (typeof option === 'object') {
-      console.log("Option thinking length:", option.thinking ? option.thinking.length : 0);
-      console.log("Option content length:", option.content ? option.content.length : 0);
-      console.log("Option thinking preview:", option.thinking ? option.thinking.substring(0, 100) + "..." : "none");
-      console.log("Option content preview:", option.content ? option.content.substring(0, 100) + "..." : "none");
+      debugLog("Option thinking length:", option.thinking ? option.thinking.length : 0);
+      debugLog("Option content length:", option.content ? option.content.length : 0);
+      debugLog("Option thinking preview:", option.thinking ? option.thinking.substring(0, 100) + "..." : "none");
+      debugLog("Option content preview:", option.content ? option.content.substring(0, 100) + "..." : "none");
     }
     
     // Handle structured options (new format)

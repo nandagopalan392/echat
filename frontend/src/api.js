@@ -4,8 +4,6 @@ const API_URL = ''; // Use relative URLs to avoid CORS issues
 
 // Function to handle login with detailed error reporting
 export const login = async (credentials) => {
-  console.log('Attempting login with:', credentials);
-  
   try {
     // Use direct fetch for login instead of axios
     const response = await fetch(`${API_URL}/api/auth/login`, {
@@ -23,8 +21,6 @@ export const login = async (credentials) => {
       })
     });
     
-    console.log('Login response status:', response.status);
-    
     // Handle errors
     if (!response.ok) {
       // Try to extract error message
@@ -38,7 +34,6 @@ export const login = async (credentials) => {
     
     // Parse successful response
     const data = await response.json();
-    console.log('Login successful, got token');
     
     // Store token in localStorage
     localStorage.setItem('token', data.access_token);
