@@ -19,7 +19,6 @@ const ActivityDashboard = ({ onClose }) => {
         try {
             setLoading(true);
             const response = await api.get('/api/admin/activity-stats');
-            console.log('Activity stats response:', response); // Debug log
             
             if (response && response.data) {
                 setStats(response.data);

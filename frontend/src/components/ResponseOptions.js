@@ -1,4 +1,21 @@
 import React from 'react';
+import MarkdownRenderer from './MarkdownRenderer';
+
+// ========================================
+// DEBUG CONFIGURATION
+// ========================================
+// Set DEBUG_MODE to true to enable console logs for debugging
+// Set to false in production to reduce console noise
+const DEBUG_MODE = false;
+
+// ========================================
+
+// Debug helper function
+const debugLog = (message, ...args) => {
+  if (DEBUG_MODE) {
+    console.log(message, ...args);
+  }
+};
 
 const ResponseOptions = ({ options, onSelect }) => {
   // Helper function to safely convert any value to string
@@ -13,14 +30,13 @@ const ResponseOptions = ({ options, onSelect }) => {
 
   // Helper function to render option content
   const renderOptionContent = (option) => {
-    // Debug logging
-    console.log("ResponseOptions - rendering option:", option);
-    console.log("Option type:", typeof option);
+    debugLog("ResponseOptions - rendering option:", option);
+    debugLog("Option type:", typeof option);
     if (typeof option === 'object') {
-      console.log("Option thinking length:", option.thinking ? option.thinking.length : 0);
-      console.log("Option content length:", option.content ? option.content.length : 0);
-      console.log("Option thinking preview:", option.thinking ? option.thinking.substring(0, 100) + "..." : "none");
-      console.log("Option content preview:", option.content ? option.content.substring(0, 100) + "..." : "none");
+      debugLog("Option thinking length:", option.thinking ? option.thinking.length : 0);
+      debugLog("Option content length:", option.content ? option.content.length : 0);
+      debugLog("Option thinking preview:", option.thinking ? option.thinking.substring(0, 100) + "..." : "none");
+      debugLog("Option content preview:", option.content ? option.content.substring(0, 100) + "..." : "none");
     }
     
     // Handle structured options (new format)
@@ -34,12 +50,12 @@ const ResponseOptions = ({ options, onSelect }) => {
           {hasThinking && (
             <div className="text-sm text-gray-600 bg-gray-50 p-3 rounded-lg border-l-4 border-blue-300">
               <div className="font-semibold text-blue-700 mb-1">Thinking Process:</div>
-              <div className="whitespace-pre-wrap">{safeString(option.thinking)}</div>
+              <MarkdownRenderer content={safeString(option.thinking)} className="text-sm" />
             </div>
           )}
           {hasContent && (
             <div className="text-gray-800">
-              <div className="whitespace-pre-wrap break-words">{safeString(option.content)}</div>
+              <MarkdownRenderer content={safeString(option.content)} />
             </div>
           )}
           {hasStyle && (
@@ -53,9 +69,7 @@ const ResponseOptions = ({ options, onSelect }) => {
     
     // Handle legacy string options
     return (
-      <div className="whitespace-pre-wrap break-words">
-        {safeString(option)}
-      </div>
+      <MarkdownRenderer content={safeString(option)} />
     );
   };
 

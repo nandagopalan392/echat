@@ -5,20 +5,33 @@ import ChatSidebar from './ChatSidebar';
 import UserDashboard from './UserDashboard';
 import ActivityDashboard from './ActivityDashboard';  // Add this import
 import FileListDashboard from './FileListDashboard';  // Add this import
+import ModelSettings from './ModelSettings';  // Add ModelSettings import
 import echatLogo from '../assets/echat_logo.svg';
 import CircularProgress from '@mui/material/CircularProgress';
 import LoadingSpinner from './LoadingSpinner';
 import FileUploadProgress from './FileUploadProgress';
 import ThinkBubble from './ThinkBubble';
 import ResponseOptions from './ResponseOptions';
+import MarkdownRenderer from './MarkdownRenderer';
 
-// Add this at the very top to check if your changes are showing up
-console.log("UPDATED CHAT.JS VERSION - TIMESTAMP:", new Date().toString());
+// ========================================
+// DEBUG CONFIGURATION
+// ========================================
+// Set DEBUG_MODE to true to enable console logs for debugging
+// Set to false in production to reduce console noise
+const DEBUG_MODE = false;
+
+// ========================================
+
+// Debug helper function
+const debugLog = (message, ...args) => {
+  if (DEBUG_MODE) {
+    console.log(message, ...args);
+  }
+};
 
 // Add a minimal version of the debug function that avoids all JSON parsing
 const safeProcessSSE = (eventData) => {
-  // Log the raw data
-  console.log("RAW SSE EVENT:", eventData);
   
   // Very simple processing - avoid JSON parsing entirely
   if (!eventData || typeof eventData !== 'string') {
@@ -55,106 +68,44 @@ const safeProcessSSE = (eventData) => {
 
 // Add this utility function for detailed data inspection
 const inspectRawData = (data) => {
-  console.log('RAW SSE DATA INSPECTION:');
-  console.log('=============================================');
-  console.log('Length:', data?.length || 0);
-  console.log('Raw data:', data);
+  if (!DEBUG_MODE) return;
   
-  // Check for empty or null data
+  debugLog('RAW SSE DATA INSPECTION:');
+  debugLog('Length:', data?.length || 0);
+  
   if (!data || data.length === 0) {
-    console.log('EMPTY DATA!');
+    debugLog('EMPTY DATA!');
     return;
   }
   
-  // Log the first and last 50 characters
-  console.log('First 50 chars:', data.substring(0, 50));
-  console.log('Last 50 chars:', data.substring(Math.max(0, data.length - 50)));
-  
-  // Check for common SSE patterns
-  if (data.startsWith('data:')) {
-    console.log('Data starts with SSE prefix "data:"');
-    // Try to extract the content after data:
-    const contentStart = data.indexOf('{');
-    if (contentStart > 0) {
-      console.log('JSON data starts at position', contentStart);
-      
-      // Look for the matching closing brace
-      let openBraces = 0;
-      let closeBracePos = -1;
-      
-      for (let i = contentStart; i < data.length; i++) {
-        if (data[i] === '{') openBraces++;
-        else if (data[i] === '}') {
-          openBraces--;
-          if (openBraces === 0) {
-            closeBracePos = i;
-            break;
-          }
-        }
-      }
-      
-      if (closeBracePos > 0) {
-        console.log('Complete JSON found from', contentStart, 'to', closeBracePos);
-        const jsonPart = data.substring(contentStart, closeBracePos + 1);
-        console.log('JSON part:', jsonPart);
-        
-        // Try to parse it
-        try {
-          const parsed = JSON.parse(jsonPart);
-          console.log('Successfully parsed extracted JSON:', parsed);
-        } catch (err) {
-          console.error('Failed to parse extracted JSON segment:', err);
-        }
-      } else {
-        console.log('No matching closing brace found - incomplete JSON!');
-      }
-    }
-  }
-  
-  // Character-by-character inspection for the first 100 chars
-  console.log('Character inspection:');
-  const inspectionLength = Math.min(100, data.length);
-  for (let i = 0; i < inspectionLength; i += 5) {
-    const chars = [];
-    const codes = [];
-    
-    for (let j = i; j < Math.min(i + 5, data.length); j++) {
-      chars.push(`'${data[j]}'`);
-      codes.push(data.charCodeAt(j));
-    }
-    
-    console.log(`Pos ${i}-${i+4}:`, chars.join(', '), '|', codes.join(', '));
-  }
-  console.log('=============================================');
+  debugLog('First/Last chars:', data.substring(0, 50), '...', data.substring(Math.max(0, data.length - 50)));
 };
 
 // Update the debugging function at the top of the file
 const debugSSE = (event) => {
-  console.log('SSE Event received:');
+  if (!DEBUG_MODE) return { empty: true };
+  
+  debugLog('SSE Event received');
   inspectRawData(event.data);
   
-  // Handle empty data case
   if (!event.data || event.data.trim() === '') {
-    console.log('Empty SSE data received');
+    debugLog('Empty SSE data received');
     return { empty: true };
   }
   
-  // Try to parse as JSON first - be defensive about it
+  // Try to parse as JSON first
   try {
-    // Trim the data to remove any whitespace
     const trimmedData = event.data.trim();
     const parsed = JSON.parse(trimmedData);
-    console.log('Successfully parsed JSON:', parsed);
+    debugLog('Successfully parsed JSON:', parsed);
     return parsed;
   } catch (error) {
-    console.error('Parse error:', error.message);
+    debugLog('Parse error:', error.message);
     
     // Try more aggressive JSON extraction
     try {
-      // Look for JSON object pattern between { and }
       const firstBrace = event.data.indexOf('{');
       if (firstBrace >= 0) {
-        // Find the last closing brace
         let depth = 1;
         let lastBrace = -1;
         
@@ -171,20 +122,20 @@ const debugSSE = (event) => {
         
         if (lastBrace > firstBrace) {
           const jsonCandidate = event.data.substring(firstBrace, lastBrace + 1);
-          console.log('Extracted JSON candidate:', jsonCandidate);
+          debugLog('Extracted JSON candidate:', jsonCandidate);
           const parsed = JSON.parse(jsonCandidate);
-          console.log('Successfully parsed extracted JSON:', parsed);
+          debugLog('Successfully parsed extracted JSON:', parsed);
           return parsed;
         }
       }
     } catch (innerError) {
-      console.log('Failed to extract valid JSON:', innerError);
+      debugLog('Failed to extract valid JSON:', innerError);
     }
     
     // Handle legacy plain: format if present
     if (event.data.startsWith('plain:')) {
       const plainText = event.data.substring(6);
-      console.log('Legacy plaintext format detected:', plainText);
+      debugLog('Legacy plaintext format detected:', plainText);
       return { content: plainText };
     }
     
@@ -677,14 +628,14 @@ function extractRLHFOptionsFromBackend(text) {
 
 // Add this function before the Chat component
 const cleanSelectedResponse = (response) => {
-    console.log("cleanSelectedResponse called with:", response);
+    debugLog("cleanSelectedResponse called with:", response);
     
     if (!response) return '';
     
     try {
         // Handle structured response object (new format)
         if (typeof response === 'object' && response !== null) {
-            console.log("Processing structured response object");
+            debugLog("Processing structured response object");
             // For structured responses, preserve the full structure with thinking and content
             if (response.thinking && response.content) {
                 console.log("Preserving structured response with thinking and content");
@@ -693,7 +644,7 @@ const cleanSelectedResponse = (response) => {
             }
             // If only content field, return just content
             if (response.content) {
-                console.log("Extracting content from structured object:", response.content);
+                debugLog("Extracting content from structured object:", response.content);
                 return response.content;
             }
             // If no content field, stringify the whole object as fallback
@@ -773,6 +724,8 @@ const Chat = () => {
     const [showResponseOptions, setShowResponseOptions] = useState(false);
     const [responseOptions, setResponseOptions] = useState([]);
     const [optionsMessageId, setOptionsMessageId] = useState(null);
+    const [showKnowledgeHub, setShowKnowledgeHub] = useState(false);
+    const [showModelSettings, setShowModelSettings] = useState(false);
 
     const roles = ['Engineer', 'Manager', 'Business Development', 'Associate'];
 
@@ -783,16 +736,37 @@ const Chat = () => {
         // eslint-disable-next-line
     }, []);
 
+    // Close Knowledge Hub dropdown when clicking outside
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (showKnowledgeHub && !event.target.closest('.knowledge-hub-container')) {
+                setShowKnowledgeHub(false);
+            }
+        };
+
+        if (showKnowledgeHub) {
+            document.addEventListener('mousedown', handleClickOutside);
+            return () => {
+                document.removeEventListener('mousedown', handleClickOutside);
+            };
+        }
+    }, [showKnowledgeHub]);
+
     const checkAdminStatus = async () => {
+        debugLog("Checking admin status...");
         try {
             const response = await api.get('/api/admin/users');
+            debugLog("Admin check response:", response);
             if (response && response.users) {
+                debugLog("Setting isAdmin to true");
                 setIsAdmin(true);
                 setUsers(response.users);
             } else {
+                console.log("Setting isAdmin to false - no users in response");
                 setIsAdmin(false);
             }
         } catch (error) {
+            console.log("Setting isAdmin to false - error occurred:", error);
             setIsAdmin(false);
             // Optionally show a notification or log
             console.warn('Admin check failed:', error?.message || error);
@@ -958,33 +932,24 @@ const Chat = () => {
     const handleResponseSelect = async (index) => {
         try {
             const selectedResponse = responseOptions[index];
-            console.log("Selected response object:", selectedResponse);
-            console.log("Selected response type:", typeof selectedResponse);
             
             const optionMessage = messages.find(msg => msg.id === optionsMessageId);
-            console.log("FULL MESSAGE DEBUG:", optionMessage);
-            console.log("Message properties:", optionMessage ? Object.keys(optionMessage) : 'No message found');
-            console.log("Message rlhfEnabled:", optionMessage?.rlhfEnabled);
-            console.log("Message rlhf_enabled:", optionMessage?.rlhf_enabled);
-            console.log("optionsMessageId:", optionsMessageId);
-            console.log("showResponseOptions:", showResponseOptions);
-            console.log("responseOptions.length:", responseOptions.length);
             
             // Make isRLHF true by default since this function is only called for RLHF scenarios
             const isRLHF = true;
             
-            console.log("RLHF check - optionMessage:", optionMessage);
+            debugLog("RLHF check - optionMessage:", optionMessage);
             console.log("RLHF check - isRLHF:", isRLHF);
             
             // Process the selected response using the updated cleaning function
             const finalContent = cleanSelectedResponse(selectedResponse);
-            console.log("Final content after cleaning:", finalContent);
-            console.log("Final content type:", typeof finalContent);
-            console.log("Original message content:", optionMessage?.content);
+            debugLog("Final content after cleaning:", finalContent);
+            debugLog("Final content type:", typeof finalContent);
+            debugLog("Original message content:", optionMessage?.content);
             
             // Keep the full structured content (including think tags) for proper rendering
             const safeContent = finalContent;
-            console.log("Safe content to store:", safeContent);
+            debugLog("Safe content to store:", safeContent);
             
             // Update message with cleaned response
             setMessages(prevMessages => {
@@ -992,8 +957,8 @@ const Chat = () => {
                 const messageIndex = updatedMessages.findIndex(msg => msg.id === optionsMessageId);
                 
                 if (messageIndex !== -1) {
-                    console.log("Updating message at index:", messageIndex);
-                    console.log("Old message:", updatedMessages[messageIndex]);
+                    debugLog("Updating message at index:", messageIndex);
+                    debugLog("Old message:", updatedMessages[messageIndex]);
                     
                     updatedMessages[messageIndex] = {
                         ...updatedMessages[messageIndex],
@@ -1005,9 +970,9 @@ const Chat = () => {
                         preserveThinking: true  // Flag to ensure thinking is preserved
                     };
                     
-                    console.log("Updated message:", updatedMessages[messageIndex]);
+                    debugLog("Updated message:", updatedMessages[messageIndex]);
                     
-                    console.log("New message:", updatedMessages[messageIndex]);
+                    debugLog("New message:", updatedMessages[messageIndex]);
                 }
                 
                 return updatedMessages;
@@ -1020,23 +985,23 @@ const Chat = () => {
             
             // Handle RLHF feedback and save selected response to backend
             if (isRLHF && sessionId) {
-                console.log('=== STARTING RLHF FEEDBACK PROCESS ===');
-                console.log('Session ID:', sessionId);
-                console.log('Selected Index:', index);
-                console.log('Is RLHF:', isRLHF);
-                console.log('Safe Content:', safeContent);
+                debugLog('=== STARTING RLHF FEEDBACK PROCESS ===');
+                debugLog('Session ID:', sessionId);
+                debugLog('Selected Index:', index);
+                debugLog('Is RLHF:', isRLHF);
+                debugLog('Safe Content:', safeContent);
                 
                 setIsProcessing(true);
                 try {
                     // Submit RLHF feedback
-                    console.log('About to call api.submitRLHFFeedback...');
+                    debugLog('About to call api.submitRLHFFeedback...');
                     const feedbackResponse = await api.submitRLHFFeedback(sessionId, index);
-                    console.log('RLHF feedback response received:', feedbackResponse);
+                    debugLog('RLHF feedback response received:', feedbackResponse);
                     
                     // Save the selected response content to the database
-                    console.log('About to call api.updateMessage...');
+                    debugLog('About to call api.updateMessage...');
                     const updateResponse = await api.updateMessage(sessionId, safeContent);
-                    console.log('Message update response received:', updateResponse);
+                    debugLog('Message update response received:', updateResponse);
                     
                     showNotification('Thanks for your feedback!');
                 } catch (error) {
@@ -1044,7 +1009,7 @@ const Chat = () => {
                     showNotification('Failed to submit feedback', true);
                 }
             } else {
-                console.log('RLHF feedback skipped - isRLHF:', isRLHF, 'sessionId:', sessionId);
+                debugLog('RLHF feedback skipped - isRLHF:', isRLHF, 'sessionId:', sessionId);
             }
         } catch (error) {
             console.error('Error handling response selection:', error);
@@ -1068,9 +1033,14 @@ const Chat = () => {
         
         // Process all complete <think>...</think> tags
         while ((match = regex.exec(processedContent)) !== null) {
-            // Add content before the <think> tag
+            // Add content before the <think> tag with markdown rendering
             if (match.index > lastIndex) {
-                parts.push(<span key={`text-${lastIndex}-${match.index}`}>{processedContent.slice(lastIndex, match.index)}</span>);
+                const textContent = processedContent.slice(lastIndex, match.index);
+                parts.push(
+                    <div key={`text-${lastIndex}-${match.index}`}>
+                        <MarkdownRenderer content={textContent} />
+                    </div>
+                );
             }
             
             // Add the think bubble component with the content inside the tags
@@ -1091,12 +1061,13 @@ const Chat = () => {
             const incompleteThinkStart = processedContent.slice(lastIndex).indexOf("<think>");
             
             if (incompleteThinkStart !== -1 && isInThinkBlock) {
-                // Add content before the incomplete <think> tag
+                // Add content before the incomplete <think> tag with markdown rendering
                 if (incompleteThinkStart > 0) {
+                    const textContent = processedContent.slice(lastIndex, lastIndex + incompleteThinkStart);
                     parts.push(
-                        <span key={`text-end-incomplete`}>
-                            {processedContent.slice(lastIndex, lastIndex + incompleteThinkStart)}
-                        </span>
+                        <div key={`text-end-incomplete`}>
+                            <MarkdownRenderer content={textContent} />
+                        </div>
                     );
                 }
                 
@@ -1112,8 +1083,13 @@ const Chat = () => {
                     />
                 );
             } else {
-                // No incomplete think tag, just add remaining content
-                parts.push(<span key="text-end">{processedContent.slice(lastIndex)}</span>);
+                // No incomplete think tag, just add remaining content with markdown rendering
+                const textContent = processedContent.slice(lastIndex);
+                parts.push(
+                    <div key="text-end">
+                        <MarkdownRenderer content={textContent} />
+                    </div>
+                );
             }
         }
         
@@ -1121,7 +1097,7 @@ const Chat = () => {
             <div className="flex flex-col gap-2">
                 {parts}
             </div>
-        ) : processedContent;
+        ) : <MarkdownRenderer content={processedContent} />;
     };
 
     // Add a helper function to render messages with streaming effect
@@ -1142,12 +1118,12 @@ const Chat = () => {
                         {hasThinking && (
                             <div className="text-sm text-gray-600 bg-gray-50 p-3 rounded-lg border-l-4 border-blue-300">
                                 <div className="font-semibold text-blue-700 mb-1">Thinking Process:</div>
-                                <div className="whitespace-pre-wrap">{String(content.thinking)}</div>
+                                <MarkdownRenderer content={String(content.thinking)} className="text-sm" />
                             </div>
                         )}
                         {hasContent && (
                             <div className="text-gray-800">
-                                <div className="whitespace-pre-wrap break-words">{String(content.content)}</div>
+                                <MarkdownRenderer content={String(content.content)} />
                             </div>
                         )}
                         {hasStyle && (
@@ -1164,8 +1140,8 @@ const Chat = () => {
                 return formatMessage(content);
             }
             
-            // For other string content, return as-is
-            return content;
+            // For other string content, use MarkdownRenderer
+            return <MarkdownRenderer content={String(content)} />;
         }
         
         // Ensure content is always a string before processing
@@ -1238,7 +1214,7 @@ const Chat = () => {
 
     // Improved updateMessage function to be used in handleSubmit
     const updateMessageContent = (id, content, isStreaming, setMessages, rlhfEnabled = false) => {
-        console.log("updateMessageContent called with:", { id, content, isStreaming, rlhfEnabled });
+        debugLog("updateMessageContent called with:", { id, content, isStreaming, rlhfEnabled });
         
         // Handle different content types
         let processedContent = content;
@@ -1269,7 +1245,7 @@ const Chat = () => {
             processedContent = '';
         }
       
-        console.log("Final processed content:", processedContent);
+        debugLog("Final processed content:", processedContent);
         
         // Use a functional update to ensure we're working with the latest state
         setMessages(prevMessages => 
@@ -1315,7 +1291,7 @@ const handleSubmit = async (e) => {
   const timeoutId = setTimeout(() => controller.abort(), timeoutDuration);
   
   try {
-    console.log("Making API request to /api/chat/send");
+    debugLog("Making API request to /api/chat/send");
     
     const response = await fetch('/api/chat/send', {
       method: 'POST',
@@ -1344,38 +1320,17 @@ const handleSubmit = async (e) => {
 
     // Parse response as JSON only
     const responseData = await response.json();
-    console.log("Response data:", responseData);
-    
-    // URGENT DEBUG: Add immediate debug
-    console.log("URGENT DEBUG - response_options:", responseData.response_options);
-    console.log("URGENT DEBUG - rlhf_enabled:", responseData.rlhf_enabled);
     
     // Handle errors from the backend
     if (responseData.error) {
       throw new Error(responseData.error);
     }
     
-    // DEBUG: Log the RLHF condition check
-    console.log("=== RLHF CONDITION DEBUG ===");
-    console.log("responseData.response_options:", responseData.response_options);
-    console.log("responseData.response_options.length:", responseData.response_options ? responseData.response_options.length : 'N/A');
-    console.log("responseData.rlhf_enabled:", responseData.rlhf_enabled);
-    console.log("Condition 1 (response_options exists):", !!responseData.response_options);
-    console.log("Condition 2 (length >= 1):", responseData.response_options && responseData.response_options.length >= 1);
-    console.log("Condition 3 (rlhf_enabled):", !!responseData.rlhf_enabled);
-    console.log("Overall condition result:", !!(responseData.response_options && responseData.response_options.length >= 1 && responseData.rlhf_enabled));
-    console.log("=========================");
-    
     // Check if we have RLHF options to display - simplified condition
     const hasResponseOptions = responseData.response_options && Array.isArray(responseData.response_options) && responseData.response_options.length > 0;
     const isRlhfEnabled = responseData.rlhf_enabled === true;
     
-    console.log("RLHF Check - hasResponseOptions:", hasResponseOptions);
-    console.log("RLHF Check - isRlhfEnabled:", isRlhfEnabled);
-    console.log("RLHF Check - should show RLHF:", hasResponseOptions && isRlhfEnabled);
-    
     if (hasResponseOptions && isRlhfEnabled) {
-      console.log("DEBUG: Entering RLHF branch - showing options");
       // Show the prompt message asking for user to select/review
       updateMessageContent(
         aiMessageId, 
@@ -1386,12 +1341,10 @@ const handleSubmit = async (e) => {
       );
       
       // Show RLHF options UI
-      console.log("DEBUG: Setting response options and showing RLHF UI");
       setResponseOptions(responseData.response_options);
       setOptionsMessageId(aiMessageId);
       setShowResponseOptions(true);
     } else {
-      console.log("DEBUG: Entering regular response branch - no RLHF");
       // Regular response - just use content without think tags
       // The thinking information is typically not shown for regular responses
       const displayContent = responseData.content || '';
@@ -1402,7 +1355,6 @@ const handleSubmit = async (e) => {
     
     // Update session ID if needed
     if (responseData.session_id && !sessionId) {
-      console.log("Setting session ID:", responseData.session_id);
       setSessionId(responseData.session_id);
     }
     
@@ -1453,45 +1405,91 @@ const handleSubmit = async (e) => {
                         </div>
                         <h1 className="text-xl font-semibold text-gray-900">eChat</h1>
                         <div className="flex items-center space-x-4">
+                            {/* Debug admin status */}
+                            {debugLog("Admin status in render:", isAdmin)}
+                            
                             {/* Only show upload button for admin */}
                             {isAdmin && (
                                 <div className="relative">
-                                    <div className="flex space-x-4">
-                                        {/* File Upload Button */}
-                                        <label className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg cursor-pointer hover:bg-indigo-100">
+                                    {/* Knowledge Hub Button with Dropdown */}
+                                    <div className="relative inline-block knowledge-hub-container">
+                                        <button
+                                            onClick={() => setShowKnowledgeHub(!showKnowledgeHub)}
+                                            className="flex items-center px-4 py-2 bg-purple-50 text-purple-600 rounded-lg cursor-pointer hover:bg-purple-100 transition-colors duration-200"
+                                        >
                                             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
                                             </svg>
-                                            Upload File
-                                            <input
-                                                type="file"
-                                                accept=".xlsx,.csv,.docx,.pdf"
-                                                onChange={(e) => handleFileUpload(e, false)}
-                                                className="hidden"
-                                            />
-                                        </label>
-
-                                        {/* Folder Upload Button */}
-                                        <label className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg cursor-pointer hover:bg-indigo-100">
-                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                                            Knowledge Hub
+                                            <svg className={`ml-2 h-4 w-4 transition-transform duration-200 ${showKnowledgeHub ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                                             </svg>
-                                            Upload Folder
-                                            <input
-                                                type="file"
-                                                webkitdirectory="true"
-                                                directory="true"
-                                                multiple
-                                                onChange={(e) => handleFileUpload(e, true)}
-                                                className="hidden"
-                                            />
-                                        </label>
+                                        </button>
+                                        
+                                        {/* Dropdown Menu */}
+                                        {showKnowledgeHub && (
+                                            <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-50 border border-gray-200">
+                                                <div className="py-1">
+                                                    {/* Upload Files Option */}
+                                                    <label className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                                        </svg>
+                                                        Upload Files
+                                                        <input
+                                                            type="file"
+                                                            accept=".xlsx,.csv,.docx,.pdf"
+                                                            multiple
+                                                            onChange={(e) => {
+                                                                handleFileUpload(e, false);
+                                                                setShowKnowledgeHub(false);
+                                                            }}
+                                                            className="hidden"
+                                                        />
+                                                    </label>
+                                                    
+                                                    {/* Upload Folder Option */}
+                                                    <label className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                                                        </svg>
+                                                        Upload Folder
+                                                        <input
+                                                            type="file"
+                                                            webkitdirectory="true"
+                                                            directory="true"
+                                                            multiple
+                                                            onChange={(e) => {
+                                                                handleFileUpload(e, true);
+                                                                setShowKnowledgeHub(false);
+                                                            }}
+                                                            className="hidden"
+                                                        />
+                                                    </label>
+                                                    
+                                                    {/* View Files Option */}
+                                                    <button
+                                                        onClick={() => {
+                                                            setShowFileList(true);
+                                                            setShowKnowledgeHub(false);
+                                                        }}
+                                                        className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer"
+                                                    >
+                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                                        </svg>
+                                                        View Knowledge Base
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
                                     
                                     {uploadStatus && (
                                         <div className={`absolute top-full left-0 right-0 mt-1 px-2 py-1 text-sm text-center rounded ${
                                             uploadStatus.isError ? 'bg-red-500' : 'bg-green-500'
-                                        } text-white`}>
+                                        } text-white z-40`}>
                                             {uploadStatus.message}
                                         </div>
                                     )}
@@ -1521,14 +1519,17 @@ const handleSubmit = async (e) => {
                                         </svg>
                                         Manage Users
                                     </button>
+                                    
+                                    {/* Model Settings Button */}
                                     <button
-                                        onClick={() => setShowFileList(true)}
-                                        className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100"
+                                        onClick={() => setShowModelSettings(true)}
+                                        className="flex items-center px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors duration-200"
                                     >
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                                         </svg>
-                                        View Files
+                                        Model Settings
                                     </button>
                                 </>
                             ) : (
@@ -1559,10 +1560,18 @@ const handleSubmit = async (e) => {
                                                         ? 'bg-red-100 text-red-800'
                                                         : 'bg-white shadow-md text-gray-800'
                                             }`}>
-                                                <div className="whitespace-pre-wrap break-words">
-                                                    {typeof message.content === 'string' 
-                                                        ? renderMessageContent(message)
-                                                        : String(message.content || '')}
+                                                <div className="break-words">
+                                                    {message.isUser ? (
+                                                        // For user messages, keep simple text rendering
+                                                        <div className="whitespace-pre-wrap">
+                                                            {String(message.content || '')}
+                                                        </div>
+                                                    ) : (
+                                                        // For AI messages, use markdown rendering
+                                                        typeof message.content === 'string' 
+                                                            ? renderMessageContent(message)
+                                                            : <MarkdownRenderer content={String(message.content || '')} />
+                                                    )}
                                                 </div>
                                                 {message.processingTime && (
                                                     <div className="text-xs mt-2 opacity-75">
@@ -1692,6 +1701,22 @@ const handleSubmit = async (e) => {
             {/* Show UserDashboard as modal only when a user is selected from the list */}
             {selectedUsername && (
                 <UserDashboard username={selectedUsername} onClose={() => setSelectedUsername(null)} />
+            )}
+            {/* Model Settings Modal */}
+            {showModelSettings && (
+                <ModelSettings 
+                    isOpen={showModelSettings}
+                    onClose={() => setShowModelSettings(false)}
+                    onSave={(settings) => {
+                        console.log('Model settings saved:', settings);
+                        // Optionally show a success notification
+                        setNotification({
+                            message: 'Model settings saved successfully!',
+                            type: 'success'
+                        });
+                        setTimeout(() => setNotification(null), 3000);
+                    }}
+                />
             )}
         </div>
     );

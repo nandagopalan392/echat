@@ -582,6 +582,7 @@ class HybridReranker:
 
 # Global reranker instance to be used throughout the application
 _reranker_instance = None
+_current_reranker_model = "BAAI/bge-reranker-large"
 
 def get_reranker():
     """Get or create a singleton reranker instance"""
@@ -589,3 +590,22 @@ def get_reranker():
     if (_reranker_instance is None):
         _reranker_instance = HybridReranker()
     return _reranker_instance
+
+def get_current_reranker_model():
+    """Get the current reranker model name"""
+    global _current_reranker_model
+    return _current_reranker_model
+
+def set_reranker_model(model_name: str):
+    """Set the reranker model and reset the instance"""
+    global _reranker_instance, _current_reranker_model
+    
+    logger.info(f"Setting reranker model to: {model_name}")
+    _current_reranker_model = model_name
+    
+    # Reset the reranker instance to force recreation with new model
+    _reranker_instance = None
+    
+    # Create new instance with the specified model
+    base_reranker = CrossEncoderReranker(model_name=model_name)
+    _reranker_instance = HybridReranker(base_reranker=base_reranker)

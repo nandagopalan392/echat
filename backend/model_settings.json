@@ -1,0 +1,4 @@
+{
+  "llm": "llama3.2",
+  "embedding": "granite-embedding"
+}

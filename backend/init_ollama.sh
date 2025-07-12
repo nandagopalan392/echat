@@ -3,6 +3,25 @@
 # Wait for Ollama to become available and pull models before starting the app
 # Updated to provide more robust model checking, pulling, and automatic monitoring
 
+# Initialize data directories with proper permissions
+echo "Initializing data directories..."
+mkdir -p /app/data/chroma_db /app/data/db
+chmod -R 777 /app/data
+
+# Ensure existing ChromaDB files have correct permissions
+if [ -f "/app/data/chroma_db/chroma.sqlite3" ]; then
+    echo "Fixing permissions for existing ChromaDB files..."
+    chmod 666 /app/data/chroma_db/chroma.sqlite3
+fi
+
+# Fix permissions for any existing collections
+if [ -d "/app/data/chroma_db" ]; then
+    find /app/data/chroma_db -type d -exec chmod 777 {} \;
+    find /app/data/chroma_db -type f -exec chmod 666 {} \;
+fi
+
+echo "Data directories initialized with proper permissions"
+
 MAX_RETRIES=30
 RETRY_INTERVAL=5
 OLLAMA_URL="${OLLAMA_HOST:-http://ollama:11434}"

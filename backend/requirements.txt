@@ -11,6 +11,7 @@ tokenizers>=0.14.0
 torch
 transformers
 sentence-transformers
+beautifulsoup4>=4.12.0
 
 # Document Processing
 python-magic
@@ -50,6 +51,10 @@ passlib[bcrypt]>=1.7.4
 SQLAlchemy>=2.0.0
 asyncio>=3.4.3
 
+# Web scraping
+beautifulsoup4>=4.11.0
+lxml>=4.9.0
+
 # UI
 streamlit
 streamlit-chat
@@ -57,3 +62,6 @@ streamlit-chat
 # Monitoring
 prometheus-client>=0.17.0  # Added for monitoring
 psutil>=5.9.5  # Added for system resource monitoring
+
+# Storage and database
+minio>=7.1.0

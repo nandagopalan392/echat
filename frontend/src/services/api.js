@@ -1,3 +1,19 @@
+// ========================================
+// DEBUG CONFIGURATION
+// ========================================
+// Set DEBUG_MODE to true to enable console logs for debugging
+// Set to false in production to reduce console noise
+const DEBUG_MODE = false;
+
+// ========================================
+
+// Debug helper function
+const debugLog = (message, ...args) => {
+  if (DEBUG_MODE) {
+    console.log(message, ...args);
+  }
+};
+
 const API_BASE_URL = 'http://localhost:8000';
 
 const getAuthHeader = () => {
@@ -8,10 +24,10 @@ const getAuthHeader = () => {
 export const api = {
     // RLHF feedback
     submitRLHFFeedback: async (sessionId, chosenIndex) => {
-        console.log('=== RLHF FEEDBACK SUBMISSION ===');
-        console.log('Session ID:', sessionId);
-        console.log('Chosen Index:', chosenIndex);
-        console.log('API Base URL:', API_BASE_URL);
+        debugLog('=== RLHF FEEDBACK SUBMISSION ===');
+        debugLog('Session ID:', sessionId);
+        debugLog('Chosen Index:', chosenIndex);
+        debugLog('API Base URL:', API_BASE_URL);
         
         try {
             const payload = {
@@ -19,8 +35,8 @@ export const api = {
                 chosen_index: chosenIndex
             };
             
-            console.log('Payload:', payload);
-            console.log('Auth Header:', getAuthHeader());
+            debugLog('Payload:', payload);
+            debugLog('Auth Header:', getAuthHeader());
             
             const response = await fetch(`${API_BASE_URL}/api/chat/rlhf-feedback`, {
                 method: 'POST',
@@ -31,8 +47,8 @@ export const api = {
                 body: JSON.stringify(payload)
             });
             
-            console.log('Response status:', response.status);
-            console.log('Response ok:', response.ok);
+            debugLog('Response status:', response.status);
+            debugLog('Response ok:', response.ok);
             
             if (!response.ok) {
                 const errorText = await response.text();
@@ -41,7 +57,7 @@ export const api = {
             }
             
             const result = await response.json();
-            console.log('RLHF feedback success:', result);
+            debugLog('RLHF feedback success:', result);
             return result;
         } catch (error) {
             console.error('RLHF feedback error:', error);
@@ -78,7 +94,7 @@ export const api = {
     // Auth endpoints
     login: async (username, password) => {
         try {
-            console.log('Login attempt:', { username });
+            debugLog('Login attempt:', { username });
             const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
                 method: 'POST',
                 headers: {
@@ -93,7 +109,7 @@ export const api = {
             }
 
             const data = await response.json();
-            console.log('Login response:', data);
+            debugLog('Login response:', data);
 
             if (data.access_token) {
                 localStorage.setItem('token', data.access_token);
@@ -109,7 +125,7 @@ export const api = {
     // Add register endpoint
     register: async (username, password) => {
         try {
-            console.log('Register attempt:', { username });
+            debugLog('Register attempt:', { username });
             const response = await fetch(`${API_BASE_URL}/api/auth/register`, {
                 method: 'POST',
                 headers: {
@@ -121,7 +137,7 @@ export const api = {
             });
 
             const data = await response.json();
-            console.log('Register response:', data);
+            debugLog('Register response:', data);
 
             if (!response.ok) {
                 throw new Error(data.detail || 'Registration failed');

@@ -12,13 +12,19 @@ services:
     volumes:
       - ./backend:/app
       - sqlite_data:/app/data/db:rw        # Persistent SQLite database
-      - chroma_data:/app/data/chroma_db:rw # Persistent Chroma database
+      - ./chroma_data:/app/data/chroma_db:rw # Use bind mount instead of named volume
     environment:
       - PYTHONUNBUFFERED=1
       - PIP_DEFAULT_TIMEOUT=100
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_DB_PATH=/app/data/chroma_db
       - SQLITE_DB_PATH=/app/data/db/chat.db
+      - DOCUMENT_DB_PATH=/app/data/db/documents.db
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minio_user
+      - MINIO_SECRET_KEY=minio_password
+      - MINIO_SECURE=false
+      - MINIO_BUCKET=documents
       - HOST_IP=0.0.0.0
       - UVICORN_TIMEOUT=600
       - REQUEST_TIMEOUT=600
@@ -35,11 +41,14 @@ services:
     command: bash init_ollama.sh
     depends_on:
       - ollama
+      - minio
     deploy:
       resources:
         limits:
           memory: 2G
           cpus: '1.0'
+    # Ensure the container runs with permissions to modify volume data
+    user: "0:0"
 
   frontend:
     build:
@@ -96,7 +105,6 @@ services:
   minio:
     image: quay.io/minio/minio:latest
     container_name: echat-minio
-    user: "${UID}:${GID}" 
     ports:
       - "9100:9000"
       - "9101:9001"
@@ -106,12 +114,12 @@ services:
       - MINIO_ADDRESS=:9000
       - MINIO_CONSOLE_ADDRESS=:9001
     volumes:
-      - ./minio_data:/minio_data
+      - minio_data:/data
     networks:
       - echat-network
-    command: server /minio_data --console-address ":9001"
+    command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9100/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
       timeout: 20s
       retries: 3
@@ -123,7 +131,7 @@ networks:
 volumes:
   sqlite_data:
     driver: local
-  chroma_data:
-    driver: local
   ollama_data:
+    driver: local
+  minio_data:
     driver: local

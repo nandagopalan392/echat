@@ -1,0 +1,206 @@
+/* Base markdown content styles */
+.markdown-content {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  line-height: 1.6;
+  color: inherit;
+  word-break: break-word;
+}
+
+/* Headings */
+.markdown-content h1 {
+  font-size: 1.75em;
+  font-weight: 700;
+  margin-top: 1.5em;
+  margin-bottom: 0.75em;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+  padding-bottom: 0.3em;
+}
+
+.markdown-content h2 {
+  font-size: 1.5em;
+  font-weight: 700;
+  margin-top: 1.5em;
+  margin-bottom: 0.75em;
+}
+
+.markdown-content h3 {
+  font-size: 1.25em;
+  font-weight: 700;
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+}
+
+/* Lists */
+.markdown-content ul,
+.markdown-content ol {
+  margin-top: 0.5em;
+  margin-bottom: 1em;
+  padding-left: 2em;
+}
+
+.markdown-content ul {
+  list-style-type: disc;
+}
+
+.markdown-content ol {
+  list-style-type: decimal;
+}
+
+.markdown-content li {
+  margin-bottom: 0.25em;
+}
+
+/* Text formatting */
+.markdown-content strong {
+  font-weight: bold !important;
+}
+
+.markdown-content em {
+  font-style: italic;
+}
+
+.markdown-content blockquote {
+  border-left: 4px solid #ddd;
+  padding-left: 1em;
+  color: #555;
+  font-style: italic;
+  margin: 1em 0;
+}
+
+/* Code blocks */
+.markdown-content code {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  background-color: rgba(0, 0, 0, 0.05);
+  color: #1f2937;
+  padding: 0.2em 0.4em;
+  border-radius: 3px;
+  font-size: 85%;
+}
+
+.markdown-content pre {
+  margin: 1em 0;
+  padding: 1em;
+  overflow-x: auto;
+  background-color: rgba(0, 0, 0, 0.05);
+  border-radius: 3px;
+}
+
+.markdown-content pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 100%;
+  color: #1f2937 !important;
+}
+
+/* Links */
+.markdown-content a {
+  color: #0366d6;
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+}
+
+/* Tables */
+.markdown-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+}
+
+.markdown-content table th,
+.markdown-content table td {
+  border: 1px solid #ddd;
+  padding: 0.5em;
+  text-align: left;
+}
+
+.markdown-content table th {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+/* Images */
+.markdown-content img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Horizontal rule */
+.markdown-content hr {
+  margin: 1.5em 0;
+  border: 0;
+  border-top: 1px solid #ddd;
+}
+
+/* Nested lists */
+.markdown-content ul ul,
+.markdown-content ol ul {
+  list-style-type: circle;
+}
+
+.markdown-content ul ul ul,
+.markdown-content ul ol ul,
+.markdown-content ol ul ul,
+.markdown-content ol ol ul {
+  list-style-type: square;
+}
+
+/* Special styling for think bubble content */
+.think-bubble-content.markdown-content {
+  font-size: 0.9em;
+}
+
+.think-bubble-content.markdown-content h1,
+.think-bubble-content.markdown-content h2,
+.think-bubble-content.markdown-content h3 {
+  font-size: 1em;
+  margin-top: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.think-bubble-content.markdown-content p {
+  margin: 0.25rem 0;
+}
+
+/* Ensure code highlighting works well in both light and dark contexts */
+.hljs {
+  background: rgba(0, 0, 0, 0.05) !important;
+  color: #1f2937 !important;
+}
+
+/* Override any highlight.js theme that might set white text */
+.markdown-content .hljs {
+  color: #1f2937 !important;
+}
+
+/* Ensure inline code is always visible with high contrast */
+.markdown-content p code,
+.markdown-content li code,
+.markdown-content td code,
+.markdown-content span code {
+  background-color: rgba(0, 0, 0, 0.08) !important;
+  color: #1f2937 !important;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+/* For user messages (which might be on dark background) */
+.bg-indigo-600 .markdown-content a {
+  color: #bfdbfe;
+}
+
+.bg-indigo-600 .markdown-content code {
+  background: rgba(255, 255, 255, 0.2);
+  color: #f1f5f9;
+}
+
+.bg-indigo-600 .markdown-content pre {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.bg-indigo-600 .markdown-content blockquote {
+  border-left-color: rgba(255, 255, 255, 0.3);
+  background-color: rgba(255, 255, 255, 0.1);
+}
