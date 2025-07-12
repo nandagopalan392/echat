@@ -20,9 +20,10 @@ const FileListDashboard = ({ onClose }) => {
             const response = await api.get('/api/admin/files');
             console.log('Files response:', response); // Debug log
             
-            if (response?.data) {
-                setFiles(response.data.files || []);
-                setStats(response.data.stats || {
+            // The API returns data directly, not wrapped in a data field
+            if (response && typeof response === 'object') {
+                setFiles(response.files || []);
+                setStats(response.stats || {
                     totalFiles: 0,
                     totalSize: 0,
                     formatStats: []

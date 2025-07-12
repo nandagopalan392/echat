@@ -580,18 +580,40 @@ def scrape_ollama_library() -> Dict[str, Any]:
 
 def categorize_model(model_name: str) -> str:
     """
-    Categorize a model based on its name
+    Categorize a model based on its name with comprehensive patterns
     """
     name_lower = model_name.lower()
     
-    if any(keyword in name_lower for keyword in ['embed', 'embedding']):
-        return 'embedding'
-    elif any(keyword in name_lower for keyword in ['llava', 'vision', 'multimodal']):
+    # Comprehensive embedding model patterns
+    embedding_patterns = [
+        'embed', 'bge', 'minilm', 'all-minilm', 'nomic', 'e5-', 'sentence',
+        'text-embedding', 'instructor', 'gte-', 'multilingual-e5', 'arctic-embed',
+        'mxbai-embed', 'snowflake-arctic-embed', 'paraphrase-', 'distiluse',
+        'stella-', 'voyage-', 'cohere-embed', 'text-ada-', 'text-davinci-',
+        'text-curie-', 'text-babbage-'
+    ]
+    
+    # Check for embedding patterns
+    for pattern in embedding_patterns:
+        if pattern in name_lower:
+            return 'embedding'
+    
+    # Check if it starts with known embedding prefixes
+    embedding_prefixes = ['bge-', 'all-minilm-', 'e5-', 'gte-', 'nomic-', 'mxbai-embed-']
+    for prefix in embedding_prefixes:
+        if name_lower.startswith(prefix):
+            return 'embedding'
+    
+    # Check for reranking models
+    if 'rerank' in name_lower or 'reranker' in name_lower:
+        return 'reranking'
+    
+    # Check for vision/multimodal models
+    if any(keyword in name_lower for keyword in ['llava', 'vision', 'multimodal']):
         return 'vision'
-    elif any(keyword in name_lower for keyword in ['rerank']):
-        return 'reranker'
-    else:
-        return 'llm'
+    
+    # Default to LLM for everything else
+    return 'llm'
 
 
 def get_available_models(use_cache: bool = True) -> Dict[str, Any]:
@@ -672,9 +694,11 @@ def get_available_ollama_models(use_cache: bool = True) -> List[Dict[str, Any]]:
     # Convert dictionary to list format expected by main.py
     models_list = []
     for model_name, model_info in models_dict.items():
+        # Ensure proper categorization
+        category = model_info.get('category', categorize_model(model_name))
         models_list.append({
             'name': model_name,
-            'category': model_info.get('category', 'llm'),
+            'category': category,
             'description': model_info.get('description', ''),
             'tags': model_info.get('tags', []),
             'size': model_info.get('size', 'Unknown'),

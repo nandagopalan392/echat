@@ -46,6 +46,10 @@ COPY --from=builder /usr/local/lib/python3.10/site-packages/ /usr/local/lib/pyth
 COPY . .
 RUN chmod +x init_ollama.sh
 
+# Create directories with proper permissions
+RUN mkdir -p /app/data/chroma_db /app/data/db && \
+    chmod -R 777 /app/data
+
 # Expose port
 EXPOSE 8000  
 # Run the application
