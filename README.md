@@ -99,13 +99,6 @@ All services are configured to run on localhost:
 - **MinIO API**: http://localhost:9100 (File storage API)
 - **MinIO Console**: http://localhost:9101 (File management UI)
 
-## Performance Expectations
-
-### Response Times (Typical)
-- **With GPU (RTX 3050+)**: 2-5 seconds per response
-- **CPU Only**: 10-30 seconds per response
-- **First Response**: Additional 30-60 seconds for model loading
-
 ### Memory Usage
 - **Total System**: ~4-6GB RAM during operation
 - **GPU VRAM**: ~4-6GB for DeepSeek R1 model
