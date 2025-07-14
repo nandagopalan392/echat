@@ -13,13 +13,11 @@ from chat_db import ChatDB
 from rag import ChatPDF, get_chatpdf_instance
 from rlhf import RLHF
 import logging
-import os
 import pandas as pd
 from docx import Document
 import sqlite3
 from sse_starlette.sse import EventSourceResponse
 import asyncio
-import json
 import time
 from contextlib import contextmanager
 import shutil
@@ -1143,7 +1141,7 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
                         local_models.append({
                             'name': model_name,
                             'category': category,
-                            'size': model_size,
+                            'size': format_model_size(model_size),
                             'modified_at': model_modified,
                             'source': 'local',
                             'description': f"Locally installed {category} model"
@@ -1210,7 +1208,7 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
                     'name': model_name,
                     'category': model_category,
                     'description': model.get('description', ''),
-                    'size': model.get('size', 'Unknown'),
+                    'size': format_model_size(model.get('size', 'Unknown')),
                     'source': 'library',
                     'tags': model.get('tags', [])
                 }
@@ -1436,6 +1434,173 @@ async def update_models_settings(
         logger.error(f"Error updating models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update models: {str(e)}")
 
+@app.post("/api/models/simple-settings")
+async def update_simple_models_settings(
+    request: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update model settings without complex validation - for basic UI"""
+    try:
+        import httpx
+        import asyncio
+        from rag import check_model_compatibility
+        
+        llm_model = request.get('llm')
+        embedding_model = request.get('embedding')
+        
+        if not llm_model or not embedding_model:
+            raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Check GPU compatibility before downloading
+        try:
+            logger.info(f"Checking GPU compatibility for LLM: {llm_model}, Embedding: {embedding_model}")
+            
+            # Check LLM model compatibility
+            llm_compatible, llm_message, llm_details = check_model_compatibility(llm_model)
+            logger.info(f"LLM compatibility check: {llm_compatible} - {llm_message}")
+            
+            # Check embedding model compatibility  
+            embedding_compatible, embedding_message, embedding_details = check_model_compatibility(embedding_model)
+            logger.info(f"Embedding compatibility check: {embedding_compatible} - {embedding_message}")
+            
+            # Calculate combined memory requirement
+            combined_memory = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
+            available_memory = llm_details['available_memory_mb']
+            combined_compatible = combined_memory <= available_memory
+            
+            logger.info(f"Combined memory check: {combined_memory}MB required, {available_memory}MB available, compatible: {combined_compatible}")
+            
+            # Only warn about compatibility issues, don't block downloads
+            compatibility_warnings = []
+            
+            if not llm_compatible:
+                compatibility_warnings.append(f"LLM model '{llm_model}' may not fit in GPU memory: {llm_message}")
+            
+            if not embedding_compatible:
+                compatibility_warnings.append(f"Embedding model '{embedding_model}' may not fit in GPU memory: {embedding_message}")
+            
+            if not combined_compatible:
+                shortage = combined_memory - available_memory
+                compatibility_warnings.append(f"Combined models may require ~{combined_memory}MB but only {available_memory}MB available (potential shortage: {shortage}MB)")
+            
+            if compatibility_warnings:
+                logger.warning("GPU compatibility warnings (proceeding with download): " + "; ".join(compatibility_warnings))
+            else:
+                logger.info("GPU compatibility check passed - all models should fit in memory")
+            
+        except Exception as e:
+            # Log GPU check errors but don't block the process
+            logger.warning(f"Could not check GPU compatibility (proceeding anyway): {e}")
+            compatibility_warnings = [f"Could not verify GPU compatibility: {str(e)}"]
+        
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        # Check which models need to be downloaded
+        models_to_download = []
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Get currently installed models
+            try:
+                response = await client.get(f"{ollama_host}/api/tags")
+                if response.status_code == 200:
+                    data = response.json()
+                    installed_models = {model.get('name', '') for model in data.get('models', [])}
+                else:
+                    installed_models = set()
+            except Exception as e:
+                logger.warning(f"Could not fetch installed models: {e}")
+                installed_models = set()
+            
+            # Check if models need downloading
+            if llm_model not in installed_models:
+                models_to_download.append(llm_model)
+                
+            if embedding_model not in installed_models:
+                models_to_download.append(embedding_model)
+            
+            # Download missing models with progress tracking
+            for model_name in models_to_download:
+                logger.info(f"Downloading model: {model_name}")
+                try:
+                    download_response = await client.post(
+                        f"{ollama_host}/api/pull",
+                        json={"name": model_name},
+                        timeout=600.0  # 10 minutes timeout for model download
+                    )
+                    
+                    if download_response.status_code != 200:
+                        logger.error(f"Failed to download model {model_name}: {download_response.status_code}")
+                        raise HTTPException(
+                            status_code=500, 
+                            detail=f"Failed to download model {model_name}"
+                        )
+                    else:
+                        logger.info(f"Successfully downloaded model: {model_name}")
+                        
+                except httpx.TimeoutException:
+                    logger.error(f"Timeout downloading model {model_name}")
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Timeout downloading model {model_name}. Please try again."
+                    )
+                except Exception as e:
+                    logger.error(f"Error downloading model {model_name}: {e}")
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Failed to download model {model_name}: {str(e)}"
+                    )
+        
+        # Get RAG instance
+        rag = get_chatpdf_instance()
+        
+        # Check if embedding model changed - if so, we need to re-ingest
+        embedding_changed = rag.embedding_model != embedding_model
+        
+        # Update the models
+        rag.update_models(llm_model, embedding_model)
+        
+        # Save settings to config file
+        config_path = "model_settings.json"
+        settings = {
+            'llm': llm_model,
+            'embedding': embedding_model
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(settings, f, indent=2)
+        
+        response_data = {
+            "success": True,
+            "message": "Models updated successfully",
+            "llm": llm_model,
+            "embedding": embedding_model,
+            "embedding_changed": embedding_changed,
+            "downloaded_models": models_to_download
+        }
+        
+        # Add GPU compatibility warnings if any
+        if 'compatibility_warnings' in locals() and compatibility_warnings:
+            response_data["gpu_warnings"] = compatibility_warnings
+            response_data["message"] += f". GPU compatibility warnings: {'; '.join(compatibility_warnings)}"
+        
+        # Add download info to message
+        if models_to_download:
+            downloaded_list = ", ".join(models_to_download)
+            response_data["message"] += f". Downloaded models: {downloaded_list}"
+        
+        # If embedding model changed, suggest re-ingestion
+        if embedding_changed:
+            response_data["message"] += ". Embedding model changed - you may want to re-ingest documents."
+            response_data["reingest_suggested"] = True
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating models: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update models: {str(e)}")
+
 @app.get("/api/admin/files")
 async def list_admin_files():
     """Get list of all files with statistics for admin dashboard"""
@@ -1619,7 +1784,6 @@ async def reingest_all_documents(current_user: dict = Depends(get_current_user))
         logger.error(f"Error during re-ingestion: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to re-ingest documents: {str(e)}")
 
-
 @app.post("/api/admin/cleanup-orphaned-documents")
 async def cleanup_orphaned_documents(current_user: dict = Depends(get_current_user)):
     """Clean up orphaned documents (in database but not in MinIO)"""
@@ -1731,28 +1895,181 @@ async def check_model_compatibility_endpoint(
         logger.error(f"Error checking model compatibility: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to check model compatibility: {str(e)}")
 
-def generate_compatibility_recommendations(llm_details: dict, embedding_details: dict, combined_compatible: bool) -> List[str]:
-    """Generate recommendations based on compatibility check"""
-    recommendations = []
-    
-    if not combined_compatible:
-        # If models don't fit together, suggest alternatives
-        if llm_details['required_memory_mb'] > embedding_details['required_memory_mb']:
-            recommendations.append("Consider using a smaller LLM model (e.g., 3B or 7B parameter version)")
+@app.post("/api/models/check-gpu")
+async def check_gpu_compatibility(
+    request: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check GPU compatibility for model selection"""
+    try:
+        from rag import check_model_compatibility
         
-        recommendations.append("Consider using a smaller embedding model")
-        recommendations.append("Close other GPU-intensive applications to free up memory")
+        llm_model = request.get('llm')
+        embedding_model = request.get('embedding')
         
-        shortage = llm_details['required_memory_mb'] + embedding_details['required_memory_mb'] - llm_details['available_memory_mb']
-        if shortage > 0:
-            recommendations.append(f"You need approximately {shortage}MB more GPU memory")
+        if not llm_model or not embedding_model:
+            raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Check compatibility for both models
+        llm_compatible, llm_message, llm_details = check_model_compatibility(llm_model)
+        embedding_compatible, embedding_message, embedding_details = check_model_compatibility(embedding_model)
+        
+        # Calculate combined memory requirement
+        combined_memory = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
+        available_memory = llm_details['available_memory_mb']
+        combined_compatible = combined_memory <= available_memory
+        
+        return {
+            "compatible": llm_compatible and embedding_compatible and combined_compatible,
+            "llm_check": {
+                "compatible": llm_compatible,
+                "message": llm_message,
+                "required_mb": llm_details['required_memory_mb']
+            },
+            "embedding_check": {
+                "compatible": embedding_compatible,
+                "message": embedding_message,
+                "required_mb": embedding_details['required_memory_mb']
+            },
+            "combined_check": {
+                "compatible": combined_compatible,
+                "required_mb": combined_memory,
+                "available_mb": available_memory,
+                "shortage_mb": max(0, combined_memory - available_memory)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking GPU compatibility: {str(e)}")
+        # Return compatible=true as fallback to not block users
+        return {
+            "compatible": True,
+            "message": f"Could not check compatibility: {str(e)}",
+            "llm_check": {"compatible": True, "message": "Check skipped"},
+            "embedding_check": {"compatible": True, "message": "Check skipped"},
+            "combined_check": {"compatible": True, "message": "Check skipped"}
+        }
+
+@app.get("/api/files/list")
+async def list_files(token: str = Depends(oauth2_scheme)):
+    """Get list of uploaded files"""
+    try:
+        rag = get_chatpdf_instance()
+        doc_storage = rag.doc_storage
+        
+        # Get all documents
+        all_documents = doc_storage.list_all_documents()
+        
+        # Format for frontend
+        files = []
+        for doc in all_documents:
+            # Determine if document is indexed (has successful ingestion)
+            model_status = doc.get('model_status', {})
+            indexed = any(status == 'completed' for status in model_status.values())
+            
+            # Get the embedding model used (first completed one, or first available)
+            embedding_model = None
+            for model, status in model_status.items():
+                if status == 'completed':
+                    embedding_model = model
+                    break
+            if not embedding_model and model_status:
+                embedding_model = list(model_status.keys())[0]
+            
+            files.append({
+                "filename": doc.get('filename', 'Unknown'),
+                "size": doc.get('file_size', 0),  # Map file_size to size
+                "upload_date": doc.get('uploaded_at', ''),  # Map uploaded_at to upload_date  
+                "indexed": indexed,  # Determine from model_status
+                "embedding_model": embedding_model or 'Unknown'  # Get from model_status
+            })
+        
+        return {"files": files, "total": len(files)}
+        
+    except Exception as e:
+        logger.error(f"Error listing files: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/vectorstore/stats")
+async def get_vectorstore_stats(token: str = Depends(oauth2_scheme)):
+    """Get vector store statistics"""
+    try:
+        rag = get_chatpdf_instance()
+        
+        # Get vector store statistics
+        stats = rag.get_vectorstore_stats()
+        
+        return {"stats": stats}
+    except Exception as e:
+        logger.error(f"Error getting vector store stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/vectorstore/reingest")
+async def reingest_vectorstore(token: str = Depends(oauth2_scheme)):
+    """Re-ingest all documents into vector store"""
+    try:
+        rag = get_chatpdf_instance()
+        
+        # Re-ingest all documents
+        success = rag.re_ingest_all_documents()
+        
+        if success:
+            return {"message": "Documents re-ingested successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Re-ingestion failed")
+    except Exception as e:
+        logger.error(f"Error re-ingesting documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/vectorstore/clear")
+async def clear_vectorstore(token: str = Depends(oauth2_scheme)):
+    """Clear the entire vector store"""
+    try:
+        rag = get_chatpdf_instance()
+        
+        # Clear vector store
+        success = rag.clear_vectorstore()
+        
+        if success:
+            return {"message": "Vector store cleared successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to clear vector store")
+    except Exception as e:
+        logger.error(f"Error clearing vector store: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def format_model_size(size_value) -> str:
+    """Format model size from bytes or string to human-readable format"""
+    if not size_value or size_value == 'Unknown':
+        return "Unknown"
     
-    elif llm_details['available_memory_mb'] - (llm_details['required_memory_mb'] + embedding_details['required_memory_mb']) < 1024:
-        # If barely fitting, warn about potential issues
-        recommendations.append("Models will fit but with minimal memory margin - consider monitoring GPU memory usage")
-        recommendations.append("Close unnecessary applications to ensure stable operation")
-    
+    # If it's already a formatted string, return as-is
+    if isinstance(size_value, str):
+        # Check if it contains size indicators
+        if any(unit in size_value.lower() for unit in ['gb', 'mb', 'kb', 'various']):
+            return size_value
+        # Try to parse as numeric bytes
+        try:
+            size_bytes = int(float(size_value))
+        except (ValueError, TypeError):
+            return size_value
     else:
-        recommendations.append("✅ Sufficient GPU memory available for stable operation")
+        try:
+            size_bytes = int(size_value)
+        except (ValueError, TypeError):
+            return str(size_value) if size_value else "Unknown"
     
-    return recommendations
+    if size_bytes == 0:
+        return "Unknown"
+        
+    if size_bytes >= 1073741824:  # 1GB = 1024^3 bytes
+        size_gb = size_bytes / 1073741824
+        return f"{size_gb:.1f}GB"
+    elif size_bytes >= 1048576:  # 1MB = 1024^2 bytes  
+        size_mb = size_bytes / 1048576
+        return f"{size_mb:.0f}MB"
+    elif size_bytes >= 1024:  # 1KB = 1024 bytes
+        size_kb = size_bytes / 1024
+        return f"{size_kb:.0f}KB"
+    else:
+        return f"{size_bytes}B"

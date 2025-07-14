@@ -14,7 +14,7 @@ const debugLog = (message, ...args) => {
   }
 };
 
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = ''; // Use relative URLs to avoid CORS issues
 
 const getAuthHeader = () => {
     const token = localStorage.getItem('token');
@@ -477,6 +477,494 @@ export const api = {
             return data;
         } catch (error) {
             console.error('Error fetching user stats:', error);
+            throw error;
+        }
+    },
+
+    // New function to get general user statistics
+    getUserStatsGeneral: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/users/stats`, {
+                headers: {
+                    ...getAuthHeader(),
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch general stats');
+            }
+            
+            const data = await response.json();
+            return data;
+        } catch (error) {
+            console.error('Error fetching general stats:', error);
+            throw error;
+        }
+    },
+
+    // File management
+    listFiles: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/files/list`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch files');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('List files error:', error);
+            throw error;
+        }
+    },
+
+    deleteFile: async (filename) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/files/${encodeURIComponent(filename)}`, {
+                method: 'DELETE',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to delete file');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Delete file error:', error);
+            throw error;
+        }
+    },
+
+    // Model settings
+    getModelSettings: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/models/settings`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch model settings');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get model settings error:', error);
+            throw error;
+        }
+    },
+
+    updateModelSettings: async (settings) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/models/settings`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(settings)
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to update model settings');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Update model settings error:', error);
+            throw error;
+        }
+    },
+
+    getAvailableModels: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/models/available`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch available models');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get available models error:', error);
+            throw error;
+        }
+    },
+
+    // User management
+    getUserProfile: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/users/profile`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch user profile');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get user profile error:', error);
+            throw error;
+        }
+    },
+
+    getUsers: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/admin/users`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch users');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get users error:', error);
+            throw error;
+        }
+    },
+
+    deleteUser: async (userId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}`, {
+                method: 'DELETE',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to delete user');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Delete user error:', error);
+            throw error;
+        }
+    },
+
+    updateUserRole: async (userId, newRole) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}/role`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify({ role: newRole })
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to update user role');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Update user role error:', error);
+            throw error;
+        }
+    },
+
+    getUserActivities: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/users/activities`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch user activities');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get user activities error:', error);
+            throw error;
+        }
+    },
+
+    // Vector store and embedding management
+    getVectorStoreStats: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/vectorstore/stats`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch vector store stats');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get vector store stats error:', error);
+            throw error;
+        }
+    },
+
+    reingestDocuments: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/vectorstore/reingest`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to reingest documents');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Reingest documents error:', error);
+            throw error;
+        }
+    },
+
+    clearVectorStore: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/vectorstore/clear`, {
+                method: 'DELETE',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to clear vector store');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Clear vector store error:', error);
+            throw error;
+        }
+    },
+
+    // User management functions
+    getUserProfile: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/users/profile`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch user profile');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get user profile error:', error);
+            throw error;
+        }
+    },
+
+    getUsers: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/admin/users`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch users');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get users error:', error);
+            throw error;
+        }
+    },
+
+    createUser: async (userData) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/admin/add-user`, {
+                method: 'POST',
+                headers: {
+                    ...getAuthHeader(),
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(userData)
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to create user');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Create user error:', error);
+            throw error;
+        }
+    },
+
+    deleteUser: async (userId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/users/${userId}`, {
+                method: 'DELETE',
+                headers: {
+                    ...getAuthHeader(),
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to delete user');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Delete user error:', error);
+            throw error;
+        }
+    },
+
+    updateUserRole: async (userId, role) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/users/${userId}/role`, {
+                method: 'PUT',
+                headers: {
+                    ...getAuthHeader(),
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ role })
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to update user role');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Update user role error:', error);
+            throw error;
+        }
+    },
+
+    getUserActivities: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/users/activities`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch user activities');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get user activities error:', error);
+            throw error;
+        }
+    },
+
+    // Note: getUserStats already exists above
+
+    // Embedding model management (deprecated - use get('/api/models/available') instead)
+    getEmbeddingModels: async () => {
+        console.warn('getEmbeddingModels is deprecated. Use get("/api/models/available") instead.');
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/models/available`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to fetch models');
+            }
+            
+            const data = await response.json();
+            return {
+                models: data.embedding_models || []
+            };
+        } catch (error) {
+            console.error('Get embedding models error:', error);
+            throw error;
+        }
+    },
+
+    switchEmbeddingModel: async (modelName) => {
+        console.warn('switchEmbeddingModel is deprecated. Use post("/api/models/settings") instead.');
+        try {
+            // Get current models first
+            const currentResponse = await fetch(`${API_BASE_URL}/api/models/current`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!currentResponse.ok) {
+                throw new Error('Failed to get current models');
+            }
+            
+            const currentModels = await currentResponse.json();
+            
+            // Update with new embedding model
+            const response = await fetch(`${API_BASE_URL}/api/models/settings`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify({
+                    llm: currentModels.llm,
+                    embedding: modelName
+                })
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to switch embedding model');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Switch embedding model error:', error);
             throw error;
         }
     }

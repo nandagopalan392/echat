@@ -875,3 +875,54 @@ class ChatDB:
                         
         except Exception as e:
             logger.error(f"Error recovering RLHF responses for session {session_id}: {str(e)}")
+
+    def get_user_count(self):
+        """Get total number of users"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM users")
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting user count: {str(e)}")
+            return 0
+    
+    def get_active_user_count(self):
+        """Get number of users who have been active in the last 30 days"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT username) FROM chat_sessions 
+                    WHERE last_updated >= datetime('now', '-30 days')
+                """)
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting active user count: {str(e)}")
+            return 0
+    
+    def get_total_sessions(self):
+        """Get total number of chat sessions"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM chat_sessions")
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting total sessions: {str(e)}")
+            return 0
+    
+    def get_total_messages(self):
+        """Get total number of messages"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM messages")
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting total messages: {str(e)}")
+            return 0

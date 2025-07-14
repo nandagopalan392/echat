@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { uploadFile } from '../api';
+import { api } from '../services/api';
 
 const FileUpload = ({ token }) => {
     const [progress, setProgress] = useState(0);
@@ -13,7 +13,7 @@ const FileUpload = ({ token }) => {
         setProgress(0);
 
         try {
-            await uploadFile(file, token, (progress) => {
+            await api.uploadFileWithProgress(file, false, "", (progress) => {
                 setProgress(progress);
             });
             

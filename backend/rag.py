@@ -1010,23 +1010,44 @@ class ChatPDF:
         """Get statistics about the vector store and collections"""
         try:
             if not self.vector_store:
+                logger.warning("Vector store not initialized")
                 return {
                     "error": "No vector store initialized",
                     "collections": 0,
-                    "total_documents": 0
+                    "total_documents": 0,
+                    "models_loaded": self.models_loaded,
+                    "embedding_model": self.embedding_model
                 }
             
             # Get ChromaDB client
-            chroma_client = self.vector_store._client
+            try:
+                chroma_client = self.vector_store._client
+            except AttributeError as e:
+                logger.error(f"Vector store client not accessible: {e}")
+                return {
+                    "error": "Vector store client not accessible",
+                    "collections": 0,
+                    "total_documents": 0,
+                    "vector_store_type": type(self.vector_store).__name__
+                }
             
             # Get all collections
-            collections = chroma_client.list_collections()
+            try:
+                collections = chroma_client.list_collections()
+            except Exception as e:
+                logger.error(f"Failed to list collections: {e}")
+                return {
+                    "error": f"Failed to list collections: {str(e)}",
+                    "collections": 0,
+                    "total_documents": 0
+                }
             
             stats = {
                 "total_collections": len(collections),
                 "current_collection": self._get_collection_name(),
                 "current_embedding_model": self.embedding_model,
-                "collections": []
+                "collections": [],
+                "size_bytes": 0  # Initialize size counter
             }
             
             total_docs = 0
@@ -1050,15 +1071,110 @@ class ChatPDF:
                     })
             
             stats["total_documents"] = total_docs
+            
+            # Calculate approximate size by checking ChromaDB directory
+            try:
+                import os
+                chroma_path = Path(self.chroma_path)
+                if chroma_path.exists():
+                    total_size = 0
+                    for root, dirs, files in os.walk(chroma_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            try:
+                                total_size += os.path.getsize(file_path)
+                            except OSError:
+                                pass  # Skip files we can't access
+                    stats["size_bytes"] = total_size
+            except Exception as e:
+                logger.warning(f"Could not calculate vector store size: {e}")
+                stats["size_bytes"] = 0
+            
             return stats
             
         except Exception as e:
             logger.error(f"Error getting vector store stats: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 "error": str(e),
                 "collections": 0,
-                "total_documents": 0
+                "total_documents": 0,
+                "traceback": traceback.format_exc()
             }
+    
+    def get_available_embedding_models(self) -> List[str]:
+        """Get list of available embedding models from Ollama"""
+        try:
+            # Get all models from Ollama
+            response = requests.get(f"{self.ollama_url}/api/tags")
+            if response.status_code == 200:
+                models_data = response.json()
+                models = models_data.get('models', [])
+                
+                # Filter for embedding models
+                embedding_models = []
+                for model in models:
+                    model_name = model.get('name', '').lower()
+                    # Check if it's an embedding model based on name patterns
+                    if any(keyword in model_name for keyword in [
+                        'embed', 'embedding', 'bge', 'e5', 'sentence-transformer',
+                        'all-minilm', 'multilingual-e5'
+                    ]):
+                        embedding_models.append(model.get('name', ''))
+                
+                return embedding_models
+            else:
+                logger.error(f"Failed to fetch models from Ollama: {response.status_code}")
+                return []
+        except Exception as e:
+            logger.error(f"Error getting available embedding models: {e}")
+            return []
+    
+    def get_current_embedding_model(self) -> str:
+        """Get the currently configured embedding model"""
+        return self.embedding_model if self.embedding_model else ""
+    
+    def switch_embedding_model(self, model_name: str) -> bool:
+        """Switch to a different embedding model"""
+        try:
+            # Validate model is available
+            available_models = self.get_available_embedding_models()
+            if model_name not in available_models:
+                logger.error(f"Model {model_name} is not available")
+                return False
+            
+            # Update the embedding model
+            old_model = self.embedding_model
+            self.embedding_model = model_name
+            
+            # Reinitialize the embeddings with new model
+            try:
+                self.embeddings = OllamaEmbeddings(
+                    model=model_name,
+                    base_url=self.ollama_url
+                )
+                
+                # Clear the vector store to force reinitialization with new embeddings
+                self.vector_store = None
+                self.retriever = None
+                
+                # Update config if available
+                if hasattr(self, 'config'):
+                    self.config['embedding_model'] = model_name
+                
+                logger.info(f"Successfully switched embedding model from {old_model} to {model_name}")
+                return True
+                
+            except Exception as e:
+                # Rollback on failure
+                self.embedding_model = old_model
+                logger.error(f"Failed to switch embedding model: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error switching embedding model: {e}")
+            return False
 
     async def stream_response(self, question: str, style: str = "standard"):
         """
@@ -1440,6 +1556,100 @@ class ChatPDF:
             logger.error(f"ChromaDB write test failed: {e}")
             return False
 
+    def remove_document_from_vectorstore(self, filename: str) -> bool:
+        """Remove document chunks from vector store"""
+        try:
+            if not self.vector_store:
+                logger.warning("Vector store not initialized")
+                return False
+            
+            # Get collection name for current embedding model
+            collection_name = f"collection_{self.embedding_model.replace('/', '_').replace('-', '_')}"
+            
+            # Get ChromaDB client
+            chroma_client = self.vector_store._client
+            
+            # Get the collection
+            try:
+                collection = chroma_client.get_collection(collection_name)
+            except Exception as e:
+                logger.warning(f"Collection {collection_name} not found: {e}")
+                return True  # Consider it success if collection doesn't exist
+            
+            # Query for documents with this filename in metadata
+            try:
+                results = collection.get(
+                    where={"source": filename}
+                )
+                
+                if results and results.get('ids'):
+                    # Delete all chunks for this document
+                    collection.delete(ids=results['ids'])
+                    logger.info(f"Removed {len(results['ids'])} chunks for document {filename}")
+                    return True
+                else:
+                    logger.info(f"No chunks found for document {filename}")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"Error removing document {filename} from vector store: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error removing document from vectorstore: {e}")
+            return False
+
+    def clear_vectorstore(self):
+        """Clear the entire vector store"""
+        try:
+            if self.vector_store and hasattr(self.vector_store, '_collection'):
+                collection = self.vector_store._collection
+                if collection:
+                    # Delete all documents from the collection
+                    collection.delete()
+                    logger.info("Vector store cleared successfully")
+                    return True
+            logger.warning("Vector store not available for clearing")
+            return False
+        except Exception as e:
+            logger.error(f"Error clearing vector store: {e}")
+            return False
+
+    def get_vectorstore_stats(self) -> dict:
+        """Get statistics about the vector store - alias for get_vector_store_stats with debug info"""
+        logger.info("🔍 DEBUG: get_vectorstore_stats() called")
+        try:
+            logger.info(f"🔍 DEBUG: vector_store exists: {self.vector_store is not None}")
+            logger.info(f"🔍 DEBUG: models_loaded: {self.models_loaded}")
+            logger.info(f"🔍 DEBUG: embedding_model: {self.embedding_model}")
+            
+            # Force initialization if not done
+            if not self.vector_store:
+                logger.warning("🔍 DEBUG: Vector store not initialized, attempting initialization")
+                self._initialize_vector_store()
+                logger.info(f"🔍 DEBUG: After initialization, vector_store exists: {self.vector_store is not None}")
+            
+            logger.info("🔍 DEBUG: Calling get_vector_store_stats()")
+            result = self.get_vector_store_stats()
+            logger.info(f"🔍 DEBUG: get_vector_store_stats() returned: {type(result)}")
+            return result
+        except Exception as e:
+            logger.error(f"🔍 DEBUG: Error in get_vectorstore_stats: {e}")
+            import traceback
+            logger.error(f"🔍 DEBUG: Traceback: {traceback.format_exc()}")
+            return {
+                "error": f"Failed to get vectorstore stats: {str(e)}",
+                "collections": 0,
+                "total_documents": 0,
+                "vector_store_initialized": self.vector_store is not None,
+                "models_loaded": self.models_loaded
+            }
+    
+    def reingest_all_documents(self) -> bool:
+        """Re-ingest all documents into vector store"""
+        logger.info("🔍 DEBUG: reingest_all_documents() called")
+        return self.reingest_all_documents_for_current_model()
+
 def get_gpu_memory_info() -> Dict[str, int]:
     """Get GPU memory information in MB"""
     try:
@@ -1488,7 +1698,7 @@ def get_gpu_memory_info() -> Dict[str, int]:
         pass
     
     # If no GPU info available, return default values
-    logger.warning("Could not determine GPU memory, using default estimates")
+    logger.info("No GPU detected or GPU memory unavailable, using CPU-based estimates")
     return {
         'total': 8192,  # 8GB default
         'used': 2048,   # 2GB used

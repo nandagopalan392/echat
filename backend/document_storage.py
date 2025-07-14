@@ -418,6 +418,40 @@ class DocumentStorageService:
             logger.error(f"Failed to get document by ID: {e}")
             return None
     
+    def _get_document_by_filename(self, filename: str) -> Optional[Dict]:
+        """Get document by filename"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT id, filename, file_hash, file_size, content_type, 
+                       minio_object_name, uploaded_at, last_modified
+                FROM documents 
+                WHERE filename = ?
+            ''', (filename,))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return {
+                    'id': row[0],
+                    'filename': row[1],
+                    'file_hash': row[2],
+                    'file_size': row[3],
+                    'content_type': row[4],
+                    'minio_object_name': row[5],
+                    'uploaded_at': row[6],
+                    'last_modified': row[7]
+                }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to get document by filename {filename}: {e}")
+            return None
+    
     def list_all_documents(self) -> List[Dict]:
         """List all stored documents with their ingestion status across models"""
         try:
@@ -495,6 +529,21 @@ class DocumentStorageService:
             
         except Exception as e:
             logger.error(f"Failed to delete document {document_id}: {e}")
+            return False
+    
+    def delete_document_by_filename(self, filename: str) -> bool:
+        """Delete document by filename from both MinIO and SQLite"""
+        try:
+            # Get document info
+            doc_info = self._get_document_by_filename(filename)
+            if not doc_info:
+                logger.warning(f"Document not found for deletion: {filename}")
+                return False
+            
+            return self.delete_document(doc_info['id'])
+            
+        except Exception as e:
+            logger.error(f"Failed to delete document {filename}: {e}")
             return False
     
     def document_exists_in_storage(self, document_id: int) -> bool:

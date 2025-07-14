@@ -2,6 +2,9 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import Login from './components/Login';
 import Register from './components/Register';
 import Chat from './components/Chat';
+import KnowledgeHubPage from './pages/KnowledgeHubPage';
+import ModelSettingsPage from './pages/ModelSettingsPage';
+import ManageUserPage from './pages/ManageUserPage';
 
 const PrivateRoute = ({ children }) => {
     const isAuthenticated = !!localStorage.getItem('token');
@@ -19,6 +22,30 @@ function App() {
                     element={
                         <PrivateRoute>
                             <Chat />
+                        </PrivateRoute>
+                    }
+                />
+                <Route
+                    path="/knowledge-hub"
+                    element={
+                        <PrivateRoute>
+                            <KnowledgeHubPage />
+                        </PrivateRoute>
+                    }
+                />
+                <Route
+                    path="/model-settings"
+                    element={
+                        <PrivateRoute>
+                            <ModelSettingsPage />
+                        </PrivateRoute>
+                    }
+                />
+                <Route
+                    path="/manage-users"
+                    element={
+                        <PrivateRoute>
+                            <ManageUserPage />
                         </PrivateRoute>
                     }
                 />
