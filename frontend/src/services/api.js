@@ -22,6 +22,29 @@ const getAuthHeader = () => {
 };
 
 export const api = {
+    // Generic API call method
+    call: async (endpoint, options = {}) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader(),
+                    ...options.headers
+                },
+                ...options
+            });
+            
+            if (!response.ok) {
+                throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('API call error:', error);
+            throw error;
+        }
+    },
+
     // RLHF feedback
     submitRLHFFeedback: async (sessionId, chosenIndex) => {
         debugLog('=== RLHF FEEDBACK SUBMISSION ===');
@@ -211,6 +234,67 @@ export const api = {
             formData.append('file', file);
             formData.append('is_folder', isFolder ? 'true' : 'false');
             formData.append('folder_path', folderPath || '');
+
+            const xhr = new XMLHttpRequest();
+            
+            const promise = new Promise((resolve, reject) => {
+                let completed = false;
+
+                xhr.upload.addEventListener('progress', (event) => {
+                    if (event.lengthComputable && onProgress && !completed) {
+                        const percentCompleted = Math.round((event.loaded * 100) / event.total);
+                        onProgress(Math.min(percentCompleted, 90)); // Cap at 90% for upload
+                    }
+                });
+
+                xhr.addEventListener('load', () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        const response = JSON.parse(xhr.response);
+                        onProgress(100); // Set to 100% immediately when done
+                        completed = true;
+                        resolve(response);
+                    } else {
+                        reject(new Error(xhr.response || 'Upload failed'));
+                    }
+                });
+
+                xhr.addEventListener('error', () => {
+                    reject(new Error('Network error occurred'));
+                });
+            });
+
+            xhr.open('POST', `${API_BASE_URL}/api/admin/upload`);
+            const token = localStorage.getItem('token');
+            if (token) {
+                xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+            }
+            xhr.send(formData);
+
+            return promise;
+        } catch (error) {
+            console.error('Upload error:', error);
+            throw error;
+        }
+    },
+
+    // Upload file with chunking configuration
+    uploadFileWithChunking: async (file, chunkingConfig, isFolder = false, folderPath = "", onProgress) => {
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('is_folder', isFolder ? 'true' : 'false');
+            formData.append('folder_path', folderPath || '');
+            
+            // Add chunking configuration parameters
+            formData.append('chunking_method', chunkingConfig.method || 'auto');
+            formData.append('chunk_token_num', chunkingConfig.chunk_token_num || 1000);
+            formData.append('chunk_overlap', chunkingConfig.chunk_overlap || 200);
+            formData.append('delimiter', chunkingConfig.delimiter || "\\n\\n|\\n|\\.|\\!|\\?");
+            formData.append('max_token', chunkingConfig.max_token || 4096);
+            formData.append('layout_recognize', chunkingConfig.layout_recognize || 'auto');
+            formData.append('preserve_formatting', chunkingConfig.preserve_formatting || true);
+            formData.append('extract_tables', chunkingConfig.extract_tables || true);
+            formData.append('extract_images', chunkingConfig.extract_images || false);
 
             const xhr = new XMLHttpRequest();
             
@@ -506,7 +590,7 @@ export const api = {
     // File management
     listFiles: async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/files/list`, {
+            const response = await fetch(`${API_BASE_URL}/api/documents`, {
                 method: 'GET',
                 headers: {
                     ...getAuthHeader()
@@ -517,7 +601,8 @@ export const api = {
                 throw new Error('Failed to fetch files');
             }
             
-            return await response.json();
+            const data = await response.json();
+            return { files: data.documents || [] };
         } catch (error) {
             console.error('List files error:', error);
             throw error;
@@ -540,6 +625,86 @@ export const api = {
             return await response.json();
         } catch (error) {
             console.error('Delete file error:', error);
+            throw error;
+        }
+    },
+
+    getDocuments: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/documents`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to get documents');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get documents error:', error);
+            throw error;
+        }
+    },
+
+    getDocumentChunks: async (filename) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/files/${encodeURIComponent(filename)}/chunks`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to get document chunks');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get document chunks error:', error);
+            throw error;
+        }
+    },
+
+    getDocumentPreview: async (documentId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/documents/${documentId}/preview`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to get document preview');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get document preview error:', error);
+            throw error;
+        }
+    },
+
+    getCollectionDebugInfo: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/debug/collection-info`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to get collection debug info');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Get collection debug info error:', error);
             throw error;
         }
     },
@@ -713,7 +878,7 @@ export const api = {
     // Vector store and embedding management
     getVectorStoreStats: async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/vectorstore/stats`, {
+            const response = await fetch(`${API_BASE_URL}/api/vector-store/stats`, {
                 method: 'GET',
                 headers: {
                     ...getAuthHeader()
@@ -733,7 +898,7 @@ export const api = {
 
     reingestDocuments: async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/vectorstore/reingest`, {
+            const response = await fetch(`${API_BASE_URL}/api/documents/reingest`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -967,7 +1132,93 @@ export const api = {
             console.error('Switch embedding model error:', error);
             throw error;
         }
-    }
+    },
+
+    // Get chunking methods and configurations
+    getChunkingMethods: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/chunking/methods`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get chunking methods');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting chunking methods:', error);
+            throw error;
+        }
+    },
+
+    // Get chunking configuration for a method
+    getChunkingConfig: async (method) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/chunking/config/${method}`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get chunking config');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting chunking config:', error);
+            throw error;
+        }
+    },
+
+    // Update chunking configuration
+    updateChunkingConfig: async (method, config) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/chunking/config/${method}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader(),
+                },
+                body: JSON.stringify(config),
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to update chunking config');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error updating chunking config:', error);
+            throw error;
+        }
+    },
+
+    // Get optimal chunking method for file extension
+    getOptimalChunkingMethod: async (fileExtension) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/chunking/optimal/${fileExtension}`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get optimal chunking method');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting optimal chunking method:', error);
+            throw error;
+        }
+    },
 };
 
 export default api;

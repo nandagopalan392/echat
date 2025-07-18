@@ -535,8 +535,6 @@ const cleanStreamingContent = (content) => {
     .replace(/\\+}/g, '}')         // Fix escaped braces
     .replace(/"{/g, '{')           // Remove quotes before object start
     .replace(/}"/g, '}')           // Remove quotes after object end
-    .replace(/^"/, '')             // Remove start quote
-    .replace(/"$/, '')             // Remove end quote
     // Then remove JSON structure artifacts
     .replace(/^{"type": "start"}\s*/, '')              // Remove start markers
     .replace(/{"type": "end"[^}]*}\s*$/, '')           // Remove end markers
@@ -727,6 +725,8 @@ const Chat = () => {
     const [responseOptions, setResponseOptions] = useState([]);
     const [optionsMessageId, setOptionsMessageId] = useState(null);
     const [showModelSettings, setShowModelSettings] = useState(false);
+    // Removed showKnowledgeHub state as Knowledge Hub now navigates directly
+
 
     const roles = ['Engineer', 'Manager', 'Business Development', 'Associate'];
 
@@ -785,7 +785,9 @@ const Chat = () => {
         try {
             for (const file of files) {
                 const fileExt = file.name.split('.').pop().toLowerCase();
-                if (!['xlsx', 'csv', 'docx', 'pdf'].includes(fileExt)) {
+                const supportedExtensions = ['xlsx', 'csv', 'docx', 'doc', 'pdf', 'txt', 'md', 'ppt', 'pptx', 'html', 'json', 'eml', 'jpg', 'jpeg', 'png', 'gif', 'tif'];
+                
+                if (!supportedExtensions.includes(fileExt)) {
                     showUploadStatus('Unsupported file type', true);
                     continue;
                 }
@@ -804,6 +806,7 @@ const Chat = () => {
                     ? file.webkitRelativePath 
                     : file.name;
                 
+                // Original upload without chunking configuration
                 await api.uploadFileWithProgress(
                     file,
                     isFolder,
@@ -1162,7 +1165,6 @@ const Chat = () => {
               const content = contentMatch[1]
                 .replace(/\\"/g, '"')
                 .replace(/\\n/g, '\n');
-              
               displayContent = content;
             }
           }
@@ -1396,7 +1398,7 @@ const handleSubmit = async (e) => {
                             {/* Only show upload button for admin */}
                             {isAdmin && (
                                 <div className="relative">
-                                    {/* Knowledge Hub Button - Navigate directly to page */}
+                                    {/* Knowledge Hub Navigation Button */}
                                     <button
                                         onClick={() => navigate('/knowledge-hub')}
                                         className="flex items-center px-4 py-2 bg-purple-50 text-purple-600 rounded-lg cursor-pointer hover:bg-purple-100 transition-colors duration-200"
@@ -1406,14 +1408,6 @@ const handleSubmit = async (e) => {
                                         </svg>
                                         Knowledge Hub
                                     </button>
-                                    
-                                    {uploadStatus && (
-                                        <div className={`absolute top-full left-0 right-0 mt-1 px-2 py-1 text-sm text-center rounded ${
-                                            uploadStatus.isError ? 'bg-red-500' : 'bg-green-500'
-                                        } text-white z-40`}>
-                                            {uploadStatus.message}
-                                        </div>
-                                    )}
                                 </div>
                             )}
                             

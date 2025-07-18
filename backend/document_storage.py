@@ -57,30 +57,72 @@ class DocumentStorageService:
             logger.error(f"Failed to initialize MinIO: {e}")
             raise
     
+    def _migrate_database(self):
+        """Migrate database schema to add new columns if they don't exist"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Check if chunking_method column exists in documents table
+            cursor.execute("PRAGMA table_info(documents)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'chunking_method' not in columns:
+                logger.info("Adding chunking_method column to documents table")
+                cursor.execute('ALTER TABLE documents ADD COLUMN chunking_method TEXT DEFAULT "naive"')
+                
+            if 'chunking_config' not in columns:
+                logger.info("Adding chunking_config column to documents table")
+                cursor.execute('ALTER TABLE documents ADD COLUMN chunking_config TEXT')
+            
+            # Check ingestion_metadata table
+            cursor.execute("PRAGMA table_info(ingestion_metadata)")
+            ing_columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'chunking_method' not in ing_columns:
+                logger.info("Adding chunking_method column to ingestion_metadata table")
+                cursor.execute('ALTER TABLE ingestion_metadata ADD COLUMN chunking_method TEXT DEFAULT "naive"')
+                
+            if 'chunking_config' not in ing_columns:
+                logger.info("Adding chunking_config column to ingestion_metadata table")
+                cursor.execute('ALTER TABLE ingestion_metadata ADD COLUMN chunking_config TEXT')
+            
+            conn.commit()
+            conn.close()
+            logger.info("Database migration completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to migrate database: {e}")
+            raise
+
     def _init_database(self):
         """Initialize SQLite database for tracking document ingestion"""
         try:
             # Ensure directory exists
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
             
+            # Run migration first to add any missing columns
+            if os.path.exists(self.db_path):
+                self._migrate_database()
+            
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
-            # Create documents table
+            # Create tables with chunking configuration support
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS documents (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     filename TEXT NOT NULL,
-                    file_hash TEXT NOT NULL UNIQUE,
+                    file_hash TEXT UNIQUE NOT NULL,
                     file_size INTEGER NOT NULL,
                     content_type TEXT,
                     minio_object_name TEXT NOT NULL,
-                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    uploaded_at TEXT NOT NULL,
+                    chunking_method TEXT DEFAULT 'naive',
+                    chunking_config TEXT  -- JSON string of chunking configuration
                 )
             ''')
             
-            # Create ingestion_metadata table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS ingestion_metadata (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,29 +130,26 @@ class DocumentStorageService:
                     embedding_model TEXT NOT NULL,
                     vector_store_collection TEXT NOT NULL,
                     chunk_count INTEGER,
-                    ingestion_status TEXT DEFAULT 'pending',
-                    ingested_at TIMESTAMP,
+                    ingestion_status TEXT DEFAULT 'pending', -- pending, completed, failed
                     error_message TEXT,
-                    metadata_json TEXT,
-                    FOREIGN KEY (document_id) REFERENCES documents (id),
-                    UNIQUE(document_id, embedding_model)
+                    ingested_at TEXT,
+                    metadata_json TEXT,  -- Additional metadata as JSON
+                    chunking_method TEXT DEFAULT 'naive',
+                    chunking_config TEXT,  -- JSON string of chunking configuration used
+                    FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE,
+                    UNIQUE (document_id, embedding_model)
                 )
             ''')
             
-            # Create index for faster lookups
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_file_hash ON documents(file_hash)
-            ''')
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_embedding_model ON ingestion_metadata(embedding_model)
-            ''')
-            cursor.execute('''
-                CREATE INDEX IF NOT EXISTS idx_ingestion_status ON ingestion_metadata(ingestion_status)
-            ''')
+            # Add indexes for better performance
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents (file_hash)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_ingestion_model ON ingestion_metadata (embedding_model)''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS idx_ingestion_status ON ingestion_metadata (ingestion_status)''')
             
             conn.commit()
             conn.close()
-            logger.info("Document tracking database initialized")
+            
+            logger.info("Document storage database initialized")
             
         except Exception as e:
             logger.error(f"Failed to initialize document database: {e}")
@@ -124,7 +163,8 @@ class DocumentStorageService:
                 sha256_hash.update(chunk)
         return sha256_hash.hexdigest()
     
-    def store_document(self, file_path: str, original_filename: str, content_type: str = None) -> Dict:
+    def store_document(self, file_path: str, original_filename: str, content_type: str = None, 
+                      chunking_method: str = "naive", chunking_config: Dict = None) -> Dict:
         """
         Store document in MinIO and record metadata in SQLite
         Returns document info or existing document if duplicate
@@ -158,9 +198,19 @@ class DocumentStorageService:
             cursor = conn.cursor()
             
             cursor.execute('''
-                INSERT INTO documents (filename, file_hash, file_size, content_type, minio_object_name)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (original_filename, file_hash, file_size, content_type, minio_object_name))
+                INSERT INTO documents (filename, file_hash, file_size, content_type, 
+                                     minio_object_name, uploaded_at, chunking_method, chunking_config)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                original_filename, 
+                file_hash, 
+                file_size, 
+                content_type, 
+                minio_object_name,
+                datetime.now().isoformat(),
+                chunking_method,
+                json.dumps(chunking_config) if chunking_config else None
+            ))
             
             document_id = cursor.lastrowid
             conn.commit()
@@ -173,7 +223,9 @@ class DocumentStorageService:
                 'file_size': file_size,
                 'content_type': content_type,
                 'minio_object_name': minio_object_name,
-                'uploaded_at': datetime.now().isoformat()
+                'uploaded_at': datetime.now().isoformat(),
+                'chunking_method': chunking_method,
+                'chunking_config': chunking_config
             }
             
             logger.info(f"Document stored successfully: {original_filename}")
@@ -217,7 +269,8 @@ class DocumentStorageService:
     
     def track_ingestion(self, document_id: int, embedding_model: str, 
                        vector_store_collection: str, chunk_count: int = None,
-                       metadata: Dict = None) -> bool:
+                       metadata: Dict = None, chunking_method: str = "naive",
+                       chunking_config: Dict = None) -> bool:
         """Track successful ingestion of document with specific embedding model"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -227,15 +280,17 @@ class DocumentStorageService:
             cursor.execute('''
                 INSERT OR REPLACE INTO ingestion_metadata 
                 (document_id, embedding_model, vector_store_collection, chunk_count, 
-                 ingestion_status, ingested_at, metadata_json)
-                VALUES (?, ?, ?, ?, 'completed', ?, ?)
+                 ingestion_status, ingested_at, metadata_json, chunking_method, chunking_config)
+                VALUES (?, ?, ?, ?, 'completed', ?, ?, ?, ?)
             ''', (
                 document_id, 
                 embedding_model, 
                 vector_store_collection, 
                 chunk_count,
                 datetime.now().isoformat(),
-                json.dumps(metadata) if metadata else None
+                json.dumps(metadata) if metadata else None,
+                chunking_method,
+                json.dumps(chunking_config) if chunking_config else None
             ))
             
             conn.commit()
@@ -297,7 +352,8 @@ class DocumentStorageService:
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT d.*, im.chunk_count, im.ingested_at, im.vector_store_collection
+                SELECT d.*, im.chunk_count, im.ingested_at, im.vector_store_collection, 
+                       COALESCE(im.chunking_method, d.chunking_method, 'naive') as chunking_method
                 FROM documents d
                 INNER JOIN ingestion_metadata im ON d.id = im.document_id
                 WHERE im.embedding_model = ? AND im.ingestion_status = 'completed'
@@ -319,7 +375,8 @@ class DocumentStorageService:
                     'uploaded_at': row[6],
                     'chunk_count': row[8],
                     'ingested_at': row[9],
-                    'vector_store_collection': row[10]
+                    'vector_store_collection': row[10],
+                    'chunking_method': row[11] if row[11] else 'naive'
                 })
             
             return documents
@@ -458,36 +515,83 @@ class DocumentStorageService:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
+            # Get current RAG instance to determine current embedding model
+            try:
+                from rag import get_chatpdf_instance
+                current_rag = get_chatpdf_instance()
+                current_embedding_model = current_rag.embedding_model if current_rag else None
+            except ImportError:
+                # Handle potential circular import
+                current_embedding_model = None
+            
             cursor.execute('''
-                SELECT d.*, 
-                       GROUP_CONCAT(im.embedding_model || ':' || im.ingestion_status) as model_status
+                SELECT d.id, d.filename, d.file_hash, d.file_size, d.content_type, 
+                       d.minio_object_name, d.uploaded_at,
+                       GROUP_CONCAT(im.embedding_model || ':' || im.ingestion_status) as model_status,
+                       im_current.ingestion_status as current_model_status,
+                       im_current.embedding_model as current_embedding_model,
+                       COALESCE(im_current.chunking_method, d.chunking_method, 'naive') as chunking_method
                 FROM documents d
                 LEFT JOIN ingestion_metadata im ON d.id = im.document_id
+                LEFT JOIN ingestion_metadata im_current ON d.id = im_current.document_id 
+                    AND im_current.embedding_model = ?
                 GROUP BY d.id
                 ORDER BY d.uploaded_at DESC
-            ''')
+            ''', (current_embedding_model,))
             
             rows = cursor.fetchall()
             conn.close()
             
+            # Debug logging
+            logger.debug(f"Found {len(rows)} documents for current embedding model: {current_embedding_model}")
+            if rows and len(rows) > 0:
+                logger.debug(f"Sample row structure: {len(rows[0])} columns")
+                logger.debug(f"Sample row: {rows[0]}")
+            
             documents = []
             for row in rows:
                 model_status = {}
-                if row[8]:  # model_status
-                    for status_pair in row[8].split(','):
-                        model, status = status_pair.split(':')
-                        model_status[model] = status
+                # model_status is now at index 7
+                if row[7]:  # model_status
+                    for status_pair in row[7].split(','):
+                        parts = status_pair.split(':')
+                        if len(parts) == 2:
+                            model, status = parts
+                            model_status[model] = status
+                
+                # Determine if document is indexed for current embedding model
+                current_status = row[8]  # current_model_status
+                indexed = current_status == 'completed' if current_status else False
+                
+                # Get chunking method
+                chunking_method = row[10] if row[10] else 'naive'  # chunking_method column
+                
+                # Get embedding model for current document (prioritize current model, fallback to any available)
+                if indexed and current_embedding_model:
+                    embedding_model = current_embedding_model
+                elif model_status:
+                    # Find the most recent successfully completed ingestion
+                    completed_models = [model for model, status in model_status.items() if status == 'completed']
+                    if completed_models:
+                        embedding_model = completed_models[0]  # Take the first completed one
+                    else:
+                        embedding_model = list(model_status.keys())[0]  # Take any available model
+                else:
+                    embedding_model = 'Unknown'
                 
                 documents.append({
                     'id': row[0],
                     'filename': row[1],
                     'file_hash': row[2],
-                    'file_size': row[3],
+                    'size': row[3] if row[3] is not None else 0,  # Ensure size is not None
                     'content_type': row[4],
                     'minio_object_name': row[5],
-                    'uploaded_at': row[6],
-                    'last_modified': row[7],
-                    'model_status': model_status
+                    'upload_date': row[6],  # Frontend expects 'upload_date', not 'uploaded_at'
+                    'last_modified': None,  # Not included in this query
+                    'model_status': model_status,
+                    'indexed': indexed,  # Frontend expects this field
+                    'embedding_model': embedding_model,  # Frontend expects this field
+                    'chunking_method': chunking_method  # Add chunking method
                 })
             
             return documents

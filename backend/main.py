@@ -1,9 +1,9 @@
 import sys
 import os
 import json
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -13,6 +13,8 @@ from chat_db import ChatDB
 from rag import ChatPDF, get_chatpdf_instance
 from rlhf import RLHF
 import logging
+from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
+from enhanced_document_processor import get_document_processor
 import pandas as pd
 from docx import Document
 import sqlite3
@@ -842,11 +844,23 @@ async def upload_file(
     file: UploadFile,
     is_folder: str = Form(default="false"),
     folder_path: str = Form(default=""),
+    chunking_method: str = Form(default="auto"),  # auto, naive, qa, resume, manual, table, laws, presentation, picture, one, email
+    chunk_token_num: int = Form(default=1000),
+    chunk_overlap: int = Form(default=200),
+    delimiter: str = Form(default="\\n\\n|\\n|\\.|\\!|\\?"),
+    max_token: int = Form(default=4096),
+    layout_recognize: str = Form(default="auto"),
+    preserve_formatting: bool = Form(default=True),
+    extract_tables: bool = Form(default=True),
+    extract_images: bool = Form(default=False),
     admin: dict = Depends(check_if_admin)
 ):
     failed_files = []
     processed_files = []
     try:
+        # Import chunking components
+        from chunking_config import ChunkingMethod, ChunkingConfig, FileFormatSupport
+        
         file_id = f"upload_{datetime.datetime.now().timestamp()}"
         upload_progress[file_id] = 0
         
@@ -870,35 +884,68 @@ async def upload_file(
             temp_path.write_bytes(contents)
             upload_progress[file_id] = 30
 
-            # Process PDF files
-            if file.filename.lower().endswith('.pdf'):
-                logger.info(f"Processing PDF file: {file.filename}")
-                success = get_rag().ingest_with_storage(str(temp_path), file.filename)
+            # Determine file extension and chunking method
+            file_ext = file.filename.split('.')[-1].lower()
+            
+            # Set up chunking configuration
+            if chunking_method == "auto":
+                # Auto-detect optimal method for file type
+                selected_method = FileFormatSupport.get_optimal_method(file_ext)
+            else:
+                try:
+                    selected_method = ChunkingMethod(chunking_method)
+                except ValueError:
+                    logger.warning(f"Invalid chunking method '{chunking_method}', using naive")
+                    selected_method = ChunkingMethod.NAIVE
+            
+            # Create chunking configuration
+            chunking_config = ChunkingConfig(
+                method=selected_method,
+                chunk_token_num=chunk_token_num,
+                chunk_overlap=chunk_overlap,
+                delimiter=delimiter,
+                max_token=max_token,
+                layout_recognize=layout_recognize,
+                preserve_formatting=preserve_formatting,
+                extract_tables=extract_tables,
+                extract_images=extract_images
+            )
+            
+            logger.info(f"Processing {file.filename} with method {selected_method.value}")
+
+            # Process files with enhanced chunking - include images now
+            if file.filename.lower().endswith(('.pdf', '.docx', '.doc', '.txt', '.md', '.csv', '.xlsx', '.xls', '.ppt', '.pptx', '.html', '.json', '.eml', '.jpg', '.jpeg', '.png', '.gif', '.tif', '.tiff')):
+                logger.info(f"Processing document file: {file.filename}")
+                success = get_rag().ingest_with_storage_and_chunking(
+                    str(temp_path), 
+                    file.filename,
+                    selected_method,
+                    chunking_config,
+                    admin['sub']  # user_id
+                )
                 if not success:
                     failed_files.append(file.filename)
-                    logger.warning(f"Failed to process PDF: {file.filename}")
+                    logger.warning(f"Failed to process document: {file.filename}")
                 else:
                     processed_files.append(file.filename)
-                    logger.info(f"Successfully processed PDF: {file.filename}")
+                    logger.info(f"Successfully processed document: {file.filename}")
             else:
-                # For non-PDF files, we still want to store them in MinIO even if we can't process them
-                logger.info(f"Storing non-PDF file: {file.filename}")
+                # For other files, store in MinIO only
+                logger.info(f"Storing non-document file: {file.filename}")
                 try:
                     # Determine content type
-                    content_type = None
-                    if file.filename.lower().endswith('.docx'):
-                        content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                    elif file.filename.lower().endswith('.xlsx'):
-                        content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                    elif file.filename.lower().endswith('.csv'):
-                        content_type = 'text/csv'
-                    elif file.filename.lower().endswith('.txt'):
-                        content_type = 'text/plain'
+                    content_type = 'application/octet-stream'
                     
-                    # Store in MinIO using document storage
+                    # Store in MinIO using document storage with chunking info
                     from document_storage import get_document_storage
                     doc_storage = get_document_storage()
-                    doc_info = doc_storage.store_document(str(temp_path), file.filename, content_type)
+                    doc_info = doc_storage.store_document(
+                        str(temp_path), 
+                        file.filename, 
+                        content_type,
+                        selected_method.value,
+                        chunking_config.to_dict()
+                    )
                     
                     if doc_info:
                         processed_files.append(file.filename)
@@ -1025,6 +1072,179 @@ async def delete_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.delete("/api/files/{filename}")
+async def delete_file_by_filename(
+    filename: str,
+    admin: dict = Depends(check_if_admin)
+):
+    """Delete a document by filename"""
+    try:
+        from document_storage import get_document_storage
+        success = get_document_storage().delete_document_by_filename(filename)
+        if success:
+            return {"message": f"File {filename} deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="File not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/files/{filename}/chunks")
+async def get_document_chunks(
+    filename: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all chunks for a document by filename"""
+    try:
+        from rag import get_chatpdf_instance
+        from document_storage import get_document_storage
+        
+        chatpdf = get_chatpdf_instance()
+        doc_storage = get_document_storage()
+        
+        if not chatpdf or not chatpdf.vector_store:
+            raise HTTPException(status_code=503, detail="Vector store not available")
+        
+        # Get document info from storage first
+        doc_info = None
+        try:
+            # Find document by filename
+            all_docs = doc_storage.list_all_documents()
+            for doc in all_docs:
+                if doc['filename'] == filename:
+                    doc_info = doc
+                    break
+        except Exception as e:
+            logger.warning(f"Could not get document info: {e}")
+        
+        # Get ChromaDB client and collection
+        chroma_client = chatpdf.vector_store._client
+        collection_name = chatpdf._get_collection_name()
+        
+        try:
+            collection = chroma_client.get_collection(collection_name)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Collection not found: {e}")
+        
+        # Query for chunks with this filename in source metadata
+        try:
+            logger.info(f"Searching for chunks with filename: {filename}")
+            
+            # Try both 'source' and 'source_file' metadata keys
+            results = None
+            for metadata_key in ['source_file', 'source']:
+                try:
+                    results = collection.get(
+                        where={metadata_key: filename},
+                        include=["documents", "metadatas", "embeddings"]
+                    )
+                    if results and results.get('ids'):
+                        logger.info(f"Found {len(results['ids'])} chunks using metadata key '{metadata_key}'")
+                        break
+                except Exception as e:
+                    logger.debug(f"Query with '{metadata_key}' failed: {e}")
+                    continue
+            
+            logger.info(f"ChromaDB query results: found {len(results.get('ids', [])) if results else 0} chunks")
+            if results and results.get('metadatas'):
+                logger.info(f"Sample metadata from results: {results['metadatas'][:2] if len(results['metadatas']) > 0 else 'None'}")
+            
+            if not results or not results.get('ids'):
+                # Let's also try a broader search to see what's actually in the collection
+                logger.info("No chunks found with exact filename match, checking collection contents...")
+                sample_results = collection.get(limit=5, include=["metadatas"])
+                logger.info(f"Sample collection metadata: {sample_results.get('metadatas', [])}")
+                
+                return {
+                    "filename": filename,
+                    "chunks": [],
+                    "document_info": doc_info,
+                    "is_image": doc_info and doc_info.get('content_type', '').startswith('image/') if doc_info else False
+                }
+            
+            logger.info(f"Processing {len(results['ids'])} chunks for response")
+            chunks = []
+            for i, chunk_id in enumerate(results['ids']):
+                try:
+                    chunk_content = results['documents'][i]
+                    chunk_metadata = results['metadatas'][i] if results.get('metadatas') else {}
+                    
+                    # Count tokens/words (approximate)
+                    word_count = len(chunk_content.split()) if chunk_content else 0
+                    
+                    # Calculate embedding size safely
+                    embedding_size = 0
+                    try:
+                        if results.get('embeddings') and i < len(results['embeddings']) and results['embeddings'][i]:
+                            embedding_size = len(results['embeddings'][i])
+                    except Exception as e:
+                        logger.warning(f"Could not calculate embedding size for chunk {i}: {e}")
+                    
+                    chunk_data = {
+                        "id": chunk_id,
+                        "chunk_number": i + 1,
+                        "content": chunk_content,
+                        "word_count": word_count,
+                        "metadata": chunk_metadata,
+                        "embedding_size": embedding_size
+                    }
+                    chunks.append(chunk_data)
+                    logger.debug(f"Processed chunk {i+1}/{len(results['ids'])}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing chunk {i}: {e}")
+                    continue
+            
+            logger.info(f"Successfully processed {len(chunks)} chunks")
+            return {
+                "filename": filename,
+                "total_chunks": len(chunks),
+                "chunks": chunks,
+                "document_info": doc_info,
+                "is_image": doc_info and doc_info.get('content_type', '').startswith('image/') if doc_info else False
+            }
+            
+        except Exception as e:
+            logger.error(f"Error querying chunks: {e}")
+            raise HTTPException(status_code=500, detail=f"Error querying chunks: {e}")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/debug/collection-info")
+async def get_collection_debug_info(current_user: dict = Depends(get_current_user)):
+    """Debug endpoint to inspect collection structure"""
+    try:
+        from rag import get_chatpdf_instance
+        chatpdf = get_chatpdf_instance()
+        
+        if not chatpdf or not chatpdf.vector_store:
+            raise HTTPException(status_code=503, detail="Vector store not available")
+        
+        chroma_client = chatpdf.vector_store._client
+        collection_name = chatpdf._get_collection_name()
+        
+        try:
+            collection = chroma_client.get_collection(collection_name)
+            
+            # Get basic collection info
+            count = collection.count()
+            
+            # Get sample documents
+            sample_results = collection.get(limit=10, include=["metadatas", "documents"])
+            
+            return {
+                "collection_name": collection_name,
+                "total_documents": count,
+                "sample_metadata": sample_results.get('metadatas', []),
+                "sample_document_previews": [doc[:100] + "..." if len(doc) > 100 else doc for doc in sample_results.get('documents', [])]
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Collection error: {e}")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/")
 async def root():
     return {"message": "Welcome to Chat API"}
@@ -1083,6 +1303,22 @@ async def get_vector_store_stats(current_user: dict = Depends(get_current_user))
     except Exception as e:
         logger.error(f"Error getting vector store stats: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get vector store stats: {str(e)}")
+
+@app.delete("/api/vector-store/clear")
+async def clear_vector_store(admin: dict = Depends(check_if_admin)):
+    """Clear the entire vector store - admin only"""
+    try:
+        rag = get_rag()
+        success = rag.clear_vectorstore()
+        
+        if success:
+            return {"success": True, "message": "Vector store cleared successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to clear vector store")
+        
+    except Exception as e:
+        logger.error(f"Error clearing vector store: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear vector store: {str(e)}")
 
 @app.get("/api/models/available")
 async def get_available_models(current_user: dict = Depends(get_current_user)):
@@ -1490,7 +1726,7 @@ async def update_simple_models_settings(
             
         except Exception as e:
             # Log GPU check errors but don't block the process
-            logger.warning(f"Could not check GPU compatibility (proceeding anyway): {e}")
+            logger.warning(f"Could not check GPU compatibility: {str(e)}, proceeding anyway")
             compatibility_warnings = [f"Could not verify GPU compatibility: {str(e)}"]
         
         ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
@@ -1601,475 +1837,288 @@ async def update_simple_models_settings(
         logger.error(f"Error updating models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update models: {str(e)}")
 
-@app.get("/api/admin/files")
-async def list_admin_files():
-    """Get list of all files with statistics for admin dashboard"""
+# Chunking configuration endpoints
+@app.get("/api/chunking/methods")
+async def get_chunking_methods(token: str = Depends(oauth2_scheme)):
+    """Get available chunking methods and their supported file formats"""
     try:
-        rag = get_chatpdf_instance()
-        doc_storage = rag.doc_storage
+        from chunking_config import ChunkingMethod, FileFormatSupport
         
-        # Get all documents
-        all_documents = doc_storage.list_all_documents()
-        
-        # Calculate statistics
-        total_files = len(all_documents)
-        total_size = sum(doc.get('file_size', 0) for doc in all_documents)
-        
-        # Calculate format statistics
-        format_stats = {}
-        for doc in all_documents:
-            # Get proper format extension
-            content_type = doc.get('content_type', 'unknown')
-            filename = doc.get('filename', '')
-            
-            if content_type == 'unknown' or not content_type:
-                # Try to get extension from filename
-                if '.' in filename:
-                    format_ext = filename.split('.')[-1].lower()
-                else:
-                    format_ext = 'unknown'
-            else:
-                # Map content type to format
-                format_mapping = {
-                    'application/pdf': 'pdf',
-                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-                    'text/csv': 'csv',
-                    'text/plain': 'txt'
-                }
-                format_ext = format_mapping.get(content_type, content_type.split('/')[-1] if '/' in content_type else content_type)
-            
-            if format_ext not in format_stats:
-                format_stats[format_ext] = {'count': 0, 'size': 0}
-            format_stats[format_ext]['count'] += 1
-            format_stats[format_ext]['size'] += doc.get('file_size', 0)
-        
-        # Convert format stats to list
-        format_stats_list = [
-            {
-                'format': format_name,
-                'count': stats['count'],
-                'size': stats['size']
+        methods = {}
+        for method in ChunkingMethod:
+            methods[method.value] = {
+                'name': method.value,
+                'description': _get_method_description(method),
+                'supported_formats': FileFormatSupport.get_supported_formats(method)
             }
-            for format_name, stats in format_stats.items()
-        ]
         
-        # Prepare file list with additional metadata
-        files_list = []
-        for doc in all_documents:
-            # Get ingestion status for current model
-            ingestion_status = doc.get('model_status', {})
-            current_model = rag.embedding_model
-            is_ingested = current_model in ingestion_status
-            
-            # Extract file format from content type or filename
-            content_type = doc.get('content_type', 'unknown')
-            if content_type == 'unknown' or not content_type:
-                # Try to get extension from filename
-                filename = doc.get('filename', '')
-                if '.' in filename:
-                    format_ext = filename.split('.')[-1].lower()
-                else:
-                    format_ext = 'unknown'
-            else:
-                # Map content type to format
-                format_mapping = {
-                    'application/pdf': 'pdf',
-                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-                    'text/csv': 'csv',
-                    'text/plain': 'txt'
-                }
-                format_ext = format_mapping.get(content_type, content_type.split('/')[-1] if '/' in content_type else content_type)
-            
-            files_list.append({
-                'id': doc['id'],
-                'filename': doc['filename'],
-                'format': format_ext,  # Match frontend expectation
-                'size': doc.get('file_size', 0),
-                'upload_date': doc.get('uploaded_at', doc.get('upload_timestamp', '')),  # Match frontend expectation
-                'uploadDate': doc.get('uploaded_at', doc.get('upload_timestamp', '')),  # Keep for backward compatibility
-                'contentType': doc.get('content_type', 'unknown'),
-                'isIngested': is_ingested,
-                'ingestedModels': list(ingestion_status.keys()) if ingestion_status else [],
-                'status': 'ingested' if is_ingested else 'uploaded'
-            })
-        logger.info(f"Admin files listed: {len(files_list)} files")
-        return {
-            "files": files_list,
-            "stats": {
-                "totalFiles": total_files,
-                "totalSize": total_size,
-                "formatStats": format_stats_list
-            }
-        }
-        
+        return {"methods": methods}
     except Exception as e:
-        logger.error(f"Error listing admin files: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        logger.error(f"Error getting chunking methods: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/admin/ingestion-status")
-async def get_ingestion_status(current_user: dict = Depends(get_current_user)):
-    """Get ingestion status for current embedding model"""
+@app.get("/api/chunking/config/{method}")
+async def get_chunking_config(method: str, token: str = Depends(oauth2_scheme)):
+    """Get chunking configuration for a specific method"""
     try:
-        rag = get_chatpdf_instance()
-        doc_storage = rag.doc_storage
+        from chunking_config import ChunkingMethod, get_chunking_config_manager
         
-        # Get all documents
-        all_documents = doc_storage.list_all_documents()
-        current_model = rag.embedding_model
+        try:
+            chunking_method = ChunkingMethod(method)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid chunking method: {method}")
         
-        # Categorize documents by ingestion status
-        ingested_docs = []
-        pending_docs = []
+        config_manager = get_chunking_config_manager()
+        config = config_manager.get_config(chunking_method)
         
-        for doc in all_documents:
-            ingestion_status = doc.get('model_status', {})
-            is_ingested = current_model in ingestion_status
-            
-            doc_info = {
-                'id': doc['id'],
-                'filename': doc['filename'],
-                'size': doc.get('file_size', 0),
-                'uploaded_at': doc.get('uploaded_at', ''),
-                'content_type': doc.get('content_type', 'unknown'),
-                'status': ingestion_status.get(current_model, 'pending')
-            }
-            
-            if is_ingested:
-                ingested_docs.append(doc_info)
-            else:
-                pending_docs.append(doc_info)
+        return {"config": config.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting chunking config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/chunking/config/{method}")
+async def update_chunking_config(
+    method: str,
+    config_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update chunking configuration for a specific method"""
+    try:
+        from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
         
-        # Get vector store stats
-        vector_stats = rag.get_vector_store_stats()
+        try:
+            chunking_method = ChunkingMethod(method)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid chunking method: {method}")
+        
+        # Create config from provided data
+        config = ChunkingConfig.from_dict(config_data)
+        
+        # Validate configuration
+        config_manager = get_chunking_config_manager()
+        warnings = config_manager.validate_config(config)
+        
+        # Save configuration (user-specific based on token)
+        user_id = current_user.get('sub', 'default')
+        config_manager.save_config(chunking_method, config, user_id)
         
         return {
-            "success": True,
-            "current_embedding_model": current_model,
-            "total_documents": len(all_documents),
-            "ingested_documents": {
-                "count": len(ingested_docs),
-                "files": ingested_docs
-            },
-            "pending_documents": {
-                "count": len(pending_docs),
-                "files": pending_docs
-            },
-            "vector_store_stats": vector_stats
+            "message": "Configuration updated successfully",
+            "warnings": warnings,
+            "config": config.to_dict()
         }
-        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error getting ingestion status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get ingestion status: {str(e)}")
+        logger.error(f"Error updating chunking config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/admin/reingest-all")
-async def reingest_all_documents(current_user: dict = Depends(get_current_user)):
-    """Re-ingest all documents for current embedding model"""
+@app.get("/api/chunking/optimal/{file_extension}")
+async def get_optimal_chunking_method(file_extension: str, token: str = Depends(oauth2_scheme)):
+    """Get optimal chunking method for a file extension"""
     try:
-        rag = get_chatpdf_instance()
+        from chunking_config import FileFormatSupport
         
-        # Trigger re-ingestion
-        success = rag.reingest_all_documents_for_current_model()
+        # Remove dot if present
+        ext = file_extension.lstrip('.')
         
-        if success:
-            return {
-                "success": True,
-                "message": f"Documents re-ingestion started for embedding model: {rag.embedding_model}"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Re-ingestion failed")
-            
+        optimal_method = FileFormatSupport.get_optimal_method(ext)
+        available_methods = FileFormatSupport.get_available_methods(ext)
+        
+        return {
+            "file_extension": ext,
+            "optimal_method": optimal_method.value,
+            "available_methods": [method.value for method in available_methods]
+        }
     except Exception as e:
-        logger.error(f"Error during re-ingestion: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to re-ingest documents: {str(e)}")
+        logger.error(f"Error getting optimal chunking method: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/admin/cleanup-orphaned-documents")
-async def cleanup_orphaned_documents(current_user: dict = Depends(get_current_user)):
-    """Clean up orphaned documents (in database but not in MinIO)"""
+def _get_method_description(method: ChunkingMethod) -> str:
+    """Get description for chunking method"""
+    descriptions = {
+        ChunkingMethod.NAIVE: "Default consecutive chunking based on token limits",
+        ChunkingMethod.QA: "For question-answer formatted documents",
+        ChunkingMethod.RESUME: "Enterprise edition for resume documents", 
+        ChunkingMethod.MANUAL: "Manual chunking for PDFs",
+        ChunkingMethod.TABLE: "For spreadsheet/tabular data",
+        ChunkingMethod.LAWS: "Legal document chunking",
+        ChunkingMethod.PRESENTATION: "For PPT/presentation files",
+        ChunkingMethod.PICTURE: "Image/visual content processing",
+        ChunkingMethod.ONE: "Treats entire document as single chunk",
+        ChunkingMethod.EMAIL: "Email content chunking"
+    }
+    return descriptions.get(method, "Custom chunking method")
+
+@app.get("/api/documents/{document_id}/image")
+async def get_document_image(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(oauth2_scheme)):
+    """Serve document image if it's an image file"""
     try:
+        from document_storage import get_document_storage
         doc_storage = get_document_storage()
         
-        # Clean up orphaned documents
-        orphaned_count = doc_storage.cleanup_orphaned_documents()
+        # Get document info first
+        doc_info = doc_storage._get_document_by_id(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
         
-        return {
-            "success": True,
-            "message": f"Cleaned up {orphaned_count} orphaned documents",
-            "orphaned_count": orphaned_count
-        }
+        # Check if it's an image file
+        if not doc_info['content_type'].startswith('image/'):
+            raise HTTPException(status_code=400, detail="Document is not an image")
         
-    except Exception as e:
-        logger.error(f"Error during orphaned document cleanup: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to cleanup orphaned documents: {str(e)}")
-
-@app.get("/api/gpu/memory-info")
-async def get_gpu_memory_info_endpoint(current_user: dict = Depends(get_current_user)):
-    """Get current GPU memory information"""
-    try:
-        from rag import get_gpu_memory_info
-        gpu_info = get_gpu_memory_info()
+        # Get the document content from MinIO
+        temp_file_path = doc_storage.get_document_content(document_id)
         
-        return {
-            "success": True,
-            "gpu_memory": gpu_info,
-            "message": f"GPU Memory - Total: {gpu_info['total']}MB, Used: {gpu_info['used']}MB, Available: {gpu_info['available']}MB"
-        }
-    except Exception as e:
-        logger.error(f"Error getting GPU memory info: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e),
-            "gpu_memory": {
-                "total": 8192,
-                "used": 2048,
-                "free": 6144,
-                "available": 6144
-            },
-            "message": "Could not determine GPU memory, using default estimates"
-        }
-
-@app.post("/api/models/check-compatibility")
-async def check_model_compatibility_endpoint(
-    request: dict,
-    current_user: dict = Depends(get_current_user)
-):
-    """Check if selected models are compatible with current GPU memory"""
-    try:
-        from rag import check_model_compatibility, get_gpu_memory_info
+        # Schedule cleanup
+        background_tasks.add_task(os.remove, temp_file_path)
         
-        llm_model = request.get('llm')
-        embedding_model = request.get('embedding')
-        llm_size = request.get('llm_size')
-        embedding_size = request.get('embedding_size')
-        
-        if not llm_model or not embedding_model:
-            raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
-        
-        # Check LLM model compatibility
-        llm_compatible, llm_message, llm_details = check_model_compatibility(llm_model, llm_size)
-        
-        # Check embedding model compatibility
-        embedding_compatible, embedding_message, embedding_details = check_model_compatibility(embedding_model, embedding_size)
-        
-        # Calculate combined memory requirement
-        combined_memory = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
-        available_memory = llm_details['available_memory_mb']
-        
-        combined_compatible = combined_memory <= available_memory
-        
-        if combined_compatible:
-            combined_message = f"✅ Both models compatible together (combined ~{combined_memory}MB, {available_memory}MB available)"
-        else:
-            shortage = combined_memory - available_memory
-            combined_message = f"❌ Combined models require ~{combined_memory}MB but only {available_memory}MB available (shortage: {shortage}MB)"
-        
-        # Get current GPU info
-        gpu_info = get_gpu_memory_info()
-        
-        return {
-            "success": True,
-            "compatible": llm_compatible and embedding_compatible and combined_compatible,
-            "llm_check": {
-                "compatible": llm_compatible,
-                "message": llm_message,
-                "details": llm_details
-            },
-            "embedding_check": {
-                "compatible": embedding_compatible,
-                "message": embedding_message,
-                "details": embedding_details
-            },
-            "combined_check": {
-                "compatible": combined_compatible,
-                "message": combined_message,
-                "required_memory_mb": combined_memory,
-                "available_memory_mb": available_memory,
-                "shortage_mb": max(0, combined_memory - available_memory)
-            },
-            "gpu_info": gpu_info,
-            "recommendations": generate_compatibility_recommendations(llm_details, embedding_details, combined_compatible)
-        }
+        # Return the image file
+        return FileResponse(
+            temp_file_path,
+            media_type=doc_info['content_type'],
+            filename=doc_info['filename']
+        )
         
     except Exception as e:
-        logger.error(f"Error checking model compatibility: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to check model compatibility: {str(e)}")
+        logger.error(f"Error serving document image {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/models/check-gpu")
-async def check_gpu_compatibility(
-    request: dict,
-    current_user: dict = Depends(get_current_user)
-):
-    """Check GPU compatibility for model selection"""
+@app.get("/api/documents/{document_id}/preview")
+async def get_document_preview(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(oauth2_scheme)):
+    """Get document preview content for side-by-side viewing"""
     try:
-        from rag import check_model_compatibility
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
         
-        llm_model = request.get('llm')
-        embedding_model = request.get('embedding')
+        # Get document info first
+        doc_info = doc_storage._get_document_by_id(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
         
-        if not llm_model or not embedding_model:
-            raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
-        
-        # Check compatibility for both models
-        llm_compatible, llm_message, llm_details = check_model_compatibility(llm_model)
-        embedding_compatible, embedding_message, embedding_details = check_model_compatibility(embedding_model)
-        
-        # Calculate combined memory requirement
-        combined_memory = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
-        available_memory = llm_details['available_memory_mb']
-        combined_compatible = combined_memory <= available_memory
-        
-        return {
-            "compatible": llm_compatible and embedding_compatible and combined_compatible,
-            "llm_check": {
-                "compatible": llm_compatible,
-                "message": llm_message,
-                "required_mb": llm_details['required_memory_mb']
-            },
-            "embedding_check": {
-                "compatible": embedding_compatible,
-                "message": embedding_message,
-                "required_mb": embedding_details['required_memory_mb']
-            },
-            "combined_check": {
-                "compatible": combined_compatible,
-                "required_mb": combined_memory,
-                "available_mb": available_memory,
-                "shortage_mb": max(0, combined_memory - available_memory)
+        # For images, return image metadata
+        if doc_info['content_type'].startswith('image/'):
+            return {
+                "type": "image",
+                "content_type": doc_info['content_type'],
+                "filename": doc_info['filename'],
+                "image_url": f"/api/documents/{document_id}/image"
             }
-        }
         
-    except Exception as e:
-        logger.error(f"Error checking GPU compatibility: {str(e)}")
-        # Return compatible=true as fallback to not block users
-        return {
-            "compatible": True,
-            "message": f"Could not check compatibility: {str(e)}",
-            "llm_check": {"compatible": True, "message": "Check skipped"},
-            "embedding_check": {"compatible": True, "message": "Check skipped"},
-            "combined_check": {"compatible": True, "message": "Check skipped"}
-        }
-
-@app.get("/api/files/list")
-async def list_files(token: str = Depends(oauth2_scheme)):
-    """Get list of uploaded files"""
-    try:
-        rag = get_chatpdf_instance()
-        doc_storage = rag.doc_storage
+        # Get the document content from MinIO
+        temp_file_path = doc_storage.get_document_file(document_id)
         
-        # Get all documents
-        all_documents = doc_storage.list_all_documents()
-        
-        # Format for frontend
-        files = []
-        for doc in all_documents:
-            # Determine if document is indexed (has successful ingestion)
-            model_status = doc.get('model_status', {})
-            indexed = any(status == 'completed' for status in model_status.values())
-            
-            # Get the embedding model used (first completed one, or first available)
-            embedding_model = None
-            for model, status in model_status.items():
-                if status == 'completed':
-                    embedding_model = model
-                    break
-            if not embedding_model and model_status:
-                embedding_model = list(model_status.keys())[0]
-            
-            files.append({
-                "filename": doc.get('filename', 'Unknown'),
-                "size": doc.get('file_size', 0),  # Map file_size to size
-                "upload_date": doc.get('uploaded_at', ''),  # Map uploaded_at to upload_date  
-                "indexed": indexed,  # Determine from model_status
-                "embedding_model": embedding_model or 'Unknown'  # Get from model_status
-            })
-        
-        return {"files": files, "total": len(files)}
-        
-    except Exception as e:
-        logger.error(f"Error listing files: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/vectorstore/stats")
-async def get_vectorstore_stats(token: str = Depends(oauth2_scheme)):
-    """Get vector store statistics"""
-    try:
-        rag = get_chatpdf_instance()
-        
-        # Get vector store statistics
-        stats = rag.get_vectorstore_stats()
-        
-        return {"stats": stats}
-    except Exception as e:
-        logger.error(f"Error getting vector store stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/vectorstore/reingest")
-async def reingest_vectorstore(token: str = Depends(oauth2_scheme)):
-    """Re-ingest all documents into vector store"""
-    try:
-        rag = get_chatpdf_instance()
-        
-        # Re-ingest all documents
-        success = rag.re_ingest_all_documents()
-        
-        if success:
-            return {"message": "Documents re-ingested successfully"}
-        else:
-            raise HTTPException(status_code=500, detail="Re-ingestion failed")
-    except Exception as e:
-        logger.error(f"Error re-ingesting documents: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/vectorstore/clear")
-async def clear_vectorstore(token: str = Depends(oauth2_scheme)):
-    """Clear the entire vector store"""
-    try:
-        rag = get_chatpdf_instance()
-        
-        # Clear vector store
-        success = rag.clear_vectorstore()
-        
-        if success:
-            return {"message": "Vector store cleared successfully"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to clear vector store")
-    except Exception as e:
-        logger.error(f"Error clearing vector store: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-def format_model_size(size_value) -> str:
-    """Format model size from bytes or string to human-readable format"""
-    if not size_value or size_value == 'Unknown':
-        return "Unknown"
-    
-    # If it's already a formatted string, return as-is
-    if isinstance(size_value, str):
-        # Check if it contains size indicators
-        if any(unit in size_value.lower() for unit in ['gb', 'mb', 'kb', 'various']):
-            return size_value
-        # Try to parse as numeric bytes
         try:
-            size_bytes = int(float(size_value))
-        except (ValueError, TypeError):
-            return size_value
-    else:
-        try:
-            size_bytes = int(size_value)
-        except (ValueError, TypeError):
-            return str(size_value) if size_value else "Unknown"
-    
-    if size_bytes == 0:
-        return "Unknown"
+            # Extract text content based on file type
+            content = ""
+            content_type = doc_info['content_type'].lower()
+            
+            if content_type == 'text/plain' or doc_info['filename'].endswith('.txt'):
+                with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            
+            elif content_type == 'application/pdf' or doc_info['filename'].endswith('.pdf'):
+                import PyPDF2
+                pages_info = []
+                with open(temp_file_path, 'rb') as f:
+                    pdf_reader = PyPDF2.PdfReader(f)
+                    content = ""
+                    for page_num in range(min(20, len(pdf_reader.pages))):  # Limit to first 20 pages
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        content += f"--- Page {page_num + 1} ---\n"
+                        content += page_text + "\n\n"
+                        
+                        # Store page info for PDF viewer
+                        pages_info.append({
+                            "page_number": page_num + 1,
+                            "text": page_text,
+                            "text_length": len(page_text)
+                        })
+                
+                # For PDFs, return special structure with page info
+                return {
+                    "type": "pdf",
+                    "content_type": doc_info['content_type'],
+                    "filename": doc_info['filename'],
+                    "content": content,
+                    "pdf_url": f"/api/documents/{document_id}/raw",
+                    "pages_info": pages_info,
+                    "total_pages": len(pdf_reader.pages),
+                    "truncated": len(content) >= 50000
+                }
+            
+            elif content_type in ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword'] or doc_info['filename'].endswith(('.docx', '.doc')):
+                from docx import Document
+                doc = Document(temp_file_path)
+                content = ""
+                for paragraph in doc.paragraphs[:50]:  # Limit to first 50 paragraphs
+                    content += paragraph.text + "\n"
+            
+            elif content_type == 'text/markdown' or doc_info['filename'].endswith('.md'):
+                with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            
+            elif content_type in ['application/json', 'text/json'] or doc_info['filename'].endswith('.json'):
+                import json
+                with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    json_data = json.load(f)
+                    content = json.dumps(json_data, indent=2)
+            
+            else:
+                # Try to read as text for other formats
+                try:
+                    with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()[:10000]  # Limit to first 10KB
+                except:
+                    content = f"Preview not available for {content_type}"
+            
+            # Limit content length for frontend display
+            if len(content) > 50000:  # 50KB limit
+                content = content[:50000] + "\n\n... (Content truncated for preview)"
+            
+            return {
+                "type": "text",
+                "content_type": doc_info['content_type'],
+                "filename": doc_info['filename'],
+                "content": content,
+                "truncated": len(content) >= 50000
+            }
+            
+        finally:
+            # Schedule cleanup
+            background_tasks.add_task(os.remove, temp_file_path)
         
-    if size_bytes >= 1073741824:  # 1GB = 1024^3 bytes
-        size_gb = size_bytes / 1073741824
-        return f"{size_gb:.1f}GB"
-    elif size_bytes >= 1048576:  # 1MB = 1024^2 bytes  
-        size_mb = size_bytes / 1048576
-        return f"{size_mb:.0f}MB"
-    elif size_bytes >= 1024:  # 1KB = 1024 bytes
-        size_kb = size_bytes / 1024
-        return f"{size_kb:.0f}KB"
-    else:
-        return f"{size_bytes}B"
+    except Exception as e:
+        logger.error(f"Error getting document preview: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving document preview: {str(e)}")
+
+@app.get("/api/documents/{document_id}/raw")
+async def get_document_raw(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(oauth2_scheme)):
+    """Serve raw document file for viewers (e.g., PDF viewer)"""
+    try:
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
+        
+        # Get document info first
+        doc_info = doc_storage._get_document_by_id(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Get the document content from MinIO
+        temp_file_path = doc_storage.get_document_file(document_id)
+        
+        # Schedule cleanup
+        background_tasks.add_task(os.remove, temp_file_path)
+        
+        # Return the document file
+        return FileResponse(
+            temp_file_path,
+            media_type=doc_info['content_type'],
+            filename=doc_info['filename']
+        )
+        
+    except Exception as e:
+        logger.error(f"Error serving raw document {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

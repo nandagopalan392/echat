@@ -2,10 +2,16 @@
 from langchain_core.globals import set_verbose, set_debug
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain.schema.output_parser import StrOutputParser
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 import chromadb
 from chromadb.config import Settings
 import os
+import gc
+import tempfile
+import asyncio
+import httpx
+import requests
+import traceback
 # Set up some reasonable defaults for ChromaDB
 os.environ["CHROMA_SERVER_NOFILE"] = "65536"
 from langchain_community.document_loaders import PyPDFLoader
@@ -28,6 +34,8 @@ from langchain.schema import Document
 from document_storage import get_document_storage
 import subprocess
 import re
+from enhanced_document_processor import get_document_processor
+from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
 
 # Add stub for reranker that will be dynamically loaded
 _reranker_instance = None
@@ -596,8 +604,22 @@ class ChatPDF:
                 logger.error("No chunks created from text splitting")
                 return False
 
-            # Clean metadata
-            chunks = filter_complex_metadata(chunks)
+            # Add filename to chunk metadata 
+            filename = Path(pdf_file_path).name
+            for chunk in chunks:
+                if not chunk.metadata:
+                    chunk.metadata = {}
+                chunk.metadata['source'] = filename
+
+            # Debug: Log metadata before filtering
+            logger.info(f"Before filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+
+            # Use our custom metadata filtering instead of langchain's filter_complex_metadata
+            chunks = self._filter_metadata_for_chromadb(chunks)
+            
+            # Debug: Log metadata after filtering
+            logger.info(f"After filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+            logger.info(f"Total chunks after filtering: {len(chunks)}")
 
             # Create or update vector store with embedding-specific collection
             try:
@@ -729,8 +751,7 @@ class ChatPDF:
                     "No text content extracted from PDF"
                 )
                 return False
-            
-            # Create document and split into chunks
+             # Create document and split into chunks
             docs = [Document(page_content=text_content)]
             chunks = self.text_splitter.split_documents(docs)
             
@@ -741,9 +762,27 @@ class ChatPDF:
                     "No chunks created from text splitting"
                 )
                 return False
+
+            # Get document info to add filename to chunk metadata
+            doc_info = self.doc_storage._get_document_by_id(document_id)
+            filename = doc_info['filename'] if doc_info else f"document_{document_id}"
             
-            # Clean metadata
-            chunks = filter_complex_metadata(chunks)
+            # Add filename to chunk metadata
+            for chunk in chunks:
+                if not chunk.metadata:
+                    chunk.metadata = {}
+                chunk.metadata['source'] = filename
+                chunk.metadata['document_id'] = document_id
+
+            # Debug: Log metadata before filtering
+            logger.info(f"Before filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+
+            # Use our custom metadata filtering instead of langchain's filter_complex_metadata
+            chunks = self._filter_metadata_for_chromadb(chunks)
+            
+            # Debug: Log metadata after filtering
+            logger.info(f"After filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+            logger.info(f"Total chunks after filtering: {len(chunks)}")
             
             # Get collection name for current model
             collection_name = self._get_collection_name()
@@ -821,11 +860,63 @@ class ChatPDF:
         
         raise ValueError("Failed to extract text from PDF using any method")
     
+    def _filter_metadata_for_chromadb(self, chunks: List[Document]) -> List[Document]:
+        """Filter metadata to keep only ChromaDB-compatible fields"""
+        logger.info(f"🔍 METADATA DEBUG: Filtering {len(chunks)} chunks")
+        
+        filtered_chunks = []
+        for i, chunk in enumerate(chunks):
+            logger.info(f"🔍 CHUNK {i}: Original metadata: {chunk.metadata}")
+            
+            # Create a new document with filtered metadata
+            filtered_metadata = {}
+            if chunk.metadata:
+                for key, value in chunk.metadata.items():
+                    logger.debug(f"🔍 Processing metadata key '{key}': {type(value)} = {value}")
+                    # Keep simple types that ChromaDB can handle
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        filtered_metadata[key] = value
+                        logger.debug(f"✅ Kept metadata '{key}': {value}")
+                    elif isinstance(value, dict) and len(str(value)) < 1000:  # Small dicts
+                        filtered_metadata[key] = str(value)
+                        logger.debug(f"✅ Converted dict metadata '{key}': {str(value)}")
+                    else:
+                        logger.debug(f"❌ Skipped complex metadata '{key}': {type(value)}")
+            
+            logger.info(f"🔍 CHUNK {i}: Filtered metadata: {filtered_metadata}")
+            
+            filtered_chunk = Document(
+                page_content=chunk.page_content,
+                metadata=filtered_metadata
+            )
+            filtered_chunks.append(filtered_chunk)
+        
+        logger.info(f"🔍 METADATA DEBUG: Returning {len(filtered_chunks)} filtered chunks")
+        return filtered_chunks
+
     def _add_chunks_to_vector_store(self, chunks: List[Document], collection_name: str) -> bool:
         """Add document chunks to the vector store"""
         try:
+            if not chunks:
+                logger.warning("No chunks provided for vector store addition")
+                return False
+            
             # Ensure ChromaDB directory has proper permissions
             self._ensure_writable_before_operation()
+            
+            logger.info(f"🔍 DEBUG: Adding {len(chunks)} chunks to vector store collection '{collection_name}'")
+            
+            # Log original metadata before filtering
+            for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
+                logger.info(f"🔍 DEBUG: Original chunk {i} metadata: {chunk.metadata}")
+                logger.info(f"🔍 DEBUG: Original chunk {i} content preview: {chunk.page_content[:100]}...")
+            
+            # Use our custom metadata filtering instead of langchain's filter_complex_metadata
+            filtered_chunks = self._filter_metadata_for_chromadb(chunks)
+            
+            # Log filtered metadata
+            for i, chunk in enumerate(filtered_chunks[:3]):  # Show first 3 chunks
+                logger.info(f"🔍 DEBUG: Filtered chunk {i} metadata: {chunk.metadata}")
             
             if not self.vector_store:
                 logger.debug("Creating new vector store with embedding-specific collection")
@@ -845,24 +936,48 @@ class ChatPDF:
                     embedding_function=self.embeddings,
                 )
             
+            # Before adding to vector store, let's manually verify what we're sending
+            logger.info(f"🔍 DEBUG: About to add {len(filtered_chunks)} filtered chunks to ChromaDB")
+            
             # Add documents to vector store
-            self._handle_chromadb_operation(self.vector_store.add_documents, chunks)
+            success = self._handle_chromadb_operation(self.vector_store.add_documents, filtered_chunks)
             
-            # Update retriever
-            self.retriever = self.vector_store.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 3}
-            )
-            
-            # Backup to MinIO after successful ingestion
-            backup_success = self._backup_vector_store_to_minio(collection_name)
-            if backup_success:
-                logger.info(f"Vector store backed up to MinIO after adding {len(chunks)} chunks")
+            if success:
+                # After successful addition, let's verify what was actually stored
+                logger.info("🔍 DEBUG: Verifying chunks were stored with metadata...")
+                try:
+                    # Get the collection directly and check what was stored
+                    chroma_client = self.vector_store._client
+                    collection = chroma_client.get_collection(collection_name)
+                    
+                    # Get the last few documents to see their metadata
+                    recent_docs = collection.get(limit=3, include=["metadatas", "documents"])
+                    
+                    logger.info(f"🔍 DEBUG: Recent documents in collection: {len(recent_docs.get('ids', []))}")
+                    for i, metadata in enumerate(recent_docs.get('metadatas', [])[:3]):
+                        logger.info(f"🔍 DEBUG: Recently stored document {i} metadata: {metadata}")
+                        
+                except Exception as verify_error:
+                    logger.error(f"🔍 DEBUG: Could not verify stored chunks: {verify_error}")
+                
+                # Update retriever
+                self.retriever = self.vector_store.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 3}
+                )
+                
+                # Backup to MinIO after successful ingestion
+                backup_success = self._backup_vector_store_to_minio(collection_name)
+                if backup_success:
+                    logger.info(f"Vector store backed up to MinIO after adding {len(chunks)} chunks")
+                else:
+                    logger.warning("Failed to backup vector store to MinIO")
+                
+                logger.info(f"✅ Added {len(filtered_chunks)} chunks to vector store collection '{collection_name}'")
+                return True
             else:
-                logger.warning("Failed to backup vector store to MinIO")
-            
-            logger.info(f"Added {len(chunks)} chunks to vector store collection '{collection_name}'")
-            return True
+                logger.error("❌ Failed to add chunks to vector store")
+                return False
             
         except Exception as e:
             logger.error(f"Failed to add chunks to vector store: {e}")
@@ -1474,10 +1589,25 @@ class ChatPDF:
 
     def _handle_chromadb_operation(self, operation_func, *args, **kwargs):
         """Wrapper to handle ChromaDB operations with automatic permission fixing"""
+        # Debug the documents being added
+        if hasattr(operation_func, '__name__') and operation_func.__name__ == 'add_documents':
+            if args and len(args) > 0:
+                docs = args[0]
+                logger.info(f"🔍 ADD_DOCUMENTS DEBUG: Adding {len(docs)} documents")
+                for i, doc in enumerate(docs[:3]):  # Log first 3 documents
+                    logger.info(f"🔍 DOC {i}: metadata = {doc.metadata}")
+                    logger.info(f"🔍 DOC {i}: content preview = {doc.page_content[:100]}...")
+        
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                return operation_func(*args, **kwargs)
+                result = operation_func(*args, **kwargs)
+                
+                # Log result if it's add_documents
+                if hasattr(operation_func, '__name__') and operation_func.__name__ == 'add_documents':
+                    logger.info(f"✅ ADD_DOCUMENTS SUCCESS: Operation completed")
+                
+                return True  # Return True for success
             except Exception as e:
                 error_msg = str(e).lower()
                 if any(perm_error in error_msg for perm_error in 
@@ -1500,18 +1630,20 @@ class ChatPDF:
                             try:
                                 self._initialize_vector_store()
                                 # Retry the operation once more
-                                return operation_func(*args, **kwargs)
+                                operation_func(*args, **kwargs)
+                                return True
                             except Exception as reinit_error:
                                 logger.error(f"Failed to reinitialize after directory recreation: {reinit_error}")
                         
                         logger.error(f"ChromaDB operation failed after {max_retries} attempts: {e}")
-                        raise
+                        return False
                 else:
                     # Non-permission error, re-raise immediately
-                    raise
+                    logger.error(f"ChromaDB operation failed: {e}")
+                    return False
         
         # This should never be reached
-        raise RuntimeError("Unexpected state in ChromaDB operation handler")
+        return False
 
     def _recreate_chromadb_directory(self):
         """Recreate ChromaDB directory from scratch as a last resort"""
@@ -1650,148 +1782,156 @@ class ChatPDF:
         logger.info("🔍 DEBUG: reingest_all_documents() called")
         return self.reingest_all_documents_for_current_model()
 
-def get_gpu_memory_info() -> Dict[str, int]:
-    """Get GPU memory information in MB"""
-    try:
-        # Try nvidia-smi first
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'], 
-                              capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            if lines:
-                # Take the first GPU
-                memory_info = lines[0].split(', ')
-                if len(memory_info) >= 3:
-                    total_mb = int(memory_info[0])
-                    used_mb = int(memory_info[1])
-                    free_mb = int(memory_info[2])
-                    return {
-                        'total': total_mb,
-                        'used': used_mb,
-                        'free': free_mb,
-                        'available': free_mb
-                    }
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        pass
-    
-    try:
-        # Fallback: Try to get info from /proc/driver/nvidia/gpus/
-        gpu_dirs = [d for d in os.listdir('/proc/driver/nvidia/gpus/') if os.path.isdir(f'/proc/driver/nvidia/gpus/{d}')]
-        if gpu_dirs:
-            # Read memory info from the first GPU
-            gpu_dir = gpu_dirs[0]
-            with open(f'/proc/driver/nvidia/gpus/{gpu_dir}/information', 'r') as f:
-                content = f.read()
-                # Extract memory info
-                memory_match = re.search(r'Video Memory:\s+(\d+)\s+MB', content)
-                if memory_match:
-                    total_mb = int(memory_match.group(1))
-                    # Estimate available as 80% of total (conservative)
-                    available_mb = int(total_mb * 0.8)
-                    return {
-                        'total': total_mb,
-                        'used': total_mb - available_mb,
-                        'free': available_mb,
-                        'available': available_mb
-                    }
-    except (FileNotFoundError, PermissionError, ValueError):
-        pass
-    
-    # If no GPU info available, return default values
-    logger.info("No GPU detected or GPU memory unavailable, using CPU-based estimates")
-    return {
-        'total': 8192,  # 8GB default
-        'used': 2048,   # 2GB used
-        'free': 6144,   # 6GB free
-        'available': 6144
-    }
-
-def estimate_model_memory_requirement(model_name: str, model_size: str = None) -> int:
-    """Estimate memory requirement for a model in MB"""
-    name_lower = model_name.lower()
-    
-    # If size is provided, try to parse it
-    if model_size and isinstance(model_size, str):
-        size_lower = model_size.lower()
-        # Extract numeric value from size string
-        size_match = re.search(r'(\d+\.?\d*)', size_lower)
-        if size_match:
-            size_value = float(size_match.group(1))
+    def ingest_with_storage_and_chunking(self, file_path: str, original_filename: str = None,
+                                        chunking_method: ChunkingMethod = None, 
+                                        chunking_config: ChunkingConfig = None,
+                                        user_id: str = None) -> bool:
+        """
+        Ingest a document using enhanced processing with configurable chunking methods
+        """
+        try:
+            logger.info(f"Starting enhanced ingestion: {file_path}")
             
-            # Convert based on unit
-            if 'gb' in size_lower:
-                return int(size_value * 1024)  # Convert GB to MB
-            elif 'mb' in size_lower:
-                return int(size_value)
-            elif 'b' in size_lower and 'gb' not in size_lower and 'mb' not in size_lower:
-                # Assume it's parameters (e.g., "7b", "13b")
-                # Rule of thumb: 1B parameters ≈ 2GB in FP16, ≈ 1GB in Q4
-                return int(size_value * 1500)  # Conservative estimate for Q4 quantization
-    
-    # Fallback: estimate based on model name patterns
-    if any(size in name_lower for size in ['0.5b', '500m']):
-        return 1024   # ~1GB
-    elif any(size in name_lower for size in ['1b', '1.5b']):
-        return 2048   # ~2GB
-    elif any(size in name_lower for size in ['3b', '2.8b']):
-        return 4096   # ~4GB
-    elif any(size in name_lower for size in ['7b', '6.7b', '8b']):
-        return 8192   # ~8GB
-    elif any(size in name_lower for size in ['13b', '14b', '15b']):
-        return 16384  # ~16GB
-    elif any(size in name_lower for size in ['30b', '32b', '34b']):
-        return 32768  # ~32GB
-    elif any(size in name_lower for size in ['70b', '72b']):
-        return 65536  # ~64GB
-    elif any(size in name_lower for size in ['175b', '180b']):
-        return 131072 # ~128GB
-    
-    # Embedding models are typically smaller
-    if any(keyword in name_lower for keyword in ['embed', 'bge', 'minilm', 'e5', 'sentence']):
-        if 'large' in name_lower:
-            return 1024   # ~1GB for large embedding models
-        else:
-            return 512    # ~512MB for smaller embedding models
-    
-    # Default estimate for unknown models
-    return 4096  # ~4GB default
+            if not os.path.exists(file_path):
+                logger.error(f"File not found: {file_path}")
+                return False
 
-def check_model_compatibility(model_name: str, model_size: str = None) -> Tuple[bool, str, Dict]:
-    """Check if a model is compatible with current GPU memory"""
-    gpu_info = get_gpu_memory_info()
-    required_memory = estimate_model_memory_requirement(model_name, model_size)
-    
-    # Leave some buffer for system and other processes (20% of total or min 1GB)
-    buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
-    usable_memory = gpu_info['available'] - buffer_memory
-    
-    is_compatible = required_memory <= usable_memory
-    
-    if is_compatible:
-        message = f"✅ Model {model_name} is compatible (requires ~{required_memory}MB, {usable_memory}MB available)"
-    else:
-        shortage = required_memory - usable_memory
-        message = f"❌ Model {model_name} requires ~{required_memory}MB but only {usable_memory}MB available (shortage: {shortage}MB)"
-    
-    return is_compatible, message, {
-        'required_memory_mb': required_memory,
-        'available_memory_mb': usable_memory,
-        'gpu_total_mb': gpu_info['total'],
-        'gpu_used_mb': gpu_info['used'],
-        'gpu_free_mb': gpu_info['free'],
-        'buffer_memory_mb': buffer_memory,
-        'compatible': is_compatible,
-        'shortage_mb': max(0, required_memory - usable_memory)
-    }
+            # Use provided original filename or extract from path
+            if original_filename is None:
+                original_filename = Path(file_path).name
+            
+            # Determine file type and optimal chunking method
+            file_ext = Path(file_path).suffix[1:]  # Remove dot
+            if chunking_method is None:
+                chunking_method = FileFormatSupport.get_optimal_method(file_ext)
+            
+            # Get chunking configuration
+            config_manager = get_chunking_config_manager()
+            if chunking_config is None:
+                chunking_config = config_manager.get_config(chunking_method, user_id)
+            
+            # Validate that the method supports this file type
+            if not FileFormatSupport.is_supported(chunking_method, file_ext):
+                logger.warning(f"Method {chunking_method.value} not supported for {file_ext}, using naive")
+                chunking_method = ChunkingMethod.NAIVE
+                chunking_config = config_manager.get_config(chunking_method, user_id)
+            
+            # Determine content type
+            content_type_map = {
+                'pdf': 'application/pdf',
+                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                'doc': 'application/msword',
+                'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'xls': 'application/vnd.ms-excel',
+                'ppt': 'application/vnd.ms-powerpoint',
+                'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                'txt': 'text/plain',
+                'csv': 'text/csv',
+                'html': 'text/html',
+                'json': 'application/json',
+                'eml': 'message/rfc822'
+            }
+            content_type = content_type_map.get(file_ext, 'application/octet-stream')
+            
+            # Store document in MinIO with chunking configuration
+            doc_info = self.doc_storage.store_document(
+                file_path, 
+                original_filename, 
+                content_type,
+                chunking_method.value,
+                chunking_config.to_dict()
+            )
+            
+            logger.info(f"Document stored with ID: {doc_info['id']}")
+            
+            # Process document with enhanced processor
+            doc_processor = get_document_processor()
+            
+            try:
+                chunking_result = doc_processor.process_document(
+                    file_path, 
+                    chunking_method, 
+                    chunking_config, 
+                    user_id,
+                    original_filename  # Pass the original filename
+                )
+                
+                logger.info(f"Document processed: {len(chunking_result.chunks)} chunks created using {chunking_result.method_used.value}")
+                
+                # Log any warnings
+                if chunking_result.warnings:
+                    for warning in chunking_result.warnings:
+                        logger.warning(f"Chunking warning: {warning}")
+                
+                # Add chunks to vector store
+                collection_name = self._get_collection_name()
+                success = self._add_chunks_to_vector_store(chunking_result.chunks, collection_name)
+                
+                if success:
+                    # Track successful ingestion with chunking information
+                    # Create simple metadata instead of spreading complex objects
+                    simple_metadata = {
+                        'total_chunks': len(chunking_result.chunks),
+                        'method_used': chunking_result.method_used.value,
+                        'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                        'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                        'warnings_count': len(chunking_result.warnings)
+                    }
+                    
+                    # Add warning messages as a simple string
+                    if chunking_result.warnings:
+                        simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])  # Limit to first 3 warnings
+                    
+                    self.doc_storage.track_ingestion(
+                        document_id=doc_info['id'],
+                        embedding_model=self.embedding_model,
+                        vector_store_collection=collection_name,
+                        chunk_count=len(chunking_result.chunks),
+                        metadata=simple_metadata,
+                        chunking_method=chunking_result.method_used.value,
+                        chunking_config=chunking_result.config_used.to_dict()
+                    )
+                    logger.info(f"Successfully ingested document {doc_info['id']} with {chunking_method.value} chunking")
+                    return True
+                else:
+                    self.doc_storage.mark_ingestion_failed(
+                        doc_info['id'], 
+                        self.embedding_model, 
+                        "Failed to add chunks to vector store"
+                    )
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Failed to process document with enhanced processor: {e}")
+                self.doc_storage.mark_ingestion_failed(
+                    doc_info['id'], 
+                    self.embedding_model, 
+                    f"Document processing failed: {str(e)}"
+                )
+                return False
+            
+        except Exception as e:
+            logger.error(f"Enhanced document ingestion failed: {str(e)}", exc_info=True)
+            return False
 
-# Add a singleton instance to be used throughout the application
+
+# Global singleton instance
 _chatpdf_instance = None
 
 def get_chatpdf_instance():
-    """Get the singleton instance of ChatPDF"""
+    """Get singleton instance of ChatPDF"""
     global _chatpdf_instance
-    if (_chatpdf_instance is None):
-        logger.info("Creating new ChatPDF instance")
+    if _chatpdf_instance is None:
         _chatpdf_instance = ChatPDF()
-        logger.info("ChatPDF instance created successfully")
     return _chatpdf_instance
+
+def reset_chatpdf_instance():
+    """Reset the singleton instance (useful for testing or model changes)"""
+    global _chatpdf_instance
+    if _chatpdf_instance:
+        # Clear GPU memory before resetting
+        try:
+            _chatpdf_instance.clear_gpu_memory()
+        except Exception as e:
+            logger.warning(f"Error clearing GPU memory during reset: {e}")
+    _chatpdf_instance = None
