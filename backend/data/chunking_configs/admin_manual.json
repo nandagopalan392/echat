@@ -1,0 +1,9 @@
+{
+  "method": "manual",
+  "chunk_token_num": 1500,
+  "max_token": 6144,
+  "chunk_overlap": 300,
+  "preserve_formatting": true,
+  "extract_tables": true,
+  "extract_images": false
+}
