@@ -9,20 +9,23 @@ pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/b
 // CSS styles for highlighting
 const highlightStyles = `
 .pdf-highlight-line {
-    background-color: #ffff99 !important;
+    background-color: #fef08a !important;
     border-radius: 3px !important;
     padding: 1px 2px !important;
     margin: -1px -2px !important;
     transition: background-color 0.2s ease !important;
+    color: #374151 !important;
 }
 
 .pdf-highlight-line-selected {
-    background-color: #ffed4e !important;
-    box-shadow: 0 0 0 2px #fbbf24 !important;
+    background-color: #fde047 !important;
+    box-shadow: 0 0 0 2px #eab308 !important;
+    color: #1f2937 !important;
 }
 
 .pdf-highlight-line-fade {
-    background-color: #fef3c7 !important;
+    background-color: #fefce8 !important;
+    color: #4b5563 !important;
 }
 `;
 

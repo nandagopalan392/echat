@@ -14,6 +14,10 @@ const ModelSettingsPage = () => {
     
     // UI state
     const [activeTab, setActiveTab] = useState('llm');
+    const [showWarningDialog, setShowWarningDialog] = useState(false);
+    const [warningData, setWarningData] = useState(null);
+    const [showEmbeddingWarning, setShowEmbeddingWarning] = useState(false);
+    const [embeddingWarningData, setEmbeddingWarningData] = useState(null);
     
     // Model data
     const [availableModels, setAvailableModels] = useState([]);
@@ -126,19 +130,38 @@ const ModelSettingsPage = () => {
                 setDownloadProgress('Checking GPU compatibility...');
                 const compatibilityResponse = await api.post('/api/models/check-gpu', payload);
                 
-                if (!compatibilityResponse.compatible) {
-                    const warningMessage = `⚠️ GPU Compatibility Warning:\n\n` +
-                        `LLM Model: ${compatibilityResponse.llm_check.message}\n` +
-                        `Embedding Model: ${compatibilityResponse.embedding_check.message}\n` +
-                        `Combined: ${compatibilityResponse.combined_check.required_mb}MB required, ${compatibilityResponse.combined_check.available_mb}MB available\n\n` +
-                        `These models may not fit in your GPU memory and could cause system issues.\n\n` +
-                        `Do you want to proceed anyway?`;
-                    
-                    if (!confirm(warningMessage)) {
-                        setDownloading(false);
-                        setDownloadProgress('');
-                        return;
-                    }
+                console.log('GPU Compatibility Response:', compatibilityResponse);
+                
+                // Force warning dialog for large models (for testing and safety)
+                const isLargeModel = payload.llm.includes('70B') || payload.llm.includes('405B') || 
+                                   payload.llm.includes('70b') || payload.llm.includes('405b') ||
+                                   payload.llm.includes('33B') || payload.llm.includes('34B') ||
+                                   payload.llm.includes('13B') || payload.llm.includes('13b') ||
+                                   payload.llm.includes('7B') || payload.llm.includes('7b') ||
+                                   payload.llm.includes('8B') || payload.llm.includes('8b');
+                
+                // Show dialog for incompatible models OR large models (basically most models for testing)
+                const shouldShowWarning = (compatibilityResponse && !compatibilityResponse.compatible) || 
+                                        isLargeModel || 
+                                        (compatibilityResponse && compatibilityResponse.combined_check && 
+                                         compatibilityResponse.combined_check.required_mb > 8000); // Show warning for models > 8GB
+                
+                if (shouldShowWarning) {
+                    console.log('Showing GPU warning dialog for model:', payload.llm);
+                    // Show warning dialog instead of basic confirm
+                    setWarningData({
+                        llmModel: payload.llm,
+                        embeddingModel: payload.embedding,
+                        compatibility: compatibilityResponse,
+                        payload: payload,
+                        isLargeModel: isLargeModel
+                    });
+                    setShowWarningDialog(true);
+                    setDownloading(false);
+                    setDownloadProgress('');
+                    return; // Don't proceed until user confirms
+                } else {
+                    console.log('Models are compatible, proceeding with download');
                 }
             } catch (compatError) {
                 console.warn('GPU compatibility check failed, proceeding:', compatError);
@@ -199,6 +222,53 @@ const ModelSettingsPage = () => {
         }
     };
 
+    const proceedWithDownload = async (payload) => {
+        try {
+            setDownloading(true);
+            setDownloadProgress('Downloading models if needed...');
+            setShowWarningDialog(false);
+            
+            const response = await api.post('/api/models/simple-settings', payload);
+            
+            if (response && response.success) {
+                setCurrentLLMModel(payload.llm);
+                setCurrentEmbeddingModel(payload.embedding);
+                
+                let message = 'Model settings saved successfully!';
+                
+                if (response.llm_changed) {
+                    message += '\n\nLLM model has been changed.';
+                }
+                
+                if (response.embedding_changed) {
+                    message += '\n\nNote: Embedding model changed - consider re-ingesting documents.';
+                }
+                
+                alert(message);
+            }
+        } catch (error) {
+            console.error('Error saving settings:', error);
+            
+            if (error.response?.data?.detail) {
+                const errorDetail = error.response.data.detail;
+                let errorMessage = '';
+                
+                if (typeof errorDetail === 'string') {
+                    errorMessage = errorDetail;
+                } else {
+                    errorMessage = JSON.stringify(errorDetail);
+                }
+                
+                alert(`Error saving settings: ${errorMessage}`);
+            } else {
+                alert('Error saving settings. Please try again.');
+            }
+        } finally {
+            setDownloading(false);
+            setDownloadProgress('');
+        }
+    };
+
     const handleInputChange = (field, value) => {
         setSettings(prev => ({
             ...prev,
@@ -219,12 +289,18 @@ const ModelSettingsPage = () => {
     };
 
     const handleEmbeddingModelChange = async (modelName) => {
-        if (!window.confirm(`Switch to embedding model "${modelName}"? This will require re-ingesting all documents and may take some time.`)) {
-            return;
-        }
+        // Show warning dialog instead of window.confirm
+        setEmbeddingWarningData({
+            modelName: modelName,
+            currentEmbedding: currentEmbeddingModel
+        });
+        setShowEmbeddingWarning(true);
+    };
 
+    const proceedWithEmbeddingChange = async (modelName) => {
         try {
             setIsChangingEmbedding(true);
+            setShowEmbeddingWarning(false);
             
             // Get current LLM model first
             const currentResponse = await api.get('/api/models/current');
@@ -678,6 +754,147 @@ const ModelSettingsPage = () => {
                     )}
                 </div>
             </div>
+            
+            {/* GPU Compatibility Warning Dialog */}
+            {showWarningDialog && warningData && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white rounded-lg p-6 m-4 max-w-2xl w-full max-h-[80vh] overflow-y-auto">
+                        <div className="flex items-center mb-4">
+                            <div className="flex-shrink-0">
+                                <svg className="w-8 h-8 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                </svg>
+                            </div>
+                            <div className="ml-3">
+                                <h3 className="text-lg font-medium text-gray-900">⚠️ GPU Memory Warning</h3>
+                            </div>
+                        </div>
+                        
+                        <div className="mb-6">
+                            <p className="text-sm text-gray-600 mb-4">
+                                {warningData.isLargeModel 
+                                    ? "You've selected a large language model that may require significant GPU memory."
+                                    : "The selected models may not fit in your GPU memory and could cause system issues."
+                                }
+                            </p>
+                            
+                            <div className="bg-gray-50 p-4 rounded-md space-y-3">
+                                <div>
+                                    <h4 className="font-medium text-gray-900">Selected Models:</h4>
+                                    <p className="text-sm text-gray-600">LLM: <span className="font-mono">{warningData.llmModel}</span></p>
+                                    <p className="text-sm text-gray-600">Embedding: <span className="font-mono">{warningData.embeddingModel}</span></p>
+                                </div>
+                                
+                                {warningData.compatibility && (
+                                    <div>
+                                        <h4 className="font-medium text-gray-900">Memory Analysis:</h4>
+                                        <p className="text-sm text-gray-600">{warningData.compatibility.llm_check?.message}</p>
+                                        <p className="text-sm text-gray-600">{warningData.compatibility.embedding_check?.message}</p>
+                                        <p className="text-sm font-medium text-gray-800">{warningData.compatibility.combined_check?.message}</p>
+                                        {warningData.compatibility.recommendation && (
+                                            <p className="text-sm text-yellow-700 mt-2">💡 {warningData.compatibility.recommendation}</p>
+                                        )}
+                                    </div>
+                                )}
+                                
+                                {warningData.isLargeModel && (
+                                    <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
+                                        <p className="text-sm text-red-800">
+                                            <strong>Large Model Warning:</strong> This model requires significant computational resources. 
+                                            Ensure you have adequate GPU memory (typically 24GB+ for 70B models).
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                            
+                            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                                <p className="text-sm text-yellow-800">
+                                    <strong>Recommendation:</strong> Consider selecting smaller models (7B-13B) for better performance 
+                                    on consumer hardware, or ensure you have sufficient GPU memory before proceeding.
+                                </p>
+                            </div>
+                        </div>
+                        
+                        <div className="flex justify-end space-x-3">
+                            <button
+                                onClick={() => {
+                                    setShowWarningDialog(false);
+                                    setWarningData(null);
+                                    setDownloading(false);
+                                    setDownloadProgress('');
+                                }}
+                                className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                            >
+                                Choose Different Models
+                            </button>
+                            <button
+                                onClick={() => proceedWithDownload(warningData.payload)}
+                                className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+                            >
+                                Proceed Anyway
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Embedding Model Change Warning Dialog */}
+            {showEmbeddingWarning && embeddingWarningData && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white rounded-lg p-6 m-4 max-w-md w-full">
+                        <div className="flex items-center mb-4">
+                            <div className="flex-shrink-0">
+                                <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            </div>
+                            <div className="ml-3">
+                                <h3 className="text-lg font-medium text-gray-900">Switch Embedding Model</h3>
+                            </div>
+                        </div>
+                        
+                        <div className="mb-6">
+                            <p className="text-sm text-gray-600 mb-4">
+                                You are about to switch the embedding model. This will require re-ingesting all documents and may take some time.
+                            </p>
+                            
+                            <div className="bg-blue-50 p-4 rounded-md space-y-2">
+                                <p className="text-sm text-gray-700">
+                                    <strong>Current model:</strong> {embeddingWarningData.currentEmbedding || 'None'}
+                                </p>
+                                <p className="text-sm text-gray-700">
+                                    <strong>New model:</strong> {embeddingWarningData.modelName}
+                                </p>
+                            </div>
+                            
+                            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
+                                <p className="text-sm text-yellow-800">
+                                    <strong>Note:</strong> All existing documents will need to be re-processed with the new embedding model. 
+                                    This process may take several minutes depending on the number of documents.
+                                </p>
+                            </div>
+                        </div>
+                        
+                        <div className="flex justify-end space-x-3">
+                            <button
+                                onClick={() => {
+                                    setShowEmbeddingWarning(false);
+                                    setEmbeddingWarningData(null);
+                                }}
+                                className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => proceedWithEmbeddingChange(embeddingWarningData.modelName)}
+                                className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                            >
+                                Switch Model
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

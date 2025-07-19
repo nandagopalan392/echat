@@ -7,7 +7,6 @@ const KnowledgeHubPage = () => {
     const [files, setFiles] = useState([]);
     const [uploadProgress, setUploadProgress] = useState({});
     const [loading, setLoading] = useState(true);
-    const [vectorStoreStats, setVectorStoreStats] = useState({});
     const [isReingesting, setIsReingesting] = useState(false);
     const [activeTab, setActiveTab] = useState('documents');
     const [chunkingMethods, setChunkingMethods] = useState([]);
@@ -24,7 +23,6 @@ const KnowledgeHubPage = () => {
 
     useEffect(() => {
         loadFiles();
-        loadVectorStoreStats();
         loadChunkingMethods();
     }, []);
 
@@ -37,15 +35,6 @@ const KnowledgeHubPage = () => {
             console.error('Error loading files:', error);
         } finally {
             setLoading(false);
-        }
-    };
-
-    const loadVectorStoreStats = async () => {
-        try {
-            const response = await api.getVectorStoreStats();
-            setVectorStoreStats(response.stats || {});
-        } catch (error) {
-            console.error('Error loading vector store stats:', error);
         }
     };
 
@@ -197,10 +186,7 @@ const KnowledgeHubPage = () => {
         }
         
         // Reload all data after all uploads complete
-        await Promise.all([
-            loadFiles(),
-            loadVectorStoreStats()
-        ]);
+        await loadFiles();
     };
 
     const continueFileUpload = async (file, fileId, fileName, useSelectedMethod) => {
@@ -264,10 +250,7 @@ const KnowledgeHubPage = () => {
         if (window.confirm(`Are you sure you want to delete "${filename}"?`)) {
             try {
                 await api.deleteFile(filename);
-                await Promise.all([
-                    loadFiles(),
-                    loadVectorStoreStats()
-                ]);
+                await loadFiles();
                 alert('File deleted successfully!');
             } catch (error) {
                 console.error('Error deleting file:', error);
@@ -287,10 +270,7 @@ const KnowledgeHubPage = () => {
             
             // Wait a bit for processing to complete, then refresh data
             setTimeout(async () => {
-                await Promise.all([
-                    loadFiles(),
-                    loadVectorStoreStats()
-                ]);
+                await loadFiles();
             }, 2000);
             
             alert('Documents re-ingested successfully! Data will refresh shortly.');
@@ -299,24 +279,6 @@ const KnowledgeHubPage = () => {
             alert('Error re-ingesting documents. Please try again.');
         } finally {
             setIsReingesting(false);
-        }
-    };
-
-    const handleClearVectorStore = async () => {
-        if (!window.confirm('Are you sure you want to clear the entire vector store? This action cannot be undone.')) {
-            return;
-        }
-
-        try {
-            await api.clearVectorStore();
-            await Promise.all([
-                loadFiles(),
-                loadVectorStoreStats()
-            ]);
-            alert('Vector store cleared successfully!');
-        } catch (error) {
-            console.error('Error clearing vector store:', error);
-            alert('Error clearing vector store. Please try again.');
         }
     };
 
@@ -373,10 +335,7 @@ const KnowledgeHubPage = () => {
     const refreshData = async () => {
         setLoading(true);
         try {
-            await Promise.all([
-                loadFiles(),
-                loadVectorStoreStats()
-            ]);
+            await loadFiles();
         } finally {
             setLoading(false);
         }
@@ -427,20 +386,6 @@ const KnowledgeHubPage = () => {
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                             </svg>
                             Documents
-                        </button>
-
-                        <button
-                            onClick={() => setActiveTab('vectorstore')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'vectorstore' 
-                                    ? 'bg-purple-50 text-purple-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
-                        >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                            </svg>
-                            Vector Store
                         </button>
 
                         <button
@@ -526,22 +471,6 @@ const KnowledgeHubPage = () => {
                                     </div>
                                 </>
                             )}
-                            {activeTab === 'vectorstore' && (
-                                <>
-                                    <div className="flex justify-between">
-                                        <span>Vectors:</span>
-                                        <span className="font-medium">{vectorStoreStats.total_documents || 0}</span>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span>Collections:</span>
-                                        <span className="font-medium">{vectorStoreStats.total_collections || 0}</span>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span>Size:</span>
-                                        <span className="font-medium">{formatFileSize(vectorStoreStats.size_bytes || 0)}</span>
-                                    </div>
-                                </>
-                            )}
                         </div>
                     </div>
                 </div>
@@ -556,12 +485,10 @@ const KnowledgeHubPage = () => {
                             <div>
                                 <h2 className="text-2xl font-bold text-gray-900">
                                     {activeTab === 'documents' && 'Your Documents'}
-                                    {activeTab === 'vectorstore' && 'Vector Store Management'}
                                     {activeTab === 'chunking' && 'Chunking Settings'}
                                 </h2>
                                 <p className="mt-1 text-sm text-gray-500">
                                     {activeTab === 'documents' && 'Manage your uploaded documents for AI conversations'}
-                                    {activeTab === 'vectorstore' && 'Monitor and manage your vector database'}
                                     {activeTab === 'chunking' && 'Configure how documents are split into chunks for processing'}
                                 </p>
                             </div>
@@ -577,7 +504,6 @@ const KnowledgeHubPage = () => {
                                 </button>
                                 <div className="text-sm text-gray-500">
                                     {activeTab === 'documents' && `${files.length} document${files.length !== 1 ? 's' : ''}`}
-                                    {activeTab === 'vectorstore' && `${vectorStoreStats.total_documents || 0} vectors`}
                                     {activeTab === 'chunking' && `${(chunkingMethods || []).length} method${(chunkingMethods || []).length !== 1 ? 's' : ''} available`}
                                 </div>
                             </div>
@@ -750,98 +676,6 @@ const KnowledgeHubPage = () => {
                                     </table>
                                 </div>
                             )}
-                        </div>
-                    )}
-
-                    {/* Vector Store Tab */}
-                    {activeTab === 'vectorstore' && (
-                        <div className="space-y-6">
-                            {/* Vector Store Stats Cards */}
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                                <div className="bg-white rounded-lg shadow p-6">
-                                    <div className="flex items-center">
-                                        <div className="flex-shrink-0">
-                                            <div className="h-12 w-12 rounded-lg bg-blue-100 flex items-center justify-center">
-                                                <svg className="h-6 w-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                                                </svg>
-                                            </div>
-                                        </div>
-                                        <div className="ml-4">
-                                            <h3 className="text-lg font-medium text-gray-900">Total Vectors</h3>
-                                            <p className="text-3xl font-bold text-blue-600">{vectorStoreStats.total_documents || 0}</p>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="bg-white rounded-lg shadow p-6">
-                                    <div className="flex items-center">
-                                        <div className="flex-shrink-0">
-                                            <div className="h-12 w-12 rounded-lg bg-purple-100 flex items-center justify-center">
-                                                <svg className="h-6 w-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                                                </svg>
-                                            </div>
-                                        </div>
-                                        <div className="ml-4">
-                                            <h3 className="text-lg font-medium text-gray-900">Collections</h3>
-                                            <p className="text-3xl font-bold text-purple-600">{vectorStoreStats.total_collections || 0}</p>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="bg-white rounded-lg shadow p-6">
-                                    <div className="flex items-center">
-                                        <div className="flex-shrink-0">
-                                            <div className="h-12 w-12 rounded-lg bg-green-100 flex items-center justify-center">
-                                                <svg className="h-6 w-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-                                                </svg>
-                                            </div>
-                                        </div>
-                                        <div className="ml-4">
-                                            <h3 className="text-lg font-medium text-gray-900">Storage Size</h3>
-                                            <p className="text-3xl font-bold text-green-600">{formatFileSize(vectorStoreStats.size_bytes || 0)}</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Vector Store Actions */}
-                            <div className="bg-white rounded-lg shadow">
-                                <div className="px-6 py-4 border-b border-gray-200">
-                                    <h3 className="text-lg font-medium text-gray-900">Vector Store Actions</h3>
-                                    <p className="mt-1 text-sm text-gray-500">Manage your vector database and re-process documents</p>
-                                </div>
-                                <div className="p-6 space-y-4">
-                                    <div className="flex items-center justify-between p-4 bg-blue-50 rounded-lg">
-                                        <div>
-                                            <h4 className="text-sm font-medium text-gray-900">Re-ingest All Documents</h4>
-                                            <p className="text-sm text-gray-500">Recreate vectors for all uploaded documents</p>
-                                        </div>
-                                        <button
-                                            onClick={handleReingestion}
-                                            disabled={isReingesting}
-                                            className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
-                                        >
-                                            {isReingesting ? 'Re-ingesting...' : 'Re-ingest'}
-                                        </button>
-                                    </div>
-
-                                    <div className="flex items-center justify-between p-4 bg-red-50 rounded-lg">
-                                        <div>
-                                            <h4 className="text-sm font-medium text-gray-900">Clear Vector Store</h4>
-                                            <p className="text-sm text-gray-500">Remove all vectors from the database</p>
-                                        </div>
-                                        <button
-                                            onClick={handleClearVectorStore}
-                                            className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors"
-                                        >
-                                            Clear Store
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                     )}
 

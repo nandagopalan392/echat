@@ -1915,6 +1915,33 @@ class ChatPDF:
             return False
 
 
+def check_model_compatibility(model_name, model_size=None):
+    """
+    Check if a model is compatible with the current system.
+    Returns: (is_compatible, message, details)
+    """
+    try:
+        # Import the detailed compatibility check from main
+        from main import check_model_compatibility_detailed
+        return check_model_compatibility_detailed(model_name, model_size)
+    except ImportError:
+        # Fallback implementation if main functions are not available
+        logger.warning("Could not import detailed GPU compatibility check, using fallback")
+        
+        if not model_name:
+            return False, "No model specified", {}
+        
+        # Basic compatibility check - if model name is valid, consider it compatible
+        return True, f"Model {model_name} is compatible (fallback check)", {
+            "model": model_name,
+            "size": model_size or "Unknown",
+            "status": "compatible_fallback"
+        }
+    except Exception as e:
+        logger.error(f"Error checking model compatibility for {model_name}: {e}")
+        return False, f"Error checking compatibility: {str(e)}", {}
+
+
 # Global singleton instance
 _chatpdf_instance = None
 

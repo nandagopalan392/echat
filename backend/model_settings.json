@@ -1,4 +1,4 @@
 {
-  "llm": "smollm:135m",
+  "llm": "gemma3n:e2b",
   "embedding": "granite-embedding"
 }

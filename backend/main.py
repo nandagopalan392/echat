@@ -29,6 +29,170 @@ import requests
 import subprocess
 import re
 
+def get_gpu_memory_info() -> Dict[str, int]:
+    """Get GPU memory information in MB"""
+    try:
+        # Try nvidia-smi first
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            if lines:
+                # Take the first GPU
+                memory_info = lines[0].split(', ')
+                if len(memory_info) >= 3:
+                    total_mb = int(memory_info[0])
+                    used_mb = int(memory_info[1])
+                    free_mb = int(memory_info[2])
+                    return {
+                        'total': total_mb,
+                        'used': used_mb,
+                        'free': free_mb,
+                        'available': free_mb
+                    }
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        pass
+    
+    try:
+        # Fallback: Try to get info from /proc/driver/nvidia/gpus/
+        gpu_dirs = [d for d in os.listdir('/proc/driver/nvidia/gpus/') if os.path.isdir(f'/proc/driver/nvidia/gpus/{d}')]
+        if gpu_dirs:
+            # Read memory info from the first GPU
+            gpu_dir = gpu_dirs[0]
+            with open(f'/proc/driver/nvidia/gpus/{gpu_dir}/information', 'r') as f:
+                content = f.read()
+                # Extract memory info
+                memory_match = re.search(r'Video Memory:\s+(\d+)\s+MB', content)
+                if memory_match:
+                    total_mb = int(memory_match.group(1))
+                    # Estimate available as 80% of total (conservative)
+                    available_mb = int(total_mb * 0.8)
+                    return {
+                        'total': total_mb,
+                        'used': total_mb - available_mb,
+                        'free': available_mb,
+                        'available': available_mb
+                    }
+    except (FileNotFoundError, PermissionError, ValueError):
+        pass
+    
+    # If no GPU info available, return default values
+    logger.warning("Could not determine GPU memory, using default estimates")
+    return {
+        'total': 8192,  # 8GB default
+        'used': 2048,   # 2GB used
+        'free': 6144,   # 6GB free
+        'available': 6144
+    }
+
+def estimate_model_memory_requirement(model_name: str, model_size: str = None) -> int:
+    """Estimate memory requirement for a model in MB"""
+    name_lower = model_name.lower()
+    
+    # If size is provided, try to parse it
+    if model_size and isinstance(model_size, str):
+        size_lower = model_size.lower()
+        # Extract numeric value from size string
+        size_match = re.search(r'(\d+\.?\d*)', size_lower)
+        if size_match:
+            size_value = float(size_match.group(1))
+            
+            # Convert based on unit
+            if 'gb' in size_lower:
+                return int(size_value * 1024)  # Convert GB to MB
+            elif 'mb' in size_lower:
+                return int(size_value)
+            elif 'b' in size_lower and 'gb' not in size_lower and 'mb' not in size_lower:
+                # Assume it's parameters (e.g., "7b", "13b")
+                # Rule of thumb: 1B parameters ≈ 2GB in FP16, ≈ 1GB in Q4
+                return int(size_value * 1500)  # Conservative estimate for Q4 quantization
+    
+    # Fallback: estimate based on model name patterns
+    if any(size in name_lower for size in ['0.5b', '500m']):
+        return 1024   # ~1GB
+    elif any(size in name_lower for size in ['1b', '1.5b']):
+        return 2048   # ~2GB
+    elif any(size in name_lower for size in ['3b', '2.8b']):
+        return 4096   # ~4GB
+    elif any(size in name_lower for size in ['7b', '6.7b', '8b']):
+        return 8192   # ~8GB
+    elif any(size in name_lower for size in ['13b', '14b', '15b']):
+        return 16384  # ~16GB
+    elif any(size in name_lower for size in ['30b', '32b', '34b']):
+        return 32768  # ~32GB
+    elif any(size in name_lower for size in ['70b', '72b']):
+        return 65536  # ~64GB
+    elif any(size in name_lower for size in ['175b', '180b']):
+        return 131072 # ~128GB
+    
+    # Embedding models are typically smaller
+    if any(keyword in name_lower for keyword in ['embed', 'bge', 'minilm', 'e5', 'sentence']):
+        if 'large' in name_lower:
+            return 1024   # ~1GB for large embedding models
+        else:
+            return 512    # ~512MB for smaller embedding models
+    
+    # Default estimate for unknown models
+    return 4096  # ~4GB default
+
+def check_model_compatibility_detailed(model_name: str, model_size: str = None) -> tuple:
+    """Check if a model is compatible with current GPU memory"""
+    gpu_info = get_gpu_memory_info()
+    required_memory = estimate_model_memory_requirement(model_name, model_size)
+    
+    # Leave some buffer for system and other processes (20% of total or min 1GB)
+    buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
+    usable_memory = gpu_info['available'] - buffer_memory
+    
+    is_compatible = required_memory <= usable_memory
+    
+    if is_compatible:
+        message = f"✅ Model {model_name} is compatible (requires ~{required_memory}MB, {usable_memory}MB available)"
+    else:
+        shortage = required_memory - usable_memory
+        message = f"❌ Model {model_name} requires ~{required_memory}MB but only {usable_memory}MB available (shortage: {shortage}MB)"
+    
+    details = {
+        'required_memory_mb': required_memory,
+        'available_memory_mb': usable_memory,
+        'gpu_total_mb': gpu_info['total'],
+        'gpu_used_mb': gpu_info['used'],
+        'gpu_free_mb': gpu_info['free'],
+        'buffer_memory_mb': buffer_memory,
+        'compatible': is_compatible,
+        'shortage_mb': max(0, required_memory - usable_memory)
+    }
+    
+    return is_compatible, message, details
+
+def format_model_size(size):
+    """Format model size from bytes to human readable format"""
+    if isinstance(size, str):
+        # If it's already a string, try to parse it or return as-is
+        if size.lower() in ['unknown', 'n/a', '', 'none']:
+            return 'Unknown'
+        # If it's already formatted (contains B, KB, MB, GB), return as-is
+        if any(unit in size.upper() for unit in ['B', 'KB', 'MB', 'GB', 'TB']):
+            return size
+        # Try to convert string to int
+        try:
+            size = int(size)
+        except (ValueError, TypeError):
+            return 'Unknown'
+    
+    if not isinstance(size, (int, float)) or size <= 0:
+        return 'Unknown'
+    
+    # Convert bytes to human readable format
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024.0:
+            if unit == 'B':
+                return f"{int(size)} {unit}"
+            else:
+                return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} PB"
+
 app = FastAPI(
     title="Chat API",
     description="API for chat application with PDF processing capabilities",
@@ -1495,6 +1659,104 @@ async def get_current_models(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error getting current models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get current models: {str(e)}")
+
+@app.post("/api/models/check-gpu")
+async def check_gpu_compatibility(request: dict = None):
+    """Check GPU compatibility for models"""
+    try:
+        if not request:
+            return {
+                "success": False,
+                "compatible": False,
+                "message": "No models specified for compatibility check"
+            }
+        
+        llm_model = request.get('llm')
+        embedding_model = request.get('embedding')
+        
+        if not llm_model or not embedding_model:
+            return {
+                "success": False,
+                "compatible": False,
+                "message": "Both LLM and embedding models must be specified"
+            }
+        
+        logger.info(f"Checking GPU compatibility for LLM: {llm_model}, Embedding: {embedding_model}")
+        
+        # Get model information for size estimation
+        available_models = await get_available_models()
+        
+        llm_info = None
+        embedding_info = None
+        
+        # Find model information
+        for model in available_models.get('models', []):
+            if model['name'] == llm_model:
+                llm_info = model
+            elif model['name'] == embedding_model:
+                embedding_info = model
+        
+        # Check individual model compatibility using the new detailed function
+        llm_compatible, llm_message, llm_details = check_model_compatibility_detailed(
+            llm_model, 
+            llm_info.get('size') if llm_info else None
+        )
+        
+        embedding_compatible, embedding_message, embedding_details = check_model_compatibility_detailed(
+            embedding_model, 
+            embedding_info.get('size') if embedding_info else None
+        )
+        
+        logger.info(f"LLM compatibility check: {llm_compatible} - {llm_message}")
+        logger.info(f"Embedding compatibility check: {embedding_compatible} - {embedding_message}")
+        
+        # Combined compatibility check
+        total_required_mb = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
+        gpu_info = get_gpu_memory_info()
+        buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
+        usable_memory = gpu_info['available'] - buffer_memory
+        
+        combined_compatible = total_required_mb <= usable_memory
+        
+        return {
+            "success": True,
+            "compatible": llm_compatible and embedding_compatible and combined_compatible,
+            "llm_check": {
+                "model": llm_model,
+                "compatible": llm_compatible,
+                "estimated_memory_mb": llm_details['required_memory_mb'],
+                "message": llm_message,
+                "details": llm_details
+            },
+            "embedding_check": {
+                "model": embedding_model,
+                "compatible": embedding_compatible,
+                "estimated_memory_mb": embedding_details['required_memory_mb'],
+                "message": embedding_message,
+                "details": embedding_details
+            },
+            "combined_check": {
+                "required_mb": total_required_mb,
+                "available_mb": usable_memory,
+                "compatible": combined_compatible,
+                "message": f"Combined models require {total_required_mb}MB, {usable_memory}MB available after buffer"
+            },
+            "gpu_info": gpu_info,
+            "recommendation": (
+                "Models should fit in available GPU memory" 
+                if combined_compatible 
+                else "Consider using smaller models or upgrading GPU memory"
+            )
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking GPU compatibility: {str(e)}")
+        return {
+            "success": False,
+            "compatible": True,  # Default to compatible to not block users
+            "message": f"GPU check failed: {str(e)}. Proceeding with model download.",
+            "error": str(e)
+        }
 
 @app.post("/api/models/settings")
 async def update_models_settings(
