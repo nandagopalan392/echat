@@ -1223,6 +1223,121 @@ async def reingest_documents(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/documents/{document_id}/retry")
+async def retry_document_processing(
+    document_id: int,
+    method: str = Form(default="auto"),
+    chunk_token_num: int = Form(default=1000),
+    chunk_overlap: int = Form(default=200),
+    delimiter: str = Form(default="\\n\\n|\\n|\\.|\\!|\\?"),
+    max_token: int = Form(default=4096),
+    layout_recognize: str = Form(default="auto"),
+    preserve_formatting: bool = Form(default=True),
+    extract_tables: bool = Form(default=True),
+    extract_images: bool = Form(default=False),
+    current_user: dict = Depends(get_current_user)
+):
+    """Retry processing a failed document"""
+    try:
+        from document_storage import get_document_storage
+        from chunking_config import ChunkingMethod, ChunkingConfig
+        
+        # Get document info
+        doc_storage = get_document_storage()
+        doc_info = doc_storage.get_document(document_id)
+        
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Check if user owns this document or is admin
+        if doc_info.get('user_id') != current_user['sub'] and not current_user.get('is_admin', False):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Update document status to pending
+        doc_storage.update_document_status(document_id, 'pending', None)
+        
+        # Get the stored file from MinIO
+        temp_file_path = doc_storage.get_document_file(document_id)
+        if not temp_file_path:
+            raise HTTPException(status_code=404, detail="Document file not found")
+        
+        try:
+            filename = doc_info['filename']
+            
+            # Determine chunking method
+            if method == "auto":
+                from chunking_config import FileFormatSupport
+                file_ext = filename.split('.')[-1].lower()
+                selected_method = FileFormatSupport.get_optimal_method(file_ext)
+            else:
+                try:
+                    selected_method = ChunkingMethod(method)
+                except ValueError:
+                    logger.warning(f"Invalid chunking method '{method}', using naive")
+                    selected_method = ChunkingMethod.NAIVE
+            
+            # Create chunking configuration
+            chunking_config = ChunkingConfig(
+                method=selected_method,
+                chunk_token_num=chunk_token_num,
+                chunk_overlap=chunk_overlap,
+                delimiter=delimiter,
+                max_token=max_token,
+                layout_recognize=layout_recognize,
+                preserve_formatting=preserve_formatting,
+                extract_tables=extract_tables,
+                extract_images=extract_images
+            )
+            
+            logger.info(f"Retrying processing for {filename} with method {selected_method.value}")
+            
+            # First, remove any existing chunks for this document
+            try:
+                get_rag().remove_document_from_vectorstore(filename)
+            except Exception as e:
+                logger.warning(f"Could not remove existing chunks: {e}")
+            
+            # Process the document (this will only re-ingest to vector store, not create new document entry)
+            success = get_rag().ingest_with_storage_and_chunking(
+                temp_file_path, 
+                filename,
+                selected_method,
+                chunking_config,
+                current_user['sub']  # user_id
+            )
+            
+            if success:
+                # Update status to completed
+                doc_storage.update_document_status(document_id, 'completed', None)
+                return {
+                    "message": f"Document {filename} processed successfully",
+                    "document_id": document_id,
+                    "method": selected_method.value
+                }
+            else:
+                # Update status to failed
+                doc_storage.update_document_status(document_id, 'failed', "Processing failed during retry")
+                raise HTTPException(status_code=500, detail="Document processing failed")
+                
+        finally:
+            # Clean up temporary file
+            try:
+                import os
+                os.unlink(temp_file_path)
+            except Exception as e:
+                logger.warning(f"Could not delete temp file: {e}")
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrying document processing: {e}")
+        # Update status to failed if we have document_id
+        try:
+            doc_storage.update_document_status(document_id, 'failed', str(e))
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/documents/{document_id}")
 async def delete_document(
     document_id: int,
@@ -2123,7 +2238,10 @@ async def get_chunking_methods(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/chunking/config/{method}")
-async def get_chunking_config(method: str, token: str = Depends(oauth2_scheme)):
+async def get_chunking_config(
+    method: str, 
+    current_user: dict = Depends(get_current_user)
+):
     """Get chunking configuration for a specific method"""
     try:
         from chunking_config import ChunkingMethod, get_chunking_config_manager
@@ -2134,7 +2252,10 @@ async def get_chunking_config(method: str, token: str = Depends(oauth2_scheme)):
             raise HTTPException(status_code=400, detail=f"Invalid chunking method: {method}")
         
         config_manager = get_chunking_config_manager()
-        config = config_manager.get_config(chunking_method)
+        
+        # Get user-specific config if user is available
+        user_id = current_user.get('sub', 'default') if current_user else None
+        config = config_manager.get_config(chunking_method, user_id)
         
         return {"config": config.to_dict()}
     except HTTPException:
@@ -2365,6 +2486,286 @@ async def get_document_preview(document_id: int, background_tasks: BackgroundTas
                 content = ""
                 for paragraph in doc.paragraphs[:50]:  # Limit to first 50 paragraphs
                     content += paragraph.text + "\n"
+            
+            elif content_type in ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'] or doc_info['filename'].endswith(('.pptx', '.ppt')):
+                # Handle PowerPoint files - Convert to HTML
+                logger.info(f"DEBUG: Processing PPTX file: {doc_info['filename']}")
+                logger.info(f"DEBUG: Content type: {content_type}")
+                logger.info(f"DEBUG: File path: {temp_file_path}")
+                try:
+                    from pptx_html_converter import convert_pptx_to_html_slides
+                    logger.info("DEBUG: Successfully imported pptx_html_converter")
+                    
+                    # Convert PPTX to HTML slides
+                    logger.info("DEBUG: Starting PPTX to HTML conversion...")
+                    result = convert_pptx_to_html_slides(temp_file_path)
+                    logger.info(f"DEBUG: HTML conversion result: {result.get('has_html', False)}, slides count: {len(result.get('slides', []))}")
+                    
+                    # Also extract text content for backward compatibility
+                    from pptx import Presentation
+                    logger.info("DEBUG: Starting text extraction from PPTX...")
+                    prs = Presentation(temp_file_path)
+                    slides_content = []
+                    logger.info(f"DEBUG: Found {len(prs.slides)} slides in presentation")
+                    
+                    for slide_num, slide in enumerate(prs.slides, 1):
+                        slide_text = []
+                        
+                        # Extract text from shapes
+                        for shape in slide.shapes:
+                            if hasattr(shape, 'text') and shape.text.strip():
+                                slide_text.append(shape.text.strip())
+                            
+                            # Handle tables safely
+                            if hasattr(shape, 'table') and shape.has_table:
+                                try:
+                                    table_text = []
+                                    for row in shape.table.rows:
+                                        row_text = []
+                                        for cell in row.cells:
+                                            if cell.text.strip():
+                                                row_text.append(cell.text.strip())
+                                        if row_text:
+                                            table_text.append(' | '.join(row_text))
+                                    if table_text:
+                                        slide_text.append('\n'.join(table_text))
+                                except Exception as e:
+                                    logger.warning(f"Could not process table in slide {slide_num}: {e}")
+                        
+                        slide_content = '\n\n'.join(slide_text) if slide_text else f"[Slide {slide_num} - No text content]"
+                        slides_content.append({
+                            "slide_number": slide_num,
+                            "content": slide_content,
+                            "text_length": len(slide_content)
+                        })
+                    
+                    logger.info(f"DEBUG: Extracted text from {len(slides_content)} slides")
+                    
+                    # Merge HTML data with text content for backward compatibility
+                    merged_slides = []
+                    
+                    # If we have HTML slides, use them as primary data
+                    if result.get('has_html', False) and result.get('slides'):
+                        logger.info("DEBUG: Using HTML slides as primary data")
+                        for i, html_slide in enumerate(result['slides']):
+                            slide_data = html_slide.copy()
+                            
+                            # Add text content for search/indexing if available
+                            if i < len(slides_content):
+                                slide_data['content'] = slides_content[i]['content']
+                                slide_data['text_length'] = slides_content[i]['text_length']
+                            
+                            merged_slides.append(slide_data)
+                        logger.info(f"DEBUG: Created {len(merged_slides)} merged HTML slides")
+                    else:
+                        # Fallback to text-only slides
+                        logger.info("DEBUG: Falling back to text-only slides")
+                        merged_slides = slides_content
+                    
+                    content = '\n\n=== SLIDE SEPARATOR ===\n\n'.join([slide['content'] for slide in slides_content])
+                    
+                    final_response = {
+                        "type": "presentation",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content,
+                        "slides": merged_slides,
+                        "total_slides": len(prs.slides),
+                        "has_html": result.get('has_html', False),
+                        "has_images": False,  # Using HTML instead of images
+                        "conversion_method": result.get('conversion_method', 'unknown'),
+                        "truncated": len(content) >= 50000
+                    }
+                    
+                    logger.info(f"DEBUG: Final response structure:")
+                    logger.info(f"DEBUG: - Type: {final_response['type']}")
+                    logger.info(f"DEBUG: - Has HTML: {final_response['has_html']}")
+                    logger.info(f"DEBUG: - Total slides: {final_response['total_slides']}")
+                    logger.info(f"DEBUG: - Merged slides count: {len(final_response['slides'])}")
+                    logger.info(f"DEBUG: - Conversion method: {final_response['conversion_method']}")
+                    
+                    if final_response['slides'] and len(final_response['slides']) > 0:
+                        first_slide = final_response['slides'][0]
+                        logger.info(f"DEBUG: First slide structure: {list(first_slide.keys())}")
+                        if 'html_content' in first_slide:
+                            logger.info(f"DEBUG: First slide has HTML content (length: {len(first_slide['html_content'])})")
+                        if 'format' in first_slide:
+                            logger.info(f"DEBUG: First slide format: {first_slide['format']}")
+                    
+                    return final_response
+                    
+                except ImportError as ie:
+                    logger.error(f"Missing dependencies for PPTX processing: {ie}")
+                    # Fallback to text-only processing
+                    try:
+                        from pptx import Presentation
+                        prs = Presentation(temp_file_path)
+                        slides_content = []
+                        
+                        for slide_num, slide in enumerate(prs.slides, 1):
+                            slide_text = []
+                            for shape in slide.shapes:
+                                if hasattr(shape, 'text') and shape.text.strip():
+                                    slide_text.append(shape.text.strip())
+                            
+                            slide_content = '\n\n'.join(slide_text) if slide_text else f"[Slide {slide_num} - No text content]"
+                            slides_content.append({
+                                "slide_number": slide_num,
+                                "content": slide_content
+                            })
+                        
+                        content = '\n\n=== SLIDE SEPARATOR ===\n\n'.join([slide['content'] for slide in slides_content])
+                        
+                        return {
+                            "type": "presentation",
+                            "content_type": doc_info['content_type'],
+                            "filename": doc_info['filename'],
+                            "content": content,
+                            "slides": slides_content,
+                            "total_slides": len(prs.slides),
+                            "has_images": False,
+                            "error": "Image conversion not available - text only"
+                        }
+                    except Exception as e:
+                        content = f"Error processing PowerPoint file: {str(e)}"
+                except Exception as e:
+                    logger.error(f"Error converting PPTX to images: {e}")
+                    content = f"Error processing PowerPoint file: {str(e)}"
+            
+            elif content_type in ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel'] or doc_info['filename'].endswith(('.xlsx', '.xls')):
+                # Handle Excel files
+                try:
+                    import pandas as pd
+                    
+                    # Read first few sheets
+                    sheets_content = []
+                    excel_file = pd.ExcelFile(temp_file_path)
+                    
+                    for sheet_name in excel_file.sheet_names[:5]:  # Limit to first 5 sheets
+                        try:
+                            df = pd.read_excel(temp_file_path, sheet_name=sheet_name, nrows=100)  # Limit rows
+                            sheet_content = f"=== Sheet: {sheet_name} ===\n"
+                            sheet_content += df.to_string(max_rows=50, max_cols=10, index=False)
+                            sheets_content.append({
+                                "sheet_name": sheet_name,
+                                "content": sheet_content,
+                                "rows": len(df),
+                                "columns": len(df.columns)
+                            })
+                        except Exception as e:
+                            sheets_content.append({
+                                "sheet_name": sheet_name,
+                                "content": f"Error reading sheet: {str(e)}",
+                                "rows": 0,
+                                "columns": 0
+                            })
+                    
+                    content = '\n\n'.join([sheet['content'] for sheet in sheets_content])
+                    
+                    return {
+                        "type": "spreadsheet",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content,
+                        "sheets": sheets_content,
+                        "total_sheets": len(excel_file.sheet_names),
+                        "truncated": len(content) >= 50000
+                    }
+                    
+                except ImportError:
+                    content = "Excel preview requires pandas library"
+                except Exception as e:
+                    content = f"Error processing Excel file: {str(e)}"
+            
+            elif content_type == 'text/csv' or doc_info['filename'].endswith('.csv'):
+                # Handle CSV files
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(temp_file_path, nrows=100)  # Limit to first 100 rows
+                    content = df.to_string(max_rows=50, max_cols=20, index=False)
+                    
+                    return {
+                        "type": "csv",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content,
+                        "rows": len(df),
+                        "columns": len(df.columns),
+                        "column_names": list(df.columns),
+                        "truncated": len(df) >= 100
+                    }
+                    
+                except ImportError:
+                    content = "CSV preview requires pandas library"
+                except Exception as e:
+                    content = f"Error processing CSV file: {str(e)}"
+            
+            elif content_type == 'text/html' or doc_info['filename'].endswith(('.html', '.htm')):
+                # Handle HTML files
+                try:
+                    from bs4 import BeautifulSoup
+                    with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        html_content = f.read()
+                    
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    # Extract text content
+                    text_content = soup.get_text(separator='\n', strip=True)
+                    
+                    return {
+                        "type": "html",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": text_content[:50000],  # Limit content
+                        "html_content": html_content[:10000],  # Limited HTML for preview
+                        "truncated": len(text_content) >= 50000
+                    }
+                    
+                except ImportError:
+                    # Fallback to plain text
+                    with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()[:10000]
+                except Exception as e:
+                    content = f"Error processing HTML file: {str(e)}"
+            
+            elif content_type == 'message/rfc822' or doc_info['filename'].endswith('.eml'):
+                # Handle email files
+                try:
+                    import email
+                    with open(temp_file_path, 'rb') as f:
+                        msg = email.message_from_binary_file(f)
+                    
+                    email_content = []
+                    email_content.append(f"From: {msg.get('From', 'Unknown')}")
+                    email_content.append(f"To: {msg.get('To', 'Unknown')}")
+                    email_content.append(f"Subject: {msg.get('Subject', 'No Subject')}")
+                    email_content.append(f"Date: {msg.get('Date', 'Unknown')}")
+                    email_content.append("\n" + "="*50 + "\n")
+                    
+                    # Get email body
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                email_content.append(part.get_payload(decode=True).decode('utf-8', errors='ignore'))
+                                break
+                    else:
+                        email_content.append(msg.get_payload(decode=True).decode('utf-8', errors='ignore'))
+                    
+                    content = '\n'.join(email_content)
+                    
+                    return {
+                        "type": "email",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content[:50000],
+                        "from": msg.get('From', 'Unknown'),
+                        "to": msg.get('To', 'Unknown'),
+                        "subject": msg.get('Subject', 'No Subject'),
+                        "date": msg.get('Date', 'Unknown'),
+                        "truncated": len(content) >= 50000
+                    }
+                    
+                except Exception as e:
+                    content = f"Error processing email file: {str(e)}"
             
             elif content_type == 'text/markdown' or doc_info['filename'].endswith('.md'):
                 with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:

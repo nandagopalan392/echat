@@ -615,14 +615,77 @@ class EnhancedDocumentProcessor:
     
     def _process_presentation(self, file_path: str) -> List[Document]:
         """Process PowerPoint files"""
-        if ADVANCED_LOADERS_AVAILABLE:
+        try:
+            # Try using python-pptx first
             try:
-                loader = UnstructuredPowerPointLoader(file_path)
-                return loader.load()
-            except Exception as e:
-                logger.error(f"Failed to process presentation {file_path}: {e}")
+                from pptx import Presentation
+                return self._process_pptx_with_python_pptx(file_path)
+            except ImportError:
+                logger.warning("python-pptx not available, trying unstructured")
+            
+            # Fallback to unstructured if available
+            if ADVANCED_LOADERS_AVAILABLE:
+                try:
+                    loader = UnstructuredPowerPointLoader(file_path)
+                    return loader.load()
+                except Exception as e:
+                    logger.error(f"Failed to process presentation with unstructured {file_path}: {e}")
+            
+        except Exception as e:
+            logger.error(f"Failed to process presentation {file_path}: {e}")
         
         return []
+    
+    def _process_pptx_with_python_pptx(self, file_path: str) -> List[Document]:
+        """Process PPTX files using python-pptx library"""
+        try:
+            from pptx import Presentation
+            
+            prs = Presentation(file_path)
+            documents = []
+            
+            for slide_num, slide in enumerate(prs.slides, 1):
+                slide_text = []
+                
+                # Extract text from shapes
+                for shape in slide.shapes:
+                    if hasattr(shape, 'text') and shape.text.strip():
+                        slide_text.append(shape.text.strip())
+                    
+                    # Handle tables - check if shape actually contains a table
+                    if hasattr(shape, 'table') and shape.has_table:
+                        try:
+                            table_text = []
+                            for row in shape.table.rows:
+                                row_text = []
+                                for cell in row.cells:
+                                    if cell.text.strip():
+                                        row_text.append(cell.text.strip())
+                                if row_text:
+                                    table_text.append(' | '.join(row_text))
+                            if table_text:
+                                slide_text.append('\n'.join(table_text))
+                        except Exception as e:
+                            logger.warning(f"Could not process table in slide {slide_num}: {e}")
+                            # Continue processing other shapes
+                
+                if slide_text:
+                    slide_content = '\n\n'.join(slide_text)
+                    documents.append(Document(
+                        page_content=slide_content,
+                        metadata={
+                            'source': Path(file_path).name,
+                            'slide_number': slide_num,
+                            'type': 'presentation',
+                            'total_slides': len(prs.slides)
+                        }
+                    ))
+            
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Failed to process PPTX with python-pptx {file_path}: {e}")
+            return []
     
     def _process_html(self, file_path: str) -> List[Document]:
         """Process HTML files"""

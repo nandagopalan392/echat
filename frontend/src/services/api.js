@@ -671,7 +671,9 @@ export const api = {
 
     getDocumentPreview: async (documentId) => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/documents/${documentId}/preview`, {
+            // Add cache-busting parameter
+            const cacheBuster = new Date().getTime();
+            const response = await fetch(`${API_BASE_URL}/api/documents/${documentId}/preview?t=${cacheBuster}`, {
                 method: 'GET',
                 headers: {
                     ...getAuthHeader()
@@ -682,7 +684,17 @@ export const api = {
                 throw new Error('Failed to get document preview');
             }
             
-            return await response.json();
+            const result = await response.json();
+            console.log('DEBUG: API getDocumentPreview result:', result);
+            console.log('DEBUG: API result type:', result.type);
+            console.log('DEBUG: API result has_html:', result.has_html);
+            if (result.slides && result.slides.length > 0) {
+                console.log('DEBUG: API first slide structure:', Object.keys(result.slides[0]));
+                console.log('DEBUG: API first slide data:', result.slides[0]);
+                console.log('DEBUG: API first slide format:', result.slides[0].format);
+                console.log('DEBUG: API first slide html_content length:', result.slides[0].html_content ? result.slides[0].html_content.length : 'none');
+            }
+            return result;
         } catch (error) {
             console.error('Get document preview error:', error);
             throw error;

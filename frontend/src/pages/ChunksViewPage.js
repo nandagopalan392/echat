@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
-import PDFViewer from '../components/PDFViewer';
-import ImageViewer from '../components/ImageViewer';
+import DocumentViewer from '../components/DocumentViewer';
 
 const ChunksViewPage = () => {
     const { docId } = useParams();
@@ -45,14 +44,15 @@ const ChunksViewPage = () => {
             const chunksResponse = await api.getDocumentChunks(foundDoc.filename);
             setChunks(chunksResponse.chunks || []);
 
-            // Load document preview for PDF viewer
-            if (foundDoc.content_type === 'application/pdf' || foundDoc.filename.endsWith('.pdf')) {
-                try {
-                    const previewResponse = await api.getDocumentPreview(foundDoc.id);
-                    setDocumentPreview(previewResponse);
-                } catch (previewError) {
-                    console.error('Error loading document preview:', previewError);
-                }
+            // Load document preview for all supported formats
+            try {
+                console.log('DEBUG: ChunksViewPage loading preview for document:', foundDoc.id);
+                const previewResponse = await api.getDocumentPreview(foundDoc.id);
+                console.log('DEBUG: ChunksViewPage received preview:', previewResponse);
+                setDocumentPreview(previewResponse);
+            } catch (previewError) {
+                console.error('Error loading document preview:', previewError);
+                // Continue without preview - DocumentViewer will handle gracefully
             }
 
         } catch (err) {
@@ -131,12 +131,6 @@ const ChunksViewPage = () => {
         );
     }
 
-    const isPDF = document?.content_type === 'application/pdf' || document?.filename.endsWith('.pdf');
-    const isImage = document?.content_type?.startsWith('image/') || 
-                   document?.is_image ||
-                   documentPreview?.type === 'image' ||
-                   /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(document?.filename || '');
-
     return (
         <div className="min-h-screen bg-gray-50 flex flex-col">
             {/* Header with Breadcrumb and Settings */}
@@ -206,38 +200,15 @@ const ChunksViewPage = () => {
             <div className="flex-1 flex overflow-hidden">
                 {/* Document Viewer (Left) */}
                 <div className="flex-1 bg-white">
-                    {isPDF && documentPreview ? (
-                        <PDFViewer
-                            pdfUrl={documentPreview.pdf_url}
-                            selectedChunkId={selectedChunkId}
-                            chunks={chunks}
-                            onChunkHighlight={handleChunkHighlight}
-                            highlightMode={highlightMode}
-                            className="h-full"
-                        />
-                    ) : isImage ? (
-                        <ImageViewer
-                            imageUrl={`/api/documents/${document.id}/image`}
-                            token={localStorage.getItem('token')}
-                            selectedChunkId={selectedChunkId}
-                            chunks={chunks}
-                            onChunkHighlight={handleChunkHighlight}
-                            highlightMode={highlightMode}
-                            className="h-full"
-                        />
-                    ) : (
-                        <div className="h-full flex items-center justify-center p-8">
-                            <div className="text-center">
-                                <div className="text-gray-400 mb-4">
-                                    <svg className="w-16 h-16 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                    </svg>
-                                </div>
-                                <p className="text-gray-600">Document preview not available</p>
-                                <p className="text-sm text-gray-500 mt-1">View chunks in the sidebar</p>
-                            </div>
-                        </div>
-                    )}
+                    <DocumentViewer
+                        document={document}
+                        documentPreview={documentPreview}
+                        selectedChunkId={selectedChunkId}
+                        chunks={chunks}
+                        onChunkHighlight={handleChunkHighlight}
+                        highlightMode={highlightMode}
+                        className="h-full"
+                    />
                 </div>
 
                 {/* Resizer */}
@@ -255,7 +226,7 @@ const ChunksViewPage = () => {
                     <div className="p-4 border-b bg-gray-50">
                         <div className="flex items-center justify-between mb-2">
                             <h2 className="text-lg font-semibold text-gray-900">Document Chunks</h2>
-                            {selectedChunkId && isImage && (
+                            {selectedChunkId && (
                                 <div className="flex items-center space-x-2">
                                     <span className="text-xs text-gray-700">Highlight:</span>
                                     <select
@@ -263,6 +234,7 @@ const ChunksViewPage = () => {
                                         onChange={(e) => setHighlightMode(e.target.value)}
                                         className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
                                     >
+                                        <option value="line">Line</option>
                                         <option value="area">Area</option>
                                         <option value="full">Full</option>
                                         <option value="outline">Outline</option>
@@ -353,11 +325,9 @@ const ChunksViewPage = () => {
                         <div className="p-3 bg-blue-50 border-t border-blue-200">
                             <div className="text-sm text-blue-700">
                                 <span className="font-medium">Selected:</span> Chunk {chunks.find(c => c.id === selectedChunkId)?.chunk_number}
-                                {isPDF && (
-                                    <span className="ml-2 text-blue-600">
-                                        (highlighted in PDF)
-                                    </span>
-                                )}
+                                <span className="ml-2 text-blue-600">
+                                    (highlighted in viewer)
+                                </span>
                             </div>
                         </div>
                     )}

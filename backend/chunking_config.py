@@ -120,7 +120,7 @@ class FileFormatSupport:
     """File format support by chunking method"""
     
     SUPPORTED_FORMATS = {
-        ChunkingMethod.NAIVE: ['md', 'docx', 'xlsx', 'ppt', 'pdf', 'txt', 'jpeg', 'png', 'csv', 'json', 'eml', 'html'],
+        ChunkingMethod.NAIVE: ['md', 'docx', 'xlsx', 'ppt', 'pptx', 'pdf', 'txt', 'jpeg', 'png', 'csv', 'json', 'eml', 'html'],
         ChunkingMethod.QA: ['md', 'docx', 'txt', 'json', 'pdf'],
         ChunkingMethod.RESUME: ['docx', 'pdf', 'txt'],
         ChunkingMethod.MANUAL: ['pdf'],
@@ -178,6 +178,9 @@ class ChunkingConfigManager:
         self.config_dir = Path(config_dir)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.default_configs = self._load_default_configs()
+        # Import here to avoid circular imports
+        from chat_db import ChatDB
+        self.db = ChatDB()
     
     def _load_default_configs(self) -> Dict[ChunkingMethod, ChunkingConfig]:
         """Load default configurations for each chunking method"""
@@ -263,8 +266,16 @@ class ChunkingConfigManager:
     
     def get_config(self, method: ChunkingMethod, user_id: Optional[str] = None) -> ChunkingConfig:
         """Get configuration for a chunking method"""
-        # Try to load user-specific config first
+        # Try to load user-specific config from database first
         if user_id:
+            try:
+                config_data = self.db.get_chunking_config(user_id, method.value)
+                if config_data:
+                    return ChunkingConfig.from_dict(config_data)
+            except Exception as e:
+                logger.warning(f"Failed to load user config from database for {user_id}, {method.value}: {e}")
+            
+            # Fallback to file-based config for backward compatibility
             user_config_path = self.config_dir / f"{user_id}_{method.value}.json"
             if user_config_path.exists():
                 try:
@@ -279,17 +290,27 @@ class ChunkingConfigManager:
     
     def save_config(self, method: ChunkingMethod, config: ChunkingConfig, user_id: Optional[str] = None):
         """Save configuration for a chunking method"""
-        if user_id:
-            config_path = self.config_dir / f"{user_id}_{method.value}.json"
-        else:
-            config_path = self.config_dir / f"default_{method.value}.json"
-        
         try:
+            if user_id:
+                # Save to database
+                success = self.db.save_chunking_config(user_id, method.value, config.to_dict())
+                if success:
+                    logger.info(f"Saved chunking config to database for user {user_id}, method {method.value}")
+                    return
+                else:
+                    logger.warning(f"Failed to save to database, falling back to file for user {user_id}")
+            
+            # Fallback to file-based storage
+            if user_id:
+                config_path = self.config_dir / f"{user_id}_{method.value}.json"
+            else:
+                config_path = self.config_dir / f"default_{method.value}.json"
+            
             with open(config_path, 'w') as f:
                 json.dump(config.to_dict(), f, indent=2)
-            logger.info(f"Saved chunking config to {config_path}")
+            logger.info(f"Saved chunking config to file {config_path}")
         except Exception as e:
-            logger.error(f"Failed to save config to {config_path}: {e}")
+            logger.error(f"Failed to save config: {e}")
     
     def get_available_methods(self, file_extension: str) -> List[ChunkingMethod]:
         """Get available chunking methods for a file type"""

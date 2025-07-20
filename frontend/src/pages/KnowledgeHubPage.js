@@ -107,12 +107,15 @@ const KnowledgeHubPage = () => {
     const [chunkingMethods, setChunkingMethods] = useState([]);
     const [selectedMethod, setSelectedMethod] = useState('naive');
     const [methodConfigs, setMethodConfigs] = useState({});
+    const [defaultConfigs, setDefaultConfigs] = useState({});
     const [activeConfig, setActiveConfig] = useState(null);
     const [savingConfig, setSavingConfig] = useState(false);
+    const [saveMessage, setSaveMessage] = useState(null);
     const [loadingChunking, setLoadingChunking] = useState(false);
     const [chunkingError, setChunkingError] = useState(null);
     const [methodsData, setMethodsData] = useState({});
     const [warningDialog, setWarningDialog] = useState(null);
+    const [fileValidationToast, setFileValidationToast] = useState(null);
     
     const [openDropdown, setOpenDropdown] = useState(null);
     const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0 });
@@ -136,9 +139,6 @@ const KnowledgeHubPage = () => {
 
     // Add column resizing functionality
     useEffect(() => {
-        // Temporarily disable resize functionality to test dropdown
-        return () => {};
-        
         const addResizeHandles = () => {
             const table = document.querySelector('.resizable-table');
             if (!table) return;
@@ -248,18 +248,23 @@ const KnowledgeHubPage = () => {
             setChunkingMethods(methodsList);
             setMethodsData(methodsData); // Store full methods data for validation
             
-            // Load configurations for all methods
+            // Load configurations for all methods and store defaults
             const configs = {};
+            const defaults = {};
             for (const method of methodsList) {
                 try {
                     const response = await api.getChunkingConfig(method);
                     // Backend returns {config: {...}}
-                    configs[method] = response.config || {};
+                    const config = response.config || {};
+                    configs[method] = config;
+                    // Store a deep copy as default config for reset functionality
+                    defaults[method] = JSON.parse(JSON.stringify(config));
                 } catch (error) {
                     console.error(`Error loading config for ${method}:`, error);
                 }
             }
             setMethodConfigs(configs);
+            setDefaultConfigs(defaults);
             
             // Set active config to default method
             if (methodsList.length > 0) {
@@ -276,6 +281,14 @@ const KnowledgeHubPage = () => {
     };
 
     const handleMethodChange = async (method) => {
+        // Save current config changes to methodConfigs before switching
+        if (selectedMethod && activeConfig) {
+            setMethodConfigs(prev => ({
+                ...prev,
+                [selectedMethod]: activeConfig
+            }));
+        }
+        
         setSelectedMethod(method);
         if (methodConfigs[method]) {
             setActiveConfig(methodConfigs[method]);
@@ -304,19 +317,57 @@ const KnowledgeHubPage = () => {
         if (!selectedMethod || !activeConfig) return;
         
         setSavingConfig(true);
+        setSaveMessage(null);
         try {
-            await api.updateChunkingConfig(selectedMethod, activeConfig);
+            const response = await api.updateChunkingConfig(selectedMethod, activeConfig);
             setMethodConfigs(prev => ({
                 ...prev,
                 [selectedMethod]: activeConfig
             }));
+            
             // Show success message
-            console.log('Chunking configuration saved successfully');
+            setSaveMessage({ type: 'success', text: 'Configuration saved successfully!' });
+            console.log('Chunking configuration saved successfully:', response);
+            
+            // Clear message after 3 seconds
+            setTimeout(() => setSaveMessage(null), 3000);
         } catch (error) {
             console.error('Error saving chunking configuration:', error);
+            setSaveMessage({ 
+                type: 'error', 
+                text: error.message || 'Failed to save configuration. Please try again.' 
+            });
+            
+            // Clear error message after 5 seconds
+            setTimeout(() => setSaveMessage(null), 5000);
         } finally {
             setSavingConfig(false);
         }
+    };
+
+    const resetChunkingConfig = () => {
+        if (!selectedMethod || !defaultConfigs[selectedMethod]) return;
+        
+        // Show confirmation
+        if (!window.confirm('Are you sure you want to reset all settings to default values? Any unsaved changes will be lost.')) {
+            return;
+        }
+        
+        // Reset to default configuration
+        const defaultConfig = JSON.parse(JSON.stringify(defaultConfigs[selectedMethod]));
+        setActiveConfig(defaultConfig);
+        
+        // Update methodConfigs to reflect the reset
+        setMethodConfigs(prev => ({
+            ...prev,
+            [selectedMethod]: defaultConfig
+        }));
+        
+        // Show reset message
+        setSaveMessage({ type: 'success', text: 'Settings reset to default values. Remember to save if you want to keep these changes.' });
+        
+        // Clear message after 4 seconds
+        setTimeout(() => setSaveMessage(null), 4000);
     };
 
     // File extension validation for chunking methods
@@ -342,6 +393,148 @@ const KnowledgeHubPage = () => {
         };
     };
 
+    // File type detection
+    const getFileTypeInfo = (fileName, fileExtension) => {
+        const fileTypeMap = {
+            'pdf': { type: 'PDF', icon: '📄', category: 'document' },
+            'docx': { type: 'Word Document', icon: '📝', category: 'document' },
+            'doc': { type: 'Word Document', icon: '📝', category: 'document' },
+            'pptx': { type: 'PowerPoint', icon: '📊', category: 'presentation' },
+            'ppt': { type: 'PowerPoint', icon: '📊', category: 'presentation' },
+            'xlsx': { type: 'Excel', icon: '📈', category: 'spreadsheet' },
+            'xls': { type: 'Excel', icon: '📈', category: 'spreadsheet' },
+            'csv': { type: 'CSV', icon: '📊', category: 'data' },
+            'txt': { type: 'Plain Text', icon: '📄', category: 'text' },
+            'md': { type: 'Markdown', icon: '📝', category: 'text' },
+            'jpg': { type: 'Image', icon: '🖼️', category: 'image' },
+            'jpeg': { type: 'Image', icon: '🖼️', category: 'image' },
+            'png': { type: 'Image', icon: '🖼️', category: 'image' },
+            'gif': { type: 'Image', icon: '🖼️', category: 'image' },
+            'tif': { type: 'Image', icon: '🖼️', category: 'image' },
+            'tiff': { type: 'Image', icon: '🖼️', category: 'image' },
+            'json': { type: 'JSON', icon: '📋', category: 'data' },
+            'html': { type: 'HTML', icon: '🌐', category: 'web' },
+            'htm': { type: 'HTML', icon: '🌐', category: 'web' },
+            'eml': { type: 'Email', icon: '📧', category: 'email' }
+        };
+
+        return fileTypeMap[fileExtension] || { type: 'Unknown', icon: '📄', category: 'unknown' };
+    };
+
+    // Method recommendation based on file type
+    const getRecommendedMethod = (fileExtension, fileType) => {
+        const recommendations = {
+            'pdf': ['manual', 'naive', 'qa'],
+            'docx': ['naive', 'resume', 'qa'],
+            'doc': ['naive', 'resume', 'qa'],
+            'pptx': ['presentation'],
+            'ppt': ['presentation'],
+            'xlsx': ['table'],
+            'xls': ['table'],
+            'csv': ['table'],
+            'txt': ['naive', 'qa'],
+            'md': ['naive', 'qa'],
+            'jpg': ['picture'],
+            'jpeg': ['picture'],
+            'png': ['picture'],
+            'gif': ['picture'],
+            'tif': ['picture'],
+            'tiff': ['picture'],
+            'json': ['naive'],
+            'html': ['naive'],
+            'htm': ['naive'],
+            'eml': ['email']
+        };
+
+        return recommendations[fileExtension] || ['naive'];
+    };
+
+    // Check if current method is good for file type
+    const validateMethodForFileType = (fileExtension, selectedMethod) => {
+        const goodMethods = getRecommendedMethod(fileExtension);
+        const isGoodMatch = goodMethods.includes(selectedMethod);
+        
+        const warnings = {
+            'pdf': {
+                bad: ['resume', 'picture', 'presentation'],
+                message: 'PDF files work best with Manual, Naive, or Q&A chunking methods'
+            },
+            'docx': {
+                bad: ['picture', 'presentation', 'table'],
+                message: 'Word documents work best with Naive, Resume, or Q&A chunking methods'
+            },
+            'pptx': {
+                bad: ['resume', 'qa', 'naive', 'picture'],
+                message: 'PowerPoint files should use Presentation chunking method'
+            },
+            'jpg': {
+                bad: ['resume', 'naive', 'qa', 'table'],
+                message: 'Image files should use Picture chunking method'
+            },
+            'xlsx': {
+                bad: ['resume', 'picture', 'presentation'],
+                message: 'Spreadsheet files should use Table chunking method'
+            }
+        };
+
+        const fileWarning = warnings[fileExtension];
+        const shouldWarn = fileWarning && fileWarning.bad.includes(selectedMethod);
+
+        return {
+            isGoodMatch,
+            shouldWarn,
+            recommendedMethods: goodMethods,
+            warningMessage: shouldWarn ? fileWarning.message : null
+        };
+    };
+
+    // Auto-suggest better method
+    const suggestBetterMethod = (fileExtension, currentMethod) => {
+        const recommended = getRecommendedMethod(fileExtension);
+        const bestMethod = recommended[0]; // First one is usually the best
+        
+        if (currentMethod !== bestMethod && chunkingMethods.includes(bestMethod)) {
+            return bestMethod;
+        }
+        
+        return null;
+    };
+
+    // Show validation toast
+    const showValidationToast = (message, type = 'warning', duration = 5000) => {
+        setFileValidationToast({ message, type });
+        setTimeout(() => setFileValidationToast(null), duration);
+    };
+
+    // Helper function to get document status
+    const getDocumentStatus = (file) => {
+        if (!file.model_status) {
+            return { status: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' };
+        }
+        
+        // Check if any model has failed status
+        const statuses = Object.values(file.model_status);
+        const hasFailed = statuses.includes('failed');
+        const hasCompleted = statuses.includes('completed');
+        const hasPending = statuses.includes('pending');
+        
+        if (hasFailed && !hasCompleted) {
+            return { status: 'failed', label: 'Failed', color: 'bg-red-100 text-red-800' };
+        } else if (hasCompleted) {
+            return { status: 'completed', label: 'Indexed', color: 'bg-green-100 text-green-800' };
+        } else if (hasPending) {
+            return { status: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' };
+        } else {
+            return { status: 'unknown', label: 'Unknown', color: 'bg-gray-100 text-gray-800' };
+        }
+    };
+
+    // Helper function to get error message for failed documents
+    const getErrorMessage = (file) => {
+        // This would need to be added to the backend response - for now return a generic message
+        return 'Document processing failed. Please check the file format and try re-uploading.';
+    };
+
     const handleFileUpload = async (event) => {
         const uploadedFiles = Array.from(event.target.files);
         
@@ -350,20 +543,73 @@ const KnowledgeHubPage = () => {
             const fileName = file.name;
             const fileExtension = fileName.split('.').pop()?.toLowerCase() || '';
             
+            // Get file type information
+            const fileTypeInfo = getFileTypeInfo(fileName, fileExtension);
+            
             // Use selected method or default to 'naive' if none selected
             const currentMethod = selectedMethod || 'naive';
             
-            // Validate file against selected chunking method
-            const validationResult = validateFileForChunkingMethod(fileName, fileExtension, currentMethod);
+            // Check if file type matches chunking method
+            const methodValidation = validateMethodForFileType(fileExtension, currentMethod);
+            
+            // Auto-suggest better method if current one is not optimal
+            const suggestedMethod = suggestBetterMethod(fileExtension, currentMethod);
+            
+            if (suggestedMethod && suggestedMethod !== currentMethod) {
+                // Show auto-suggestion
+                showValidationToast(
+                    `${fileTypeInfo.icon} ${fileTypeInfo.type} detected. Consider switching to '${suggestedMethod.charAt(0).toUpperCase() + suggestedMethod.slice(1)}' chunking method for better results.`,
+                    'info',
+                    6000
+                );
+                
+                // Auto-switch if it's a clear mismatch (like PPTX with non-presentation method)
+                if (['pptx', 'ppt'].includes(fileExtension) && currentMethod !== 'presentation') {
+                    await handleMethodChange('presentation');
+                    showValidationToast(
+                        `🔄 Automatically switched to 'Presentation' method for ${fileTypeInfo.type} files.`,
+                        'success',
+                        4000
+                    );
+                    // Wait a bit for state to update
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                } else if (['jpg', 'jpeg', 'png', 'gif', 'tif'].includes(fileExtension) && currentMethod !== 'picture') {
+                    await handleMethodChange('picture');
+                    showValidationToast(
+                        `🔄 Automatically switched to 'Picture' method for image files.`,
+                        'success',
+                        4000
+                    );
+                    // Wait a bit for state to update
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                } else if (['xlsx', 'xls', 'csv'].includes(fileExtension) && currentMethod !== 'table') {
+                    if (chunkingMethods.includes('table')) {
+                        await handleMethodChange('table');
+                        showValidationToast(
+                            `🔄 Automatically switched to 'Table' method for spreadsheet files.`,
+                            'success',
+                            4000
+                        );
+                        // Wait a bit for state to update
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                }
+            }
+            
+            // Validate file against selected chunking method (after potential auto-switch)
+            const finalMethod = selectedMethod || 'naive';
+            const validationResult = validateFileForChunkingMethod(fileName, fileExtension, finalMethod);
             
             if (!validationResult.isValid) {
                 // Show warning dialog and ask user to confirm
                 setWarningDialog({
                     fileName: fileName,
                     fileExtension: fileExtension,
-                    method: currentMethod,
+                    fileTypeInfo: fileTypeInfo,
+                    method: finalMethod,
                     message: validationResult.message,
                     supportedFormats: validationResult.supportedFormats,
+                    recommendedMethods: getRecommendedMethod(fileExtension),
                     file: file,
                     fileId: fileId,
                     onConfirm: () => continueFileUpload(file, fileId, fileName, false), // false = use naive method
@@ -375,9 +621,24 @@ const KnowledgeHubPage = () => {
                             delete newProgress[fileId];
                             return newProgress;
                         });
+                    },
+                    onSwitchMethod: (newMethod) => {
+                        handleMethodChange(newMethod);
+                        setWarningDialog(null);
+                        // Retry upload with new method
+                        setTimeout(() => continueFileUpload(file, fileId, fileName, true), 100);
                     }
                 });
                 continue; // Skip processing this file until user decides
+            }
+            
+            // Show warning if method is not optimal but supported
+            if (methodValidation.shouldWarn) {
+                showValidationToast(
+                    `⚠️ ${methodValidation.warningMessage} Current method: '${finalMethod}'.`,
+                    'warning',
+                    5000
+                );
             }
             
             // File is valid, process immediately
@@ -442,6 +703,73 @@ const KnowledgeHubPage = () => {
                 return newProgress;
             });
             setWarningDialog(null);
+        }
+    };
+
+    // Retry failed document processing
+    const handleRetryDocument = async (file) => {
+        if (!file || !file.id) {
+            addNotification('Invalid document selected for retry', 'error');
+            return;
+        }
+
+        try {
+            setProcessingDocuments(prev => new Set([...prev, file.id]));
+            
+            // Get current chunking configuration
+            const configResponse = await fetch('/api/get-chunking-config', {
+                method: 'GET',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+            });
+            
+            if (!configResponse.ok) {
+                throw new Error('Failed to get chunking configuration');
+            }
+            
+            const config = await configResponse.json();
+            
+            // Create form data for retry request
+            const formData = new FormData();
+            formData.append('method', config.method || 'auto');
+            formData.append('chunk_token_num', config.chunk_token_num || 1000);
+            formData.append('chunk_overlap', config.chunk_overlap || 200);
+            formData.append('delimiter', config.delimiter || '\\n\\n|\\n|\\.|\\!|\\?');
+            formData.append('max_token', config.max_token || 4096);
+            formData.append('layout_recognize', config.layout_recognize || 'auto');
+            formData.append('preserve_formatting', config.preserve_formatting || true);
+            formData.append('extract_tables', config.extract_tables || true);
+            formData.append('extract_images', config.extract_images || false);
+            
+            // Retry processing with current configuration
+            const retryResponse = await fetch(`/api/documents/${file.id}/retry`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
+                },
+                body: formData
+            });
+
+            if (!retryResponse.ok) {
+                const errorData = await retryResponse.json();
+                throw new Error(errorData.detail || 'Failed to retry document processing');
+            }
+
+            addNotification('Document processing restarted successfully', 'success');
+            
+            // Refresh documents after a short delay
+            setTimeout(() => {
+                fetchDocuments();
+            }, 1000);
+            
+        } catch (error) {
+            console.error('Error retrying document:', error);
+            addNotification(`Error retrying document: ${error.message}`, 'error');
+        } finally {
+            setProcessingDocuments(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(file.id);
+                return newSet;
+            });
         }
     };
 
@@ -586,6 +914,50 @@ const KnowledgeHubPage = () => {
 
     return (
         <div className="min-h-screen bg-gray-50 flex">
+            {/* File Validation Toast */}
+            {fileValidationToast && (
+                <div className={`fixed top-4 right-4 z-50 max-w-md p-4 rounded-lg shadow-lg border ${
+                    fileValidationToast.type === 'success' 
+                        ? 'bg-green-50 border-green-200 text-green-800' 
+                        : fileValidationToast.type === 'info'
+                        ? 'bg-blue-50 border-blue-200 text-blue-800'
+                        : 'bg-yellow-50 border-yellow-200 text-yellow-800'
+                }`}>
+                    <div className="flex items-start">
+                        <div className="flex-shrink-0">
+                            {fileValidationToast.type === 'success' && (
+                                <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                            )}
+                            {fileValidationToast.type === 'info' && (
+                                <svg className="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            )}
+                            {fileValidationToast.type === 'warning' && (
+                                <svg className="w-5 h-5 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                            )}
+                        </div>
+                        <div className="ml-3 flex-1">
+                            <p className="text-sm font-medium">{fileValidationToast.message}</p>
+                        </div>
+                        <div className="ml-4 flex-shrink-0">
+                            <button
+                                onClick={() => setFileValidationToast(null)}
+                                className="inline-flex text-gray-400 hover:text-gray-600"
+                            >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Sidebar */}
             <div className="w-64 bg-white shadow-lg">
                 <div className="p-6 border-b border-gray-200">
@@ -901,6 +1273,19 @@ const KnowledgeHubPage = () => {
                                                                 >
                                                                     📄 View Chunks
                                                                 </button>
+                                                                {getDocumentStatus(file).status === 'failed' && (
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            setOpenDropdown(null);
+                                                                            handleRetryDocument(file);
+                                                                        }}
+                                                                        className="text-orange-600 block px-4 py-2 text-sm hover:bg-gray-100 w-full text-left flex items-center"
+                                                                        role="menuitem"
+                                                                    >
+                                                                        🔄 Retry Processing
+                                                                    </button>
+                                                                )}
                                                                 <button
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
@@ -926,13 +1311,29 @@ const KnowledgeHubPage = () => {
                                                         </div>
                                                     </td>
                                                     <td className="px-3 py-4">
-                                                        <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                                                            file.indexed 
-                                                                ? 'bg-green-100 text-green-800' 
-                                                                : 'bg-yellow-100 text-yellow-800'
-                                                        }`}>
-                                                            {file.indexed ? 'Indexed' : 'Pending'}
-                                                        </span>
+                                                        {(() => {
+                                                            const docStatus = getDocumentStatus(file);
+                                                            return (
+                                                                <div className="flex items-center">
+                                                                    <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${docStatus.color}`}>
+                                                                        {docStatus.label}
+                                                                    </span>
+                                                                    {docStatus.status === 'failed' && (
+                                                                        <button
+                                                                            onClick={() => {
+                                                                                alert(getErrorMessage(file));
+                                                                            }}
+                                                                            className="ml-2 text-red-600 hover:text-red-800"
+                                                                            title="View error details"
+                                                                        >
+                                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                                            </svg>
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })()}
                                                     </td>
                                                     <td className="px-3 py-4">
                                                         <span className="inline-flex px-2 py-1 text-xs font-medium rounded-md bg-gray-100 text-gray-700 text-truncate-multiline" title={file.embedding_model || 'Unknown'}>
@@ -1012,6 +1413,30 @@ const KnowledgeHubPage = () => {
                                                     </option>
                                                 ))}
                                             </select>
+                                            
+                                            {/* Method recommendations */}
+                                            <div className="mt-2 text-xs text-gray-500">
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <div>
+                                                        <span className="font-medium">📄 PDF:</span> Manual, Naive, Q&A
+                                                    </div>
+                                                    <div>
+                                                        <span className="font-medium">📝 Word:</span> Naive, Resume, Q&A
+                                                    </div>
+                                                    <div>
+                                                        <span className="font-medium">📊 PowerPoint:</span> Presentation
+                                                    </div>
+                                                    <div>
+                                                        <span className="font-medium">🖼️ Images:</span> Picture
+                                                    </div>
+                                                    <div>
+                                                        <span className="font-medium">📈 Excel:</span> Table
+                                                    </div>
+                                                    <div>
+                                                        <span className="font-medium">📧 Email:</span> Email
+                                                    </div>
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -1026,6 +1451,44 @@ const KnowledgeHubPage = () => {
                                     </div>
                                     <div className="p-6">
                                         <div className="space-y-6">
+                                            {/* Chunk Token Number */}
+                                            {activeConfig.chunk_token_num !== undefined && (
+                                                <div>
+                                                    <label htmlFor="chunk-token-num" className="block text-sm font-medium text-gray-700 mb-2">
+                                                        Chunk Token Number
+                                                    </label>
+                                                    <input
+                                                        type="number"
+                                                        id="chunk-token-num"
+                                                        value={activeConfig.chunk_token_num}
+                                                        onChange={(e) => handleConfigChange('chunk_token_num', parseInt(e.target.value))}
+                                                        className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                                                        min="100"
+                                                        max="8000"
+                                                    />
+                                                    <p className="mt-1 text-xs text-gray-500">Number of tokens per chunk (100-8000)</p>
+                                                </div>
+                                            )}
+
+                                            {/* Max Token */}
+                                            {activeConfig.max_token !== undefined && (
+                                                <div>
+                                                    <label htmlFor="max-token" className="block text-sm font-medium text-gray-700 mb-2">
+                                                        Maximum Tokens
+                                                    </label>
+                                                    <input
+                                                        type="number"
+                                                        id="max-token"
+                                                        value={activeConfig.max_token}
+                                                        onChange={(e) => handleConfigChange('max_token', parseInt(e.target.value))}
+                                                        className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                                                        min="512"
+                                                        max="32768"
+                                                    />
+                                                    <p className="mt-1 text-xs text-gray-500">Maximum tokens allowed per chunk (512-32768)</p>
+                                                </div>
+                                            )}
+
                                             {/* Chunk Size */}
                                             {activeConfig.chunk_size !== undefined && (
                                                 <div>
@@ -1084,7 +1547,7 @@ const KnowledgeHubPage = () => {
 
                                             {/* Additional config fields can be added based on method */}
                                             {Object.entries(activeConfig).map(([key, value]) => {
-                                                if (['chunk_size', 'chunk_overlap', 'separators'].includes(key)) return null;
+                                                if (['chunk_size', 'chunk_overlap', 'chunk_token_num', 'max_token', 'separators', 'method'].includes(key)) return null;
                                                 if (typeof value === 'boolean') {
                                                     return (
                                                         <div key={key} className="flex items-center">
@@ -1135,15 +1598,47 @@ const KnowledgeHubPage = () => {
                                             })}
                                         </div>
 
-                                        {/* Save Button */}
+                                        {/* Save Message */}
+                                        {saveMessage && (
+                                            <div className={`mb-4 p-3 rounded-lg ${
+                                                saveMessage.type === 'success' 
+                                                    ? 'bg-green-50 border border-green-200 text-green-800' 
+                                                    : 'bg-red-50 border border-red-200 text-red-800'
+                                            }`}>
+                                                <div className="flex items-center">
+                                                    {saveMessage.type === 'success' ? (
+                                                        <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                                        </svg>
+                                                    ) : (
+                                                        <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                        </svg>
+                                                    )}
+                                                    <span className="text-sm font-medium">{saveMessage.text}</span>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Save and Reset Buttons */}
                                         <div className="mt-6 pt-6 border-t border-gray-200">
-                                            <button
-                                                onClick={saveChunkingConfig}
-                                                disabled={savingConfig}
-                                                className="w-full bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg transition-colors"
-                                            >
-                                                {savingConfig ? 'Saving...' : 'Save Configuration'}
-                                            </button>
+                                            <div className="flex space-x-3">
+                                                <button
+                                                    onClick={saveChunkingConfig}
+                                                    disabled={savingConfig}
+                                                    className="flex-1 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg transition-colors"
+                                                >
+                                                    {savingConfig ? 'Saving...' : 'Save Configuration'}
+                                                </button>
+                                                <button
+                                                    onClick={resetChunkingConfig}
+                                                    disabled={savingConfig}
+                                                    className="px-4 py-2 bg-gray-200 hover:bg-gray-300 disabled:opacity-50 text-gray-700 rounded-lg transition-colors"
+                                                    title="Reset to default values"
+                                                >
+                                                    Reset
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -1206,7 +1701,7 @@ const KnowledgeHubPage = () => {
             {/* Warning Dialog Modal */}
             {warningDialog && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-lg p-6 m-4 max-w-md w-full">
+                    <div className="bg-white rounded-lg p-6 m-4 max-w-lg w-full">
                         <div className="flex items-center mb-4">
                             <div className="flex-shrink-0">
                                 <svg className="w-6 h-6 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1218,20 +1713,52 @@ const KnowledgeHubPage = () => {
                             </div>
                         </div>
                         
-                        <div className="mb-4">
-                            <p className="text-sm text-gray-600 mb-2">
+                        <div className="mb-6">
+                            <p className="text-sm text-gray-600 mb-3">
                                 {warningDialog.message}
                             </p>
-                            <div className="bg-gray-50 p-3 rounded-md">
-                                <p className="text-sm font-medium text-gray-900">File: {warningDialog.fileName}</p>
-                                <p className="text-sm text-gray-600">Extension: .{warningDialog.fileExtension}</p>
-                                <p className="text-sm text-gray-600">Selected method: {warningDialog.method}</p>
-                                <p className="text-sm text-gray-600">
-                                    Supported formats: {warningDialog.supportedFormats.join(', ')}
-                                </p>
+                            
+                            {/* File Information */}
+                            <div className="bg-gray-50 p-4 rounded-md mb-4">
+                                <div className="flex items-center mb-2">
+                                    <span className="text-lg mr-2">{warningDialog.fileTypeInfo?.icon || '📄'}</span>
+                                    <div>
+                                        <p className="text-sm font-medium text-gray-900">{warningDialog.fileName}</p>
+                                        <p className="text-xs text-gray-600">
+                                            {warningDialog.fileTypeInfo?.type || 'Unknown'} file (.{warningDialog.fileExtension})
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="text-xs text-gray-600 space-y-1">
+                                    <p><strong>Selected method:</strong> {warningDialog.method.charAt(0).toUpperCase() + warningDialog.method.slice(1)}</p>
+                                    <p><strong>Supported formats:</strong> {warningDialog.supportedFormats.join(', ')}</p>
+                                    {warningDialog.recommendedMethods && (
+                                        <p><strong>Recommended methods:</strong> {warningDialog.recommendedMethods.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join(', ')}</p>
+                                    )}
+                                </div>
                             </div>
-                            <p className="text-sm text-gray-600 mt-2">
-                                Do you want to continue uploading with the 'naive' chunking method instead?
+                            
+                            {/* Recommendations */}
+                            {warningDialog.recommendedMethods && warningDialog.recommendedMethods.length > 0 && (
+                                <div className="mb-4">
+                                    <p className="text-sm font-medium text-gray-900 mb-2">💡 Recommended actions:</p>
+                                    <div className="space-y-2">
+                                        {warningDialog.recommendedMethods.filter(method => chunkingMethods.includes(method)).map(method => (
+                                            <button
+                                                key={method}
+                                                onClick={() => warningDialog.onSwitchMethod(method)}
+                                                className="w-full text-left px-3 py-2 text-sm bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors"
+                                            >
+                                                <span className="font-medium">Switch to '{method.charAt(0).toUpperCase() + method.slice(1)}' method</span>
+                                                <span className="text-blue-600 block text-xs">Best for {warningDialog.fileTypeInfo?.type || 'this file type'}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                            
+                            <p className="text-sm text-gray-600">
+                                Or continue uploading with the 'Naive' chunking method (fallback option).
                             </p>
                         </div>
                         

@@ -104,6 +104,20 @@ class ChatDB:
                     )
                 ''')
 
+                # Create chunking configurations table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS chunking_configs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT NOT NULL,
+                        method TEXT NOT NULL,
+                        config_data TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, method),
+                        FOREIGN KEY (user_id) REFERENCES users (username)
+                    )
+                ''')
+
                 conn.commit()
                 logger.info("Database initialized successfully")
 
@@ -914,6 +928,87 @@ class ChatDB:
         except Exception as e:
             logger.error(f"Error getting total sessions: {str(e)}")
             return 0
+
+    # Chunking Configuration Methods
+    def save_chunking_config(self, user_id, method, config_data):
+        """Save or update chunking configuration for a user and method"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                now = datetime.now()
+                
+                # Convert config_data to JSON string if it's a dict
+                config_json = json.dumps(config_data) if isinstance(config_data, dict) else config_data
+                
+                cursor.execute('''
+                    INSERT OR REPLACE INTO chunking_configs (user_id, method, config_data, updated_at)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, method, config_json, now))
+                
+                conn.commit()
+                logger.info(f"Saved chunking config for user {user_id}, method {method}")
+                return True
+        except Exception as e:
+            logger.error(f"Error saving chunking config: {str(e)}")
+            return False
+
+    def get_chunking_config(self, user_id, method):
+        """Get chunking configuration for a user and method"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT config_data FROM chunking_configs 
+                    WHERE user_id = ? AND method = ?
+                ''', (user_id, method))
+                
+                result = cursor.fetchone()
+                if result:
+                    return json.loads(result[0])
+                return None
+        except Exception as e:
+            logger.error(f"Error getting chunking config: {str(e)}")
+            return None
+
+    def get_user_chunking_configs(self, user_id):
+        """Get all chunking configurations for a user"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT method, config_data, updated_at FROM chunking_configs 
+                    WHERE user_id = ?
+                    ORDER BY method
+                ''', (user_id,))
+                
+                results = cursor.fetchall()
+                configs = {}
+                for method, config_data, updated_at in results:
+                    configs[method] = {
+                        'config': json.loads(config_data),
+                        'updated_at': updated_at
+                    }
+                return configs
+        except Exception as e:
+            logger.error(f"Error getting user chunking configs: {str(e)}")
+            return {}
+
+    def delete_chunking_config(self, user_id, method):
+        """Delete chunking configuration for a user and method"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM chunking_configs 
+                    WHERE user_id = ? AND method = ?
+                ''', (user_id, method))
+                
+                conn.commit()
+                logger.info(f"Deleted chunking config for user {user_id}, method {method}")
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error deleting chunking config: {str(e)}")
+            return False
     
     def get_total_messages(self):
         """Get total number of messages"""

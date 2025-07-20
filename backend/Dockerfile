@@ -33,7 +33,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install curl, uvicorn, and tesseract for OCR
+# Install curl, uvicorn, and tesseract for OCR (LibreOffice removed - using HTML rendering)
 RUN apt-get update && \
     apt-get install -y curl tesseract-ocr && \
     pip install "uvicorn[standard]" && \

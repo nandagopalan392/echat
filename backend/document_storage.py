@@ -35,7 +35,7 @@ class DocumentStorageService:
         # Initialize services
         self._init_minio()
         self._init_database()
-    
+
     def _init_minio(self):
         """Initialize MinIO client and ensure bucket exists"""
         try:
@@ -56,7 +56,111 @@ class DocumentStorageService:
         except Exception as e:
             logger.error(f"Failed to initialize MinIO: {e}")
             raise
-    
+
+    def get_document(self, document_id: int) -> Optional[Dict]:
+        """Get document by ID with user_id from ingestion metadata"""
+        try:
+            # Get basic document info
+            doc_info = self._get_document_by_id(document_id)
+            if not doc_info:
+                return None
+            
+            # Get additional info from ingestion metadata including user_id
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT user_id, status, error_message, embedding_model 
+                FROM ingestion_metadata 
+                WHERE document_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            ''', (document_id,))
+            
+            ingestion_row = cursor.fetchone()
+            conn.close()
+            
+            if ingestion_row:
+                doc_info['user_id'] = ingestion_row[0]
+                doc_info['status'] = ingestion_row[1]
+                doc_info['error_message'] = ingestion_row[2]
+                doc_info['embedding_model'] = ingestion_row[3]
+            
+            return doc_info
+            
+        except Exception as e:
+            logger.error(f"Error getting document {document_id}: {e}")
+            return None
+
+    def get_file_content(self, document_id: int) -> Optional[bytes]:
+        """Get file content as bytes from MinIO"""
+        try:
+            # Get document metadata
+            doc_info = self._get_document_by_id(document_id)
+            if not doc_info:
+                return None
+            
+            # Get object from MinIO
+            response = self.minio_client.get_object(
+                self.bucket_name,
+                doc_info['minio_object_name']
+            )
+            
+            content = response.read()
+            response.close()
+            response.release_conn()
+            
+            return content
+            
+        except Exception as e:
+            logger.error(f"Failed to get file content for document {document_id}: {e}")
+            return None
+
+    def update_document_status(self, document_id: int, status: str, error_message: str = None):
+        """Update document status in ingestion metadata"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get current embedding model for this document
+            cursor.execute('''
+                SELECT embedding_model 
+                FROM ingestion_metadata 
+                WHERE document_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            ''', (document_id,))
+            
+            result = cursor.fetchone()
+            embedding_model = result[0] if result else 'unknown'
+            
+            # Update or insert status
+            if status == 'pending':
+                self.mark_ingestion_pending(document_id, embedding_model)
+            elif status == 'failed':
+                self.mark_ingestion_failed(document_id, embedding_model, error_message or 'Unknown error')
+            elif status == 'completed':
+                # Mark as completed
+                cursor.execute('''
+                    UPDATE ingestion_metadata 
+                    SET status = 'completed', error_message = NULL, processed_at = CURRENT_TIMESTAMP
+                    WHERE document_id = ? AND embedding_model = ?
+                ''', (document_id, embedding_model))
+                
+                if cursor.rowcount == 0:
+                    # Insert new record if none exists
+                    cursor.execute('''
+                        INSERT INTO ingestion_metadata 
+                        (document_id, embedding_model, status, processed_at) 
+                        VALUES (?, ?, 'completed', CURRENT_TIMESTAMP)
+                    ''', (document_id, embedding_model))
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            logger.error(f"Error updating document status: {e}")
+
     def _migrate_database(self):
         """Migrate database schema to add new columns if they don't exist"""
         try:
