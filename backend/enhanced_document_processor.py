@@ -418,15 +418,23 @@ class EnhancedDocumentProcessor:
             
             if content and len(content.strip()) > 0:
                 # Text was extracted from image
-                # For images, often treat as single chunk unless very large
                 if len(content) > config.chunk_token_num and config.chunk_token_num > 0:
                     splitter = RecursiveCharacterTextSplitter(
                         chunk_size=config.chunk_token_num,
                         chunk_overlap=config.chunk_overlap
                     )
                     image_chunks = splitter.split_documents([doc])
+                    
+                    # Distribute OCR bounding boxes among chunks if available
+                    if 'ocr_bounding_boxes' in doc.metadata:
+                        bounding_boxes = doc.metadata['ocr_bounding_boxes']
+                        self._distribute_bounding_boxes_to_chunks(image_chunks, bounding_boxes)
+                    
                     chunks.extend(image_chunks)
                 else:
+                    # Single chunk - include all bounding boxes
+                    if 'ocr_bounding_boxes' in doc.metadata:
+                        doc.metadata['chunk_bounding_boxes'] = doc.metadata['ocr_bounding_boxes']
                     chunks.append(doc)
             else:
                 # No text content - create placeholder chunk
@@ -437,6 +445,42 @@ class EnhancedDocumentProcessor:
                 chunks.append(chunk)
         
         return chunks
+    
+    def _distribute_bounding_boxes_to_chunks(self, chunks: List[Document], bounding_boxes: List[dict]):
+        """Distribute OCR bounding boxes among text chunks based on text content matching"""
+        if not bounding_boxes:
+            return
+            
+        # Create a mapping of words to their bounding boxes
+        word_to_bbox = {}
+        for bbox in bounding_boxes:
+            word_key = bbox['text'].lower().strip()
+            if word_key:
+                if word_key not in word_to_bbox:
+                    word_to_bbox[word_key] = []
+                word_to_bbox[word_key].append(bbox)
+        
+        # For each chunk, find matching bounding boxes
+        for chunk in chunks:
+            chunk_bboxes = []
+            chunk_text = chunk.page_content.lower()
+            chunk_words = chunk_text.split()
+            
+            # Try to match words from chunk to bounding boxes
+            used_bboxes = set()
+            for word in chunk_words:
+                clean_word = ''.join(c for c in word if c.isalnum()).lower()
+                if clean_word in word_to_bbox:
+                    # Find an unused bounding box for this word
+                    for bbox in word_to_bbox[clean_word]:
+                        bbox_id = f"{bbox['left']},{bbox['top']},{bbox['width']},{bbox['height']}"
+                        if bbox_id not in used_bboxes:
+                            chunk_bboxes.append(bbox)
+                            used_bboxes.add(bbox_id)
+                            break
+            
+            # Add bounding boxes to chunk metadata
+            chunk.metadata['chunk_bounding_boxes'] = chunk_bboxes
     
     def _chunk_email(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
         """Email chunking based on email structure"""
@@ -636,18 +680,94 @@ class EnhancedDocumentProcessor:
             try:
                 logger.info(f"Processing image with OCR: {file_path}")
                 image = Image.open(file_path)
-                text = pytesseract.image_to_string(image)
+                
+                # Enhance image for better OCR results
+                # Convert to RGB if needed
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                # Get OCR text with better configuration
+                custom_config = r'--oem 3 --psm 6'
+                text = pytesseract.image_to_string(image, config=custom_config)
+                
+                # Get OCR data with bounding boxes
+                ocr_data = pytesseract.image_to_data(image, config=custom_config, output_type=pytesseract.Output.DICT)
+                
+                # Process bounding box data with lower confidence threshold
+                bounding_boxes = []
+                image_width, image_height = image.size
+                
+                for i in range(len(ocr_data['text'])):
+                    confidence = int(ocr_data['conf'][i])
+                    if confidence > 10:  # Lower confidence threshold to capture more text
+                        word_text = ocr_data['text'][i].strip()
+                        if word_text and len(word_text) > 0:  # Only include non-empty text
+                            bbox = {
+                                'text': word_text,
+                                'left': int(ocr_data['left'][i]),
+                                'top': int(ocr_data['top'][i]),
+                                'width': int(ocr_data['width'][i]),
+                                'height': int(ocr_data['height'][i]),
+                                'confidence': confidence,
+                                'block_num': int(ocr_data['block_num'][i]),
+                                'par_num': int(ocr_data['par_num'][i]),
+                                'line_num': int(ocr_data['line_num'][i]),
+                                'word_num': int(ocr_data['word_num'][i])
+                            }
+                            bounding_boxes.append(bbox)
                 
                 # Log OCR output
                 logger.info(f"OCR extracted text from {Path(file_path).name}:")
                 logger.info(f"--- OCR OUTPUT START ---")
-                logger.info(text)
+                logger.info(text.strip())
                 logger.info(f"--- OCR OUTPUT END ---")
-                logger.info(f"OCR extracted {len(text)} characters from {Path(file_path).name}")
+                logger.info(f"OCR extracted {len(text.strip())} characters and {len(bounding_boxes)} bounding boxes from {Path(file_path).name}")
+                
+                # If no text was extracted, try different OCR settings
+                if len(text.strip()) < 10 and len(bounding_boxes) < 5:
+                    logger.warning(f"Poor OCR results, trying alternative settings for {Path(file_path).name}")
+                    
+                    # Try different PSM mode for single block of text
+                    alt_config = r'--oem 3 --psm 8'
+                    alt_text = pytesseract.image_to_string(image, config=alt_config)
+                    alt_ocr_data = pytesseract.image_to_data(image, config=alt_config, output_type=pytesseract.Output.DICT)
+                    
+                    if len(alt_text.strip()) > len(text.strip()):
+                        logger.info(f"Alternative OCR settings produced better results for {Path(file_path).name}")
+                        text = alt_text
+                        ocr_data = alt_ocr_data
+                        
+                        # Reprocess bounding boxes with alternative data
+                        bounding_boxes = []
+                        for i in range(len(ocr_data['text'])):
+                            confidence = int(ocr_data['conf'][i])
+                            if confidence > 10:
+                                word_text = ocr_data['text'][i].strip()
+                                if word_text and len(word_text) > 0:
+                                    bbox = {
+                                        'text': word_text,
+                                        'left': int(ocr_data['left'][i]),
+                                        'top': int(ocr_data['top'][i]),
+                                        'width': int(ocr_data['width'][i]),
+                                        'height': int(ocr_data['height'][i]),
+                                        'confidence': confidence,
+                                        'block_num': int(ocr_data['block_num'][i]),
+                                        'par_num': int(ocr_data['par_num'][i]),
+                                        'line_num': int(ocr_data['line_num'][i]),
+                                        'word_num': int(ocr_data['word_num'][i])
+                                    }
+                                    bounding_boxes.append(bbox)
                 
                 return [Document(
                     page_content=text,
-                    metadata={'source': Path(file_path).name, 'type': 'image', 'extracted_via': 'ocr'}  # Use filename only
+                    metadata={
+                        'source': Path(file_path).name, 
+                        'type': 'image', 
+                        'extracted_via': 'ocr',
+                        'image_width': image_width,
+                        'image_height': image_height,
+                        'ocr_bounding_boxes': bounding_boxes
+                    }
                 )]
             except Exception as e:
                 logger.error(f"Failed to process image {file_path}: {e}")

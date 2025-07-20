@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import PDFViewer from '../components/PDFViewer';
+import ImageViewer from '../components/ImageViewer';
 
 const DocumentChunksPage = () => {
     const { docId } = useParams();
@@ -127,7 +128,10 @@ const DocumentChunksPage = () => {
     }
 
     const isPDF = documentPreview?.type === 'pdf';
-    const isImage = documentPreview?.type === 'image';
+    const isImage = documentPreview?.type === 'image' || 
+                   documentPreview?.content_type?.startsWith('image/') ||
+                   documentData?.document_info?.content_type?.startsWith('image/') ||
+                   /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(documentData?.filename || '');
 
     return (
         <div className="min-h-screen bg-gray-50">
@@ -215,13 +219,15 @@ const DocumentChunksPage = () => {
                                             className="h-full"
                                         />
                                     ) : isImage ? (
-                                        <div className="h-full flex items-center justify-center p-4">
-                                            <img 
-                                                src={documentPreview.image_url}
-                                                alt={documentPreview.filename}
-                                                className="max-w-full max-h-full object-contain rounded shadow-lg"
-                                            />
-                                        </div>
+                                        <ImageViewer
+                                            imageUrl={documentPreview.image_url}
+                                            token={localStorage.getItem('token')}
+                                            selectedChunkId={selectedChunkId}
+                                            chunks={documentData?.chunks || []}
+                                            onChunkHighlight={handleChunkHighlight}
+                                            highlightMode={highlightMode}
+                                            className="h-full"
+                                        />
                                     ) : (
                                         <div className="h-full overflow-auto p-4">
                                             <div className="bg-gray-50 border rounded p-4">
@@ -258,9 +264,26 @@ const DocumentChunksPage = () => {
                                 </span>
                             </div>
                             {selectedChunkId && (
-                                <p className="text-sm text-blue-600 mt-1">
-                                    Selected: Chunk {documentData?.chunks?.find(c => c.id === selectedChunkId)?.chunk_number}
-                                </p>
+                                <div className="flex items-center justify-between mt-2">
+                                    <p className="text-sm text-blue-600">
+                                        Selected: Chunk {documentData?.chunks?.find(c => c.id === selectedChunkId)?.chunk_number}
+                                    </p>
+                                    {/* Highlight Mode Controls for Images */}
+                                    {isImage && (
+                                        <div className="flex items-center space-x-2">
+                                            <span className="text-xs text-gray-700">Highlight:</span>
+                                            <select
+                                                value={highlightMode}
+                                                onChange={(e) => setHighlightMode(e.target.value)}
+                                                className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+                                            >
+                                                <option value="area">Area</option>
+                                                <option value="full">Full</option>
+                                                <option value="outline">Outline</option>
+                                            </select>
+                                        </div>
+                                    )}
+                                </div>
                             )}
                         </div>
                         

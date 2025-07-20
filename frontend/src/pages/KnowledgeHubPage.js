@@ -2,6 +2,101 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 
+// Add custom styles for resizable table
+const tableStyles = `
+.resizable-table {
+    table-layout: fixed;
+    width: 100%;
+}
+
+.resizable-table th {
+    position: relative;
+    border-right: 2px solid #e5e7eb;
+    min-width: 80px;
+    user-select: none;
+}
+
+.resizable-table th:hover {
+    border-right-color: #6366f1;
+}
+
+.resizable-table th .resize-handle {
+    position: absolute;
+    right: -3px;
+    top: 0;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 10;
+}
+
+.resizable-table th .resize-handle:hover {
+    background: rgba(99, 102, 241, 0.3);
+}
+
+.resizable-table td {
+    overflow: hidden;
+    word-wrap: break-word;
+    word-break: break-word;
+}
+
+.filename-cell {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.filename-text {
+    word-break: break-all;
+    overflow-wrap: break-word;
+    white-space: pre-wrap;
+    line-height: 1.4;
+}
+
+.actions-cell {
+    white-space: nowrap;
+    min-width: 120px;
+}
+
+.actions-button {
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    min-width: 80px;
+}
+
+.table-container {
+    max-height: 70vh;
+    overflow: auto;
+    width: 100%;
+}
+
+.text-truncate-multiline {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-word;
+}
+
+.resizing {
+    cursor: col-resize;
+    user-select: none;
+}
+
+@media (max-width: 1024px) {
+    .table-container {
+        max-height: 60vh;
+    }
+    
+    .resizable-table th, .resizable-table td {
+        min-width: 60px;
+        font-size: 0.875rem;
+    }
+}
+`;
+
 const KnowledgeHubPage = () => {
     const navigate = useNavigate();
     const [files, setFiles] = useState([]);
@@ -20,6 +115,110 @@ const KnowledgeHubPage = () => {
     const [warningDialog, setWarningDialog] = useState(null);
     
     const [openDropdown, setOpenDropdown] = useState(null);
+    const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0 });
+
+    // Inject table styles
+    useEffect(() => {
+        const styleId = 'resizable-table-styles';
+        if (!document.getElementById(styleId)) {
+            const style = document.createElement('style');
+            style.id = styleId;
+            style.textContent = tableStyles;
+            document.head.appendChild(style);
+        }
+        return () => {
+            const existingStyle = document.getElementById(styleId);
+            if (existingStyle) {
+                existingStyle.remove();
+            }
+        };
+    }, []);
+
+    // Add column resizing functionality
+    useEffect(() => {
+        // Temporarily disable resize functionality to test dropdown
+        return () => {};
+        
+        const addResizeHandles = () => {
+            const table = document.querySelector('.resizable-table');
+            if (!table) return;
+
+            const headers = table.querySelectorAll('th');
+            
+            headers.forEach((header, index) => {
+                // Skip the last column (Actions) - don't make it resizable
+                if (index === headers.length - 1) return;
+
+                // Remove existing handle
+                const existingHandle = header.querySelector('.resize-handle');
+                if (existingHandle) {
+                    existingHandle.remove();
+                }
+
+                // Create resize handle
+                const resizeHandle = document.createElement('div');
+                resizeHandle.className = 'resize-handle';
+                header.appendChild(resizeHandle);
+
+                let isResizing = false;
+                let startX = 0;
+                let startWidth = 0;
+
+                const onMouseDown = (e) => {
+                    isResizing = true;
+                    startX = e.clientX;
+                    startWidth = header.offsetWidth;
+                    document.body.classList.add('resizing');
+                    e.preventDefault();
+                };
+
+                const onMouseMove = (e) => {
+                    if (!isResizing) return;
+                    
+                    const diff = e.clientX - startX;
+                    const newWidth = startWidth + diff;
+                    const minWidth = 80;
+                    
+                    if (newWidth >= minWidth) {
+                        header.style.width = newWidth + 'px';
+                    }
+                };
+
+                const onMouseUp = () => {
+                    isResizing = false;
+                    document.body.classList.remove('resizing');
+                };
+
+                resizeHandle.addEventListener('mousedown', onMouseDown);
+                document.addEventListener('mousemove', onMouseMove);
+                document.addEventListener('mouseup', onMouseUp);
+
+                // Cleanup function
+                const cleanup = () => {
+                    resizeHandle.removeEventListener('mousedown', onMouseDown);
+                    document.removeEventListener('mousemove', onMouseMove);
+                    document.removeEventListener('mouseup', onMouseUp);
+                };
+
+                // Store cleanup function on the handle
+                resizeHandle._cleanup = cleanup;
+            });
+        };
+
+        // Add handles after component mounts and when files change
+        const timer = setTimeout(addResizeHandles, 100);
+
+        return () => {
+            clearTimeout(timer);
+            // Cleanup all resize handles
+            const handles = document.querySelectorAll('.resize-handle');
+            handles.forEach(handle => {
+                if (handle._cleanup) {
+                    handle._cleanup();
+                }
+            });
+        };
+    }, [files]);
 
     useEffect(() => {
         loadFiles();
@@ -341,18 +540,49 @@ const KnowledgeHubPage = () => {
         }
     };
 
-    const toggleDropdown = (filename) => {
-        setOpenDropdown(openDropdown === filename ? null : filename);
+    const toggleDropdown = (filename, event) => {
+        console.log('Toggle called:', filename, 'Current:', openDropdown, 'Event:', event?.type);
+        
+        if (event) {
+            event.preventDefault();
+            event.stopPropagation();
+            
+            // Calculate position
+            const rect = event.target.getBoundingClientRect();
+            setDropdownPosition({
+                top: rect.bottom + window.scrollY + 5,
+                left: rect.left + window.scrollX
+            });
+        }
+        
+        setOpenDropdown(prev => {
+            const newValue = prev === filename ? null : filename;
+            console.log('Setting openDropdown from', prev, 'to', newValue);
+            return newValue;
+        });
     };
 
-    // Close dropdown when clicking outside
+    // Close dropdown when clicking outside - simplified approach
     useEffect(() => {
-        const handleClickOutside = () => {
-            setOpenDropdown(null);
+        const handleDocumentClick = (event) => {
+            if (openDropdown) {
+                // Check if the clicked element is part of any dropdown
+                const isDropdownClick = event.target.closest('.dropdown-container');
+                if (!isDropdownClick) {
+                    console.log('Document click outside dropdown, closing...');
+                    setOpenDropdown(null);
+                }
+            }
         };
-        document.addEventListener('click', handleClickOutside);
-        return () => document.removeEventListener('click', handleClickOutside);
-    }, []);
+        
+        if (openDropdown) {
+            document.addEventListener('click', handleDocumentClick);
+        }
+        
+        return () => {
+            document.removeEventListener('click', handleDocumentClick);
+        };
+    }, [openDropdown]);
 
     return (
         <div className="min-h-screen bg-gray-50 flex">
@@ -554,59 +784,148 @@ const KnowledgeHubPage = () => {
                                     </p>
                                 </div>
                             ) : (
-                                <div className="overflow-x-auto">
-                                    <table className="min-w-full divide-y divide-gray-200">
+                                <>
+                                    {/* Table Controls */}
+                                    <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
+                                        <div className="text-sm text-gray-600">
+                                            💡 <span className="font-medium">Tip:</span> Drag the handles at column borders to resize widths. Filenames wrap automatically.
+                                        </div>
+                                        <div className="flex items-center space-x-2">
+                                            <button 
+                                                onClick={() => {
+                                                    // Reset to default column widths
+                                                    const table = document.querySelector('.resizable-table');
+                                                    if (table) {
+                                                        const ths = table.querySelectorAll('th');
+                                                        const defaultWidths = ['30%', '10%', '8%', '12%', '10%', '15%', '15%'];
+                                                        ths.forEach((th, index) => {
+                                                            if (defaultWidths[index]) {
+                                                                th.style.width = defaultWidths[index];
+                                                            }
+                                                        });
+                                                    }
+                                                }}
+                                                className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1 rounded-md transition-colors"
+                                            >
+                                                Reset Columns
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="table-container">
+                                    <table className="min-w-full divide-y divide-gray-200 resizable-table">
                                         <thead className="bg-gray-50">
                                             <tr>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
+                                                    style={{width: '30%', minWidth: '200px'}}>
                                                     File Name
                                                 </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider actions-cell" 
+                                                    style={{width: '10%', minWidth: '120px'}}>
+                                                    Actions
+                                                </th>
+                                                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
+                                                    style={{width: '8%', minWidth: '80px'}}>
                                                     Size
                                                 </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
+                                                    style={{width: '12%', minWidth: '100px'}}>
                                                     Uploaded
                                                 </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
+                                                    style={{width: '10%', minWidth: '80px'}}>
                                                     Status
                                                 </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
+                                                    style={{width: '15%', minWidth: '120px'}}>
                                                     Embedding Model
                                                 </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
+                                                    style={{width: '15%', minWidth: '120px'}}>
                                                     Chunking Method
-                                                </th>
-                                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                                                    Actions
                                                 </th>
                                             </tr>
                                         </thead>
                                         <tbody className="bg-white divide-y divide-gray-200">
                                             {files.map((file) => (
                                                 <tr key={file.filename} className="hover:bg-gray-50">
-                                                    <td className="px-6 py-4 whitespace-nowrap">
-                                                        <div className="flex items-center">
-                                                            <div className="flex-shrink-0 h-10 w-10">
-                                                                <div className="h-10 w-10 rounded-lg bg-indigo-100 flex items-center justify-center">
-                                                                    <svg className="h-6 w-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <td className="px-4 py-4 filename-cell">
+                                                        <div className="flex items-start">
+                                                            <div className="flex-shrink-0 h-8 w-8 mt-1">
+                                                                <div className="h-8 w-8 rounded-lg bg-indigo-100 flex items-center justify-center">
+                                                                    <svg className="h-5 w-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                                                     </svg>
                                                                 </div>
                                                             </div>
-                                                            <div className="ml-4">
-                                                                <div className="text-sm font-medium text-gray-900">
+                                                            <div className="ml-3 min-w-0 flex-1">
+                                                                <div className="text-sm font-medium text-gray-900 filename-text" title={file.filename}>
                                                                     {file.filename}
                                                                 </div>
                                                             </div>
                                                         </div>
                                                     </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                        {formatFileSize(file.size)}
+                                                    <td className="px-3 py-4 text-sm font-medium actions-cell">
+                                                        <div className="relative inline-block text-left dropdown-container">
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => {
+                                                                    console.log('Button clicked for file:', file.filename);
+                                                                    toggleDropdown(file.filename, e);
+                                                                }}
+                                                                className="actions-button px-2 py-1 border border-gray-300 shadow-sm text-xs leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                                                            >
+                                                                Actions
+                                                                <svg className="ml-1 -mr-0.5 h-3 w-3 flex-shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                                                    <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                                                                </svg>
+                                                            </button>
+                                                        </div>
+                                                        {openDropdown && openDropdown === file.filename && (
+                                                            <div className="fixed bg-white ring-1 ring-black ring-opacity-5 focus:outline-none shadow-xl rounded-md w-48 py-1"
+                                                                 style={{
+                                                                     position: 'fixed',
+                                                                     top: `${dropdownPosition.top}px`,
+                                                                     left: `${dropdownPosition.left}px`,
+                                                                     zIndex: 9999
+                                                                 }}
+                                                                 role="menu">
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setOpenDropdown(null);
+                                                                        navigate(`/documents/${file.id}/chunks`);
+                                                                    }}
+                                                                    className="text-blue-600 block px-4 py-2 text-sm hover:bg-gray-100 w-full text-left flex items-center"
+                                                                    role="menuitem"
+                                                                >
+                                                                    📄 View Chunks
+                                                                </button>
+                                                                <button
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setOpenDropdown(null);
+                                                                        handleDeleteFile(file.filename);
+                                                                    }}
+                                                                    className="text-red-600 block px-4 py-2 text-sm hover:bg-gray-100 w-full text-left"
+                                                                    role="menuitem"
+                                                                >
+                                                                    Delete
+                                                                </button>
+                                                            </div>
+                                                        )}
                                                     </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                        {formatDate(file.upload_date)}
+                                                    <td className="px-3 py-4 text-sm text-gray-500">
+                                                        <div className="text-truncate-multiline" title={formatFileSize(file.size)}>
+                                                            {formatFileSize(file.size)}
+                                                        </div>
                                                     </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap">
+                                                    <td className="px-3 py-4 text-sm text-gray-500">
+                                                        <div className="text-truncate-multiline" title={formatDate(file.upload_date)}>
+                                                            {formatDate(file.upload_date)}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-3 py-4">
                                                         <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
                                                             file.indexed 
                                                                 ? 'bg-green-100 text-green-800' 
@@ -615,66 +934,22 @@ const KnowledgeHubPage = () => {
                                                             {file.indexed ? 'Indexed' : 'Pending'}
                                                         </span>
                                                     </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                        <span className="inline-flex px-2 py-1 text-xs font-medium rounded-md bg-gray-100 text-gray-700">
+                                                    <td className="px-3 py-4">
+                                                        <span className="inline-flex px-2 py-1 text-xs font-medium rounded-md bg-gray-100 text-gray-700 text-truncate-multiline" title={file.embedding_model || 'Unknown'}>
                                                             {file.embedding_model || 'Unknown'}
                                                         </span>
                                                     </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                        <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-md ${getChunkingMethodStyle(file.chunking_method)}`}>
+                                                    <td className="px-3 py-4">
+                                                        <span className={`inline-flex px-2 py-1 text-xs font-medium rounded-md text-truncate-multiline ${getChunkingMethodStyle(file.chunking_method)}`} title={formatChunkingMethod(file.chunking_method)}>
                                                             {formatChunkingMethod(file.chunking_method)}
                                                         </span>
-                                                    </td>
-                                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                                        <div className="relative inline-block text-left">
-                                                            <button
-                                                                type="button"
-                                                                onClick={(e) => {
-                                                                    e.stopPropagation();
-                                                                    toggleDropdown(file.filename);
-                                                                }}
-                                                                className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
-                                                            >
-                                                                Actions
-                                                                <svg className="ml-2 -mr-0.5 h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-                                                                    <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-                                                                </svg>
-                                                            </button>
-
-                                                            {openDropdown === file.filename && (
-                                                                <div className="origin-top-right absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 focus:outline-none z-10">
-                                                                    <div className="py-1" role="menu">
-                                                                        <button
-                                                                            onClick={(e) => {
-                                                                                e.stopPropagation();
-                                                                                navigate(`/documents/${file.id}/chunks`);
-                                                                            }}
-                                                                            className="text-blue-600 block px-4 py-2 text-sm hover:bg-gray-100 w-full text-left flex items-center"
-                                                                            role="menuitem"
-                                                                        >
-                                                                            📄 View Chunks
-                                                                        </button>
-                                                                        <button
-                                                                            onClick={(e) => {
-                                                                                e.stopPropagation();
-                                                                                setOpenDropdown(null);
-                                                                                handleDeleteFile(file.filename);
-                                                                            }}
-                                                                            className="text-red-600 block px-4 py-2 text-sm hover:bg-gray-100 w-full text-left"
-                                                                            role="menuitem"
-                                                                        >
-                                                                            Delete
-                                                                        </button>
-                                                                    </div>
-                                                                </div>
-                                                            )}
-                                                        </div>
                                                     </td>
                                                 </tr>
                                             ))}
                                         </tbody>
                                     </table>
                                 </div>
+                                </>
                             )}
                         </div>
                     )}

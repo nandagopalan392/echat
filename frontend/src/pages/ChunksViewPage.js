@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { api } from '../services/api';
 import PDFViewer from '../components/PDFViewer';
+import ImageViewer from '../components/ImageViewer';
 
 const ChunksViewPage = () => {
     const { docId } = useParams();
@@ -131,6 +132,10 @@ const ChunksViewPage = () => {
     }
 
     const isPDF = document?.content_type === 'application/pdf' || document?.filename.endsWith('.pdf');
+    const isImage = document?.content_type?.startsWith('image/') || 
+                   document?.is_image ||
+                   documentPreview?.type === 'image' ||
+                   /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i.test(document?.filename || '');
 
     return (
         <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -210,14 +215,16 @@ const ChunksViewPage = () => {
                             highlightMode={highlightMode}
                             className="h-full"
                         />
-                    ) : document?.is_image ? (
-                        <div className="h-full flex items-center justify-center p-8">
-                            <img 
-                                src={`/api/documents/${document.id}/image`}
-                                alt={document.filename}
-                                className="max-w-full max-h-full object-contain rounded shadow-lg"
-                            />
-                        </div>
+                    ) : isImage ? (
+                        <ImageViewer
+                            imageUrl={`/api/documents/${document.id}/image`}
+                            token={localStorage.getItem('token')}
+                            selectedChunkId={selectedChunkId}
+                            chunks={chunks}
+                            onChunkHighlight={handleChunkHighlight}
+                            highlightMode={highlightMode}
+                            className="h-full"
+                        />
                     ) : (
                         <div className="h-full flex items-center justify-center p-8">
                             <div className="text-center">
@@ -246,9 +253,30 @@ const ChunksViewPage = () => {
                 >
                     {/* Sidebar Header */}
                     <div className="p-4 border-b bg-gray-50">
-                        <h2 className="text-lg font-semibold text-gray-900">Document Chunks</h2>
-                        <p className="text-sm text-gray-600 mt-1">
+                        <div className="flex items-center justify-between mb-2">
+                            <h2 className="text-lg font-semibold text-gray-900">Document Chunks</h2>
+                            {selectedChunkId && isImage && (
+                                <div className="flex items-center space-x-2">
+                                    <span className="text-xs text-gray-700">Highlight:</span>
+                                    <select
+                                        value={highlightMode}
+                                        onChange={(e) => setHighlightMode(e.target.value)}
+                                        className="text-xs border border-gray-300 rounded px-2 py-1 bg-white"
+                                    >
+                                        <option value="area">Area</option>
+                                        <option value="full">Full</option>
+                                        <option value="outline">Outline</option>
+                                    </select>
+                                </div>
+                            )}
+                        </div>
+                        <p className="text-sm text-gray-600">
                             {chunks.length} chunks • Click to highlight in document
+                            {selectedChunkId && (
+                                <span className="text-blue-600 ml-2">
+                                    • Selected: Chunk {chunks.find(c => c.id === selectedChunkId)?.chunk_number}
+                                </span>
+                            )}
                         </p>
                     </div>
 

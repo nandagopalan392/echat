@@ -1,7 +1,7 @@
 import sys
 import os
 import json
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form, BackgroundTasks, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -1097,8 +1097,11 @@ async def upload_file(
                 # For other files, store in MinIO only
                 logger.info(f"Storing non-document file: {file.filename}")
                 try:
-                    # Determine content type
-                    content_type = 'application/octet-stream'
+                    # Determine content type based on file extension
+                    import mimetypes
+                    content_type, _ = mimetypes.guess_type(file.filename)
+                    if not content_type:
+                        content_type = 'application/octet-stream'
                     
                     # Store in MinIO using document storage with chunking info
                     from document_storage import get_document_storage
@@ -2214,8 +2217,39 @@ def _get_method_description(method: ChunkingMethod) -> str:
     }
     return descriptions.get(method, "Custom chunking method")
 
+async def flexible_oauth2_scheme(
+    request: Request,
+    authorization: str = Header(None),
+    token: str = Query(None)
+):
+    """OAuth2 scheme that accepts token from either Authorization header or query parameter"""
+    auth_token = None
+    
+    # Try to get token from Authorization header first
+    if authorization:
+        try:
+            scheme, _, param = authorization.partition(" ")
+            if scheme.lower() == "bearer":
+                auth_token = param
+        except Exception:
+            pass
+    
+    # If no header token, try query parameter
+    if not auth_token and token:
+        auth_token = token
+        
+    if not auth_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return auth_token
+
+
 @app.get("/api/documents/{document_id}/image")
-async def get_document_image(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(oauth2_scheme)):
+async def get_document_image(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(flexible_oauth2_scheme)):
     """Serve document image if it's an image file"""
     try:
         from document_storage import get_document_storage
@@ -2226,20 +2260,31 @@ async def get_document_image(document_id: int, background_tasks: BackgroundTasks
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        # Check if it's an image file
-        if not doc_info['content_type'].startswith('image/'):
+        # Check if it's an image file by content type or extension
+        is_image_by_content_type = doc_info['content_type'].startswith('image/')
+        is_image_by_extension = doc_info['filename'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'))
+        
+        if not (is_image_by_content_type or is_image_by_extension):
             raise HTTPException(status_code=400, detail="Document is not an image")
         
         # Get the document content from MinIO
-        temp_file_path = doc_storage.get_document_content(document_id)
+        temp_file_path = doc_storage.get_document_file(document_id)
         
         # Schedule cleanup
         background_tasks.add_task(os.remove, temp_file_path)
         
+        # Determine correct content type if stored incorrectly
+        response_content_type = doc_info['content_type']
+        if not response_content_type.startswith('image/'):
+            import mimetypes
+            guessed_type, _ = mimetypes.guess_type(doc_info['filename'])
+            if guessed_type and guessed_type.startswith('image/'):
+                response_content_type = guessed_type
+        
         # Return the image file
         return FileResponse(
             temp_file_path,
-            media_type=doc_info['content_type'],
+            media_type=response_content_type,
             filename=doc_info['filename']
         )
         
@@ -2260,7 +2305,10 @@ async def get_document_preview(document_id: int, background_tasks: BackgroundTas
             raise HTTPException(status_code=404, detail="Document not found")
         
         # For images, return image metadata
-        if doc_info['content_type'].startswith('image/'):
+        is_image_by_content_type = doc_info['content_type'].startswith('image/')
+        is_image_by_extension = doc_info['filename'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'))
+        
+        if is_image_by_content_type or is_image_by_extension:
             return {
                 "type": "image",
                 "content_type": doc_info['content_type'],
