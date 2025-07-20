@@ -279,7 +279,7 @@ class DocumentStorageService:
             file_size = os.path.getsize(file_path)
             
             # Check if document already exists
-            existing_doc = self._get_document_by_hash(file_hash)
+            existing_doc = self.get_document_by_hash(file_hash)
             if existing_doc:
                 logger.info(f"Document already exists: {original_filename} (hash: {file_hash[:16]}...)")
                 return existing_doc
@@ -526,7 +526,7 @@ class DocumentStorageService:
             logger.error(f"Failed to get pending ingestions for model {embedding_model}: {e}")
             return []
     
-    def _get_document_by_hash(self, file_hash: str) -> Optional[Dict]:
+    def get_document_by_hash(self, file_hash: str) -> Optional[Dict]:
         """Get document by file hash"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -544,7 +544,9 @@ class DocumentStorageService:
                     'file_size': row[3],
                     'content_type': row[4],
                     'minio_object_name': row[5],
-                    'uploaded_at': row[6]
+                    'upload_date': row[6],  # Changed from uploaded_at to match API response
+                    'chunking_method': row[7] if len(row) > 7 else 'naive',
+                    'chunking_config': row[8] if len(row) > 8 else None
                 }
             return None
             

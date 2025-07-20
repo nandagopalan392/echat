@@ -1354,6 +1354,43 @@ async def delete_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/files/check-duplicate")
+async def check_file_duplicate(
+    request_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check if a file with the same filename and hash already exists"""
+    try:
+        filename = request_data.get('filename')
+        file_hash = request_data.get('hash')
+        
+        if not filename or not file_hash:
+            raise HTTPException(status_code=400, detail="Both filename and hash are required")
+        
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
+        
+        # Check if a file with this hash already exists
+        existing_file = doc_storage.get_document_by_hash(file_hash)
+        
+        if existing_file:
+            return {
+                "exists": True,
+                "existing_file": {
+                    "filename": existing_file.get('filename'),
+                    "upload_date": existing_file.get('upload_date'),
+                    "size": existing_file.get('file_size'),
+                    "content_type": existing_file.get('content_type'),
+                    "hash": existing_file.get('file_hash')
+                }
+            }
+        else:
+            return {"exists": False}
+            
+    except Exception as e:
+        logger.error(f"Error checking file duplicate: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/files/{filename}")
 async def delete_file_by_filename(
     filename: str,

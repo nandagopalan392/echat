@@ -651,7 +651,9 @@ export const api = {
 
     getDocumentChunks: async (filename) => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/files/${encodeURIComponent(filename)}/chunks`, {
+            // Extract just the filename from the path (e.g., "IMX662/IMX662_AppNote/file.pdf" → "file.pdf")
+            const cleanFilename = filename.split('/').pop() || filename;
+            const response = await fetch(`${API_BASE_URL}/api/files/${encodeURIComponent(cleanFilename)}/chunks`, {
                 method: 'GET',
                 headers: {
                     ...getAuthHeader()
@@ -1254,4 +1256,30 @@ export const sendMessage = async (content, sessionId = null) => {
     }
 
     return await response.json();
+};
+
+// Check if a file exists by comparing filename and hash
+export const checkFileExists = async (filename, hash) => {
+    try {
+        const response = await fetch(`/api/files/check-duplicate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                ...getAuthHeader()
+            },
+            body: JSON.stringify({ filename, hash })
+        });
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                return null; // File doesn't exist
+            }
+            throw new Error(`Failed to check file existence: ${response.status}`);
+        }
+
+        return await response.json();
+    } catch (error) {
+        console.error('Error checking file existence:', error);
+        throw error;
+    }
 };

@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import FolderUploadReview from '../components/FolderUploadReview';
+import FileUploadReview from '../components/FileUploadReview';
 
 // Add custom styles for resizable table
 const tableStyles = `
@@ -119,6 +121,18 @@ const KnowledgeHubPage = () => {
     
     const [openDropdown, setOpenDropdown] = useState(null);
     const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0 });
+    
+    // Folder upload states
+    const [showFolderUploadReview, setShowFolderUploadReview] = useState(false);
+    const [showFileUploadReview, setShowFileUploadReview] = useState(false);
+    const [selectedFilesForReview, setSelectedFilesForReview] = useState([]);
+    const [processingDocuments, setProcessingDocuments] = useState(new Set());
+
+    // Utility function to extract just the filename from a path
+    const extractFilename = (filepath) => {
+        if (!filepath) return '';
+        return filepath.split('/').pop();
+    };
 
     // Inject table styles
     useEffect(() => {
@@ -538,178 +552,120 @@ const KnowledgeHubPage = () => {
     const handleFileUpload = async (event) => {
         const uploadedFiles = Array.from(event.target.files);
         
-        for (const file of uploadedFiles) {
-            const fileId = Date.now() + Math.random();
-            const fileName = file.name;
-            const fileExtension = fileName.split('.').pop()?.toLowerCase() || '';
-            
-            // Get file type information
-            const fileTypeInfo = getFileTypeInfo(fileName, fileExtension);
-            
-            // Use selected method or default to 'naive' if none selected
-            const currentMethod = selectedMethod || 'naive';
-            
-            // Check if file type matches chunking method
-            const methodValidation = validateMethodForFileType(fileExtension, currentMethod);
-            
-            // Auto-suggest better method if current one is not optimal
-            const suggestedMethod = suggestBetterMethod(fileExtension, currentMethod);
-            
-            if (suggestedMethod && suggestedMethod !== currentMethod) {
-                // Show auto-suggestion
-                showValidationToast(
-                    `${fileTypeInfo.icon} ${fileTypeInfo.type} detected. Consider switching to '${suggestedMethod.charAt(0).toUpperCase() + suggestedMethod.slice(1)}' chunking method for better results.`,
-                    'info',
-                    6000
-                );
-                
-                // Auto-switch if it's a clear mismatch (like PPTX with non-presentation method)
-                if (['pptx', 'ppt'].includes(fileExtension) && currentMethod !== 'presentation') {
-                    await handleMethodChange('presentation');
-                    showValidationToast(
-                        `🔄 Automatically switched to 'Presentation' method for ${fileTypeInfo.type} files.`,
-                        'success',
-                        4000
-                    );
-                    // Wait a bit for state to update
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                } else if (['jpg', 'jpeg', 'png', 'gif', 'tif'].includes(fileExtension) && currentMethod !== 'picture') {
-                    await handleMethodChange('picture');
-                    showValidationToast(
-                        `🔄 Automatically switched to 'Picture' method for image files.`,
-                        'success',
-                        4000
-                    );
-                    // Wait a bit for state to update
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                } else if (['xlsx', 'xls', 'csv'].includes(fileExtension) && currentMethod !== 'table') {
-                    if (chunkingMethods.includes('table')) {
-                        await handleMethodChange('table');
-                        showValidationToast(
-                            `🔄 Automatically switched to 'Table' method for spreadsheet files.`,
-                            'success',
-                            4000
-                        );
-                        // Wait a bit for state to update
-                        await new Promise(resolve => setTimeout(resolve, 100));
-                    }
-                }
-            }
-            
-            // Validate file against selected chunking method (after potential auto-switch)
-            const finalMethod = selectedMethod || 'naive';
-            const validationResult = validateFileForChunkingMethod(fileName, fileExtension, finalMethod);
-            
-            if (!validationResult.isValid) {
-                // Show warning dialog and ask user to confirm
-                setWarningDialog({
-                    fileName: fileName,
-                    fileExtension: fileExtension,
-                    fileTypeInfo: fileTypeInfo,
-                    method: finalMethod,
-                    message: validationResult.message,
-                    supportedFormats: validationResult.supportedFormats,
-                    recommendedMethods: getRecommendedMethod(fileExtension),
-                    file: file,
-                    fileId: fileId,
-                    onConfirm: () => continueFileUpload(file, fileId, fileName, false), // false = use naive method
-                    onCancel: () => {
-                        setWarningDialog(null);
-                        // Remove from progress tracking
-                        setUploadProgress(prev => {
-                            const newProgress = { ...prev };
-                            delete newProgress[fileId];
-                            return newProgress;
-                        });
-                    },
-                    onSwitchMethod: (newMethod) => {
-                        handleMethodChange(newMethod);
-                        setWarningDialog(null);
-                        // Retry upload with new method
-                        setTimeout(() => continueFileUpload(file, fileId, fileName, true), 100);
-                    }
-                });
-                continue; // Skip processing this file until user decides
-            }
-            
-            // Show warning if method is not optimal but supported
-            if (methodValidation.shouldWarn) {
-                showValidationToast(
-                    `⚠️ ${methodValidation.warningMessage} Current method: '${finalMethod}'.`,
-                    'warning',
-                    5000
-                );
-            }
-            
-            // File is valid, process immediately
-            await continueFileUpload(file, fileId, fileName, true); // true = use selected method
-        }
+        if (uploadedFiles.length === 0) return;
         
-        // Reload all data after all uploads complete
-        await loadFiles();
+        // Show the file upload review dialog
+        setSelectedFilesForReview(uploadedFiles);
+        setShowFileUploadReview(true);
+        
+        // Clear the input value so the same files can be selected again if needed
+        event.target.value = '';
     };
 
-    const continueFileUpload = async (file, fileId, fileName, useSelectedMethod) => {
-        // Initialize progress tracking
-        setUploadProgress(prev => ({
-            ...prev,
-            [fileId]: { name: fileName, progress: 0 }
-        }));
+    // Handle folder upload review
+    const handleFolderUpload = async (files, options = {}) => {
+        const { folderName, onProgress } = options;
         
         try {
-            // Use selected chunking method and config, or fallback to naive
-            const chunkingConfig = useSelectedMethod && activeConfig 
-                ? {
-                    method: selectedMethod || 'naive',
-                    ...activeConfig
+            for (const fileData of files) {
+                if (onProgress) {
+                    onProgress(fileData.id, 0);
                 }
-                : {
-                    method: 'naive',
-                    chunk_token_num: 1000,
-                    chunk_overlap: 200,
-                    max_token: 8192
+
+                // Create chunking config for this file
+                const chunkingConfig = {
+                    method: fileData.method,
+                    ...fileData.config
                 };
+
+                await api.uploadFileWithChunking(
+                    fileData.file,
+                    chunkingConfig,
+                    true, // isFolder
+                    fileData.path, // folder path
+                    (progress) => {
+                        if (onProgress) {
+                            onProgress(fileData.id, progress);
+                        }
+                    }
+                );
+            }
+
+            // Close the folder review modal
+            setShowFolderUploadReview(false);
             
-            await api.uploadFileWithChunking(
-                file,
-                chunkingConfig,
-                false,
-                "",
-                (progress) => {
-                    setUploadProgress(prev => ({
-                        ...prev,
-                        [fileId]: { name: fileName, progress }
-                    }));
-                }
+            // Refresh the files list
+            await loadFiles();
+            
+            // Show success message
+            showValidationToast(
+                `✅ Folder "${folderName}" uploaded successfully with ${files.length} files!`,
+                'success',
+                5000
             );
-
-            // Remove from progress tracking
-            setUploadProgress(prev => {
-                const newProgress = { ...prev };
-                delete newProgress[fileId];
-                return newProgress;
-            });
-
-            // Close warning dialog if it was open for this file
-            setWarningDialog(null);
-
-            // Show completion message
-            console.log(`File ${fileName} uploaded successfully with chunking method: ${chunkingConfig.method}`);
+            
         } catch (error) {
-            console.error('Error uploading file:', error);
-            setUploadProgress(prev => {
-                const newProgress = { ...prev };
-                delete newProgress[fileId];
-                return newProgress;
-            });
-            setWarningDialog(null);
+            console.error('Folder upload error:', error);
+            showValidationToast(
+                `❌ Error uploading folder: ${error.message}`,
+                'error',
+                5000
+            );
         }
     };
 
+    // Show folder upload review modal
+    const handleShowFolderUpload = () => {
+        setShowFolderUploadReview(true);
+    };
+
+    // Cancel folder upload review
+    const handleCancelFolderUpload = () => {
+        setShowFolderUploadReview(false);
+    };
+
+    // Handle file upload review (for individual files)
+    const handleFileUploadFromReview = async (files, options = {}) => {
+        try {
+            for (const fileData of files) {
+                // Create chunking config for this file
+                const chunkingConfig = {
+                    method: fileData.method,
+                    ...fileData.config
+                };
+                await api.uploadFileWithChunking(
+                    fileData.file,
+                    chunkingConfig,
+                    false, // isFolder
+                    '', // no folder path
+                    (progress) => {
+                        setUploadProgress(prev => ({
+                            ...prev,
+                            [fileData.id]: progress
+                        }));
+                    }
+                );
+            }
+            setShowFileUploadReview(false);
+            await loadFiles();
+            showValidationToast(
+                `✅ Uploaded ${files.length} file${files.length !== 1 ? 's' : ''} successfully!`,
+                'success',
+                5000
+            );
+        } catch (error) {
+            console.error('File upload review error:', error);
+            showValidationToast(
+                `❌ Error uploading file(s): ${error.message}`,
+                'error',
+                5000
+            );
+        }
+    };
     // Retry failed document processing
     const handleRetryDocument = async (file) => {
         if (!file || !file.id) {
-            addNotification('Invalid document selected for retry', 'error');
+            showValidationToast('Invalid document selected for retry', 'error');
             return;
         }
 
@@ -754,16 +710,16 @@ const KnowledgeHubPage = () => {
                 throw new Error(errorData.detail || 'Failed to retry document processing');
             }
 
-            addNotification('Document processing restarted successfully', 'success');
+            showValidationToast('Document processing restarted successfully', 'success');
             
             // Refresh documents after a short delay
             setTimeout(() => {
-                fetchDocuments();
+                loadFiles();
             }, 1000);
             
         } catch (error) {
             console.error('Error retrying document:', error);
-            addNotification(`Error retrying document: ${error.message}`, 'error');
+            showValidationToast(`Error retrying document: ${error.message}`, 'error');
         } finally {
             setProcessingDocuments(prev => {
                 const newSet = new Set(prev);
@@ -1037,20 +993,15 @@ const KnowledgeHubPage = () => {
                                     </div>
                                 )}
                                 
-                                <label className="flex items-center px-3 py-2 text-gray-700 hover:bg-gray-100 rounded-lg cursor-pointer transition-colors">
+                                <button 
+                                    onClick={handleShowFolderUpload}
+                                    className="flex items-center px-3 py-2 text-gray-700 hover:bg-gray-100 rounded-lg cursor-pointer transition-colors w-full text-left"
+                                >
                                     <svg className="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                     </svg>
-                                    Upload Folder
-                                    <input
-                                        type="file"
-                                        webkitdirectory="true"
-                                        directory="true"
-                                        multiple
-                                        onChange={handleFileUpload}
-                                        className="hidden"
-                                    />
-                                </label>
+                                    Upload Folder (Review)
+                                </button>
                             </div>
                         )}
                     </nav>
@@ -1232,8 +1183,13 @@ const KnowledgeHubPage = () => {
                                                             </div>
                                                             <div className="ml-3 min-w-0 flex-1">
                                                                 <div className="text-sm font-medium text-gray-900 filename-text" title={file.filename}>
-                                                                    {file.filename}
+                                                                    {extractFilename(file.filename)}
                                                                 </div>
+                                                                {file.filename.includes('/') && (
+                                                                    <div className="text-xs text-gray-500 truncate" title={file.filename}>
+                                                                        {file.filename}
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                         </div>
                                                     </td>
@@ -1779,6 +1735,25 @@ const KnowledgeHubPage = () => {
                     </div>
                 </div>
             )}
+
+            {/* Folder Upload Review Modal */}
+            <FolderUploadReview
+                chunkingMethods={chunkingMethods}
+                onUpload={handleFolderUpload}
+                onCancel={handleCancelFolderUpload}
+                defaultConfigs={defaultConfigs}
+                isVisible={showFolderUploadReview}
+            />
+
+            {/* File Upload Review Modal */}
+            <FileUploadReview
+                chunkingMethods={chunkingMethods}
+                onUpload={handleFileUploadFromReview}
+                onCancel={() => setShowFileUploadReview(false)}
+                defaultConfigs={defaultConfigs}
+                isVisible={showFileUploadReview}
+                selectedFiles={selectedFilesForReview}
+            />
 
         </div>
     );
