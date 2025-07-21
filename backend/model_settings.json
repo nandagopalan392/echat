@@ -1,4 +1,4 @@
 {
   "llm": "gemma3n:e2b",
-  "embedding": "granite-embedding"
+  "embedding": "bge-m3"
 }

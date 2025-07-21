@@ -2,6 +2,55 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 
+// Safe utility: handles model as string or object
+const getModelName = (model) => {
+    if (!model) return '';
+    if (typeof model === 'string') return model;
+    if (typeof model === 'object' && model.name) return model.name;
+    return '';
+};
+
+// Safe formatting of display name
+const formatModelDisplayName = (model) => {
+    const displayName = getModelName(model);
+
+    // Parameter info
+    let parameterInfo = '';
+    const nameMatch = displayName.match(/(\d+\.?\d*)[bB]/i);
+    if (nameMatch) {
+        parameterInfo = ` (${nameMatch[1]}B params)`;
+    } else if (displayName.includes(':')) {
+        const colonMatch = displayName.match(/:(\d+\.?\d*)([bB])?/i);
+        if (colonMatch) {
+            parameterInfo = ` (${colonMatch[1]}B params)`;
+        }
+    }
+
+    // Size info
+    let sizeInfo = '';
+    if (model && typeof model === 'object' && model.size && model.size !== 'Unknown') {
+        if (model.size.match(/\d+(\.\d+)?\s*(GB|MB|KB)/i)) {
+            sizeInfo = ` - ${model.size}`;
+            parameterInfo = ''; // override paramInfo for actual file size
+        } else if (model.size.toLowerCase().includes('various')) {
+            sizeInfo = ` - ${model.size}`;
+            parameterInfo = '';
+        } else if (model.size.match(/^\d+\.?\d*[bB]$/i)) {
+            if (!parameterInfo) {
+                const sizeParam = model.size.match(/^(\d+\.?\d*)[bB]$/i);
+                if (sizeParam) {
+                    parameterInfo = ` (${sizeParam[1]}B params)`;
+                }
+            }
+        } else {
+            sizeInfo = ` - ${model.size}`;
+        }
+    }
+
+    return `${displayName}${parameterInfo}${sizeInfo}`;
+};
+
+
 const ModelSettingsPage = () => {
     const navigate = useNavigate();
     
@@ -403,68 +452,37 @@ const ModelSettingsPage = () => {
                     </div>
                 </div>
                 
-                <div className="p-4">
-                    <nav className="space-y-2">
+                <nav className="mt-6">
+                    <div className="px-3 space-y-1">
                         <button
                             onClick={() => setActiveTab('llm')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'llm' 
-                                    ? 'bg-indigo-50 text-indigo-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
+                            className={`${
+                                activeTab === 'llm'
+                                    ? 'bg-indigo-100 border-indigo-500 text-indigo-700'
+                                    : 'border-transparent text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                            } group flex items-center w-full pl-2 pr-2 py-2 border-l-4 text-sm font-medium`}
                         >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <svg className="mr-3 h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                             </svg>
-                            LLM Models
+                            Language Model
                         </button>
-
+                        
                         <button
                             onClick={() => setActiveTab('embedding')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'embedding' 
-                                    ? 'bg-purple-50 text-purple-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
+                            className={`${
+                                activeTab === 'embedding'
+                                    ? 'bg-indigo-100 border-indigo-500 text-indigo-700'
+                                    : 'border-transparent text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+                            } group flex items-center w-full pl-2 pr-2 py-2 border-l-4 text-sm font-medium`}
                         >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
+                            <svg className="mr-3 h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14-7H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V6a2 2 0 00-2-2z" />
                             </svg>
-                            Embedding Models
+                            Embedding Model
                         </button>
-                    </nav>
-                    
-                    {/* Stats */}
-                    <div className="mt-8 p-4 bg-gray-50 rounded-lg">
-                        <h3 className="text-sm font-medium text-gray-900 mb-2">Quick Info</h3>
-                        <div className="text-sm text-gray-600 space-y-1">
-                            {activeTab === 'llm' && (
-                                <>
-                                    <div className="flex justify-between">
-                                        <span>Available:</span>
-                                        <span className="font-medium">{availableModels.length}</span>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span>Current:</span>
-                                        <span className="font-medium text-xs">{settings.model || 'None'}</span>
-                                    </div>
-                                </>
-                            )}
-                            {activeTab === 'embedding' && (
-                                <>
-                                    <div className="flex justify-between">
-                                        <span>Available:</span>
-                                        <span className="font-medium">{embeddingModels.length}</span>
-                                    </div>
-                                    <div className="flex justify-between">
-                                        <span>Current:</span>
-                                        <span className="font-medium text-xs">{currentEmbeddingModel || 'None'}</span>
-                                    </div>
-                                </>
-                            )}
-                        </div>
                     </div>
-                </div>
+                </nav>
             </div>
 
             {/* Main Content */}
@@ -475,12 +493,10 @@ const ModelSettingsPage = () => {
                         <div className="flex justify-between items-center">
                             <div>
                                 <h2 className="text-2xl font-bold text-gray-900">
-                                    {activeTab === 'llm' && 'Language Model Settings'}
-                                    {activeTab === 'embedding' && 'Embedding Model Settings'}
+                                    {activeTab === 'llm' ? 'Language Model Settings' : 'Embedding Model Settings'}
                                 </h2>
                                 <p className="mt-1 text-sm text-gray-500">
-                                    {activeTab === 'llm' && 'Configure AI model parameters and behavior'}
-                                    {activeTab === 'embedding' && 'Manage embedding models for document processing'}
+                                    {activeTab === 'llm' ? 'Configure AI model parameters and behavior' : 'Manage embedding models for document processing'}
                                 </p>
                             </div>
                             <div className="flex items-center space-x-4">
@@ -526,157 +542,177 @@ const ModelSettingsPage = () => {
                         <div className="bg-white rounded-lg shadow">
                             <div className="p-6">
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            {/* Model Selection */}
-                            <div className="md:col-span-2">
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    AI Model
-                                </label>
-                                
-                                {/* Current Model Display */}
-                                {currentLLMModel && (
-                                    <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                                        <h4 className="text-sm font-medium text-blue-900 mb-2">Currently Selected Model</h4>
-                                        <div className="flex items-center">
-                                            <div className="flex-grow">
-                                                <p className="text-lg font-semibold text-blue-800">{currentLLMModel}</p>
+                                    {/* Model Selection */}
+                                    <div className="md:col-span-2">
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                            AI Model
+                                        </label>
+                                        
+                                        {/* Current Model Display */}
+                                        {currentLLMModel && (
+                                            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                                                <h4 className="text-sm font-medium text-blue-900 mb-2">Currently Selected Model</h4>
+                                                <div className="flex items-center">
+                                                    <div className="flex-grow">
+                                                        <p className="text-lg font-semibold text-blue-800">{currentLLMModel}</p>
+                                                    </div>
+                                                </div>
                                             </div>
+                                        )}
+                                        
+                                        <select
+                                            value={settings.model || ''}
+                                            onChange={(e) => handleInputChange('model', e.target.value)}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                                        >
+                                            <option value="">Select a model</option>
+                                            {Array.isArray(availableModels) && availableModels
+                                                .filter(model => {
+                                                    if (typeof model === 'string') return true;
+                                                    return model && typeof model === 'object' && (!model.category || model.category !== 'embedding');
+                                                })
+                                                .map((model, index) => {
+                                                    const modelName = getModelName(model);
+                                                    const key = modelName || `model-${index}`;
+                                                    return (
+                                                        <option key={key} value={modelName}>
+                                                            {formatModelDisplayName(model)} {currentLLMModel === modelName ? ' (Current)' : ''}
+                                                        </option>
+                                                    );
+                                                })}
+                                        </select>
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Choose the AI model for generating responses
+                                        </p>
+                                    </div>
+
+                                    {/* Temperature */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                            Temperature: {settings.temperature}
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="0"
+                                            max="2"
+                                            step="0.1"
+                                            value={settings.temperature || 0.7}
+                                            onChange={(e) => handleInputChange('temperature', parseFloat(e.target.value))}
+                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                        <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                            <span>More Focused</span>
+                                            <span>More Creative</span>
                                         </div>
                                     </div>
-                                )}
-                                
-                                <select
-                                    value={settings.model}
-                                    onChange={(e) => handleInputChange('model', e.target.value)}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                                >
-                                    <option value="">Select a model</option>
-                                    {availableModels.filter(model => model.category !== 'embedding').map((model) => (
-                                        <option key={model.name} value={model.name}>
-                                            {formatModelDisplayName(model)} {currentLLMModel === model.name && ' (Current)'}
-                                        </option>
-                                    ))}
-                                </select>
-                                <p className="mt-1 text-sm text-gray-500">
-                                    Choose the AI model for generating responses
-                                </p>
-                            </div>
 
-                            {/* Temperature */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Temperature: {settings.temperature}
-                                </label>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="2"
-                                    step="0.1"
-                                    value={settings.temperature}
-                                    onChange={(e) => handleInputChange('temperature', parseFloat(e.target.value))}
-                                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                />
-                                <div className="flex justify-between text-xs text-gray-500 mt-1">
-                                    <span>More Focused</span>
-                                    <span>More Creative</span>
+                                    {/* Max Tokens */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                            Max Tokens
+                                        </label>
+                                        <input
+                                            type="number"
+                                            min="100"
+                                            max="8192"
+                                            value={settings.max_tokens || 2048}
+                                            onChange={(e) => handleInputChange('max_tokens', parseInt(e.target.value))}
+                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                                        />
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Maximum length of the response
+                                        </p>
+                                    </div>
+
+                                    {/* Top P */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                            Top P: {settings.top_p}
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="0"
+                                            max="1"
+                                            step="0.05"
+                                            value={settings.top_p || 0.9}
+                                            onChange={(e) => handleInputChange('top_p', parseFloat(e.target.value))}
+                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Controls diversity via nucleus sampling
+                                        </p>
+                                    </div>
+
+                                    {/* Frequency Penalty */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                            Frequency Penalty: {settings.frequency_penalty}
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="-2"
+                                            max="2"
+                                            step="0.1"
+                                            value={settings.frequency_penalty || 0}
+                                            onChange={(e) => handleInputChange('frequency_penalty', parseFloat(e.target.value))}
+                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Reduces repetition of tokens
+                                        </p>
+                                    </div>
+
+                                    {/* Presence Penalty */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                            Presence Penalty: {settings.presence_penalty}
+                                        </label>
+                                        <input
+                                            type="range"
+                                            min="-2"
+                                            max="2"
+                                            step="0.1"
+                                            value={settings.presence_penalty || 0}
+                                            onChange={(e) => handleInputChange('presence_penalty', parseFloat(e.target.value))}
+                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                                        />
+                                        <p className="mt-1 text-sm text-gray-500">
+                                            Encourages talking about new topics
+                                        </p>
+                                    </div>
                                 </div>
-                            </div>
 
-                            {/* Max Tokens */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Max Tokens
-                                </label>
-                                <input
-                                    type="number"
-                                    min="100"
-                                    max="8192"
-                                    value={settings.max_tokens}
-                                    onChange={(e) => handleInputChange('max_tokens', parseInt(e.target.value))}
-                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                                />
-                                <p className="mt-1 text-sm text-gray-500">
-                                    Maximum length of the response
-                                </p>
-                            </div>
-
-                            {/* Top P */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Top P: {settings.top_p}
-                                </label>
-                                <input
-                                    type="range"
-                                    min="0"
-                                    max="1"
-                                    step="0.05"
-                                    value={settings.top_p}
-                                    onChange={(e) => handleInputChange('top_p', parseFloat(e.target.value))}
-                                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                />
-                                <p className="mt-1 text-sm text-gray-500">
-                                    Controls diversity via nucleus sampling
-                                </p>
-                            </div>
-
-                            {/* Frequency Penalty */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Frequency Penalty: {settings.frequency_penalty}
-                                </label>
-                                <input
-                                    type="range"
-                                    min="-2"
-                                    max="2"
-                                    step="0.1"
-                                    value={settings.frequency_penalty}
-                                    onChange={(e) => handleInputChange('frequency_penalty', parseFloat(e.target.value))}
-                                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                />
-                                <p className="mt-1 text-sm text-gray-500">
-                                    Reduces repetition of tokens
-                                </p>
-                            </div>
-
-                            {/* Presence Penalty */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">
-                                    Presence Penalty: {settings.presence_penalty}
-                                </label>
-                                <input
-                                    type="range"
-                                    min="-2"
-                                    max="2"
-                                    step="0.1"
-                                    value={settings.presence_penalty}
-                                    onChange={(e) => handleInputChange('presence_penalty', parseFloat(e.target.value))}
-                                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                />
-                                <p className="mt-1 text-sm text-gray-500">
-                                    Encourages talking about new topics
-                                </p>
-                            </div>
-                        </div>
-
-                        {/* Model Information */}
-                        {settings.model && (
-                            <div className="mt-8 p-4 bg-gray-50 rounded-lg">
-                                <h3 className="text-lg font-medium text-gray-900 mb-2">Model Information</h3>
-                                {availableModels.find(m => m.name === settings.model) && (
-                                    <div className="text-sm text-gray-600">
-                                        <p><strong>Name:</strong> {settings.model}</p>
-                                        {availableModels.find(m => m.name === settings.model)?.size && (
-                                            <p><strong>Size:</strong> {availableModels.find(m => m.name === settings.model).size}</p>
-                                        )}
-                                        {availableModels.find(m => m.name === settings.model)?.description && (
-                                            <p><strong>Description:</strong> {availableModels.find(m => m.name === settings.model).description}</p>
-                                        )}
+                                {/* Model Information */}
+                                {settings.model && (
+                                    <div className="mt-8 p-4 bg-gray-50 rounded-lg">
+                                        <h3 className="text-lg font-medium text-gray-900 mb-2">Model Information</h3>
+                                        {(() => {
+                                            const selectedModel = Array.isArray(availableModels) ? 
+                                                availableModels.find(m => getModelName(m) === settings.model) : null;
+                                            if (selectedModel) {
+                                                return (
+                                                    <div className="text-sm text-gray-600">
+                                                        <p><strong>Name:</strong> {settings.model}</p>
+                                                        {selectedModel.size && (
+                                                            <p><strong>Size:</strong> {selectedModel.size}</p>
+                                                        )}
+                                                        {selectedModel.description && (
+                                                            <p><strong>Description:</strong> {selectedModel.description}</p>
+                                                        )}
+                                                    </div>
+                                                );
+                                            }
+                                            return (
+                                                <div className="text-sm text-gray-600">
+                                                    <p><strong>Name:</strong> {settings.model}</p>
+                                                </div>
+                                            );
+                                        })()}
                                     </div>
                                 )}
                             </div>
-                        )}
                         </div>
-                    </div>
-                )}
+                    )}
 
                     {/* Embedding Settings Tab */}
                     {activeTab === 'embedding' && (
@@ -708,16 +744,20 @@ const ModelSettingsPage = () => {
                                             Embedding Model Selection
                                         </label>
                                         <select
-                                            value={currentEmbeddingModel}
+                                            value={currentEmbeddingModel || ''}
                                             onChange={(e) => handleEmbeddingModelChange(e.target.value)}
                                             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
                                         >
                                             <option value="">Select an embedding model</option>
-                                            {embeddingModels.map((model) => (
-                                                <option key={model.name} value={model.name}>
-                                                    {formatModelDisplayName(model)}
-                                                </option>
-                                            ))}
+                                            {Array.isArray(embeddingModels) && embeddingModels.map((model, index) => {
+                                                const modelName = getModelName(model);
+                                                const key = modelName || `embedding-${index}`;
+                                                return (
+                                                    <option key={key} value={modelName}>
+                                                        {formatModelDisplayName(model)}
+                                                    </option>
+                                                );
+                                            })}
                                         </select>
                                         <p className="mt-1 text-sm text-gray-500">
                                             Choose the embedding model for document processing and semantic search
@@ -727,34 +767,64 @@ const ModelSettingsPage = () => {
                                         {currentEmbeddingModel && (
                                             <div className="mt-4 p-4 bg-gray-50 rounded-lg">
                                                 <h4 className="text-sm font-medium text-gray-900 mb-2">Current Model Info</h4>
-                                                {embeddingModels.find(m => m.name === currentEmbeddingModel) && (
-                                                    <div className="text-sm text-gray-600">
-                                                        <p><strong>Name:</strong> {currentEmbeddingModel}</p>
-                                                        {embeddingModels.find(m => m.name === currentEmbeddingModel)?.size && (
-                                                            <p><strong>Size:</strong> {embeddingModels.find(m => m.name === currentEmbeddingModel).size}</p>
-                                                        )}
-                                                        <p><strong>Description:</strong> {
-                                                            embeddingModels.find(m => m.name === currentEmbeddingModel)?.description || 
-                                                            (currentEmbeddingModel.includes('bge') ? 'BGE Embedding Model' : 
-                                                             currentEmbeddingModel.includes('e5') ? 'E5 Embedding Model' :
-                                                             currentEmbeddingModel.includes('nomic') ? 'Nomic Embedding Model' :
-                                                             currentEmbeddingModel.includes('mxbai') ? 'MxBai Embedding Model' :
-                                                             currentEmbeddingModel.includes('arctic') ? 'Snowflake Arctic Embedding Model' :
-                                                             'Embedding Model for document processing')
-                                                        }</p>
-                                                        <p className="mt-1 text-amber-600 font-medium">Note: Changing the embedding model will require re-ingesting all documents.</p>
-                                                    </div>
-                                                )}
+                                                {(() => {
+                                                    const selectedModel = Array.isArray(embeddingModels) ? 
+                                                        embeddingModels.find(m => getModelName(m) === currentEmbeddingModel) : null;
+                                                    return (
+                                                        <div className="text-sm text-gray-600">
+                                                            <p><strong>Name:</strong> {currentEmbeddingModel}</p>
+                                                            {selectedModel && selectedModel.size && (
+                                                                <p><strong>Size:</strong> {selectedModel.size}</p>
+                                                            )}
+                                                            <p><strong>Description:</strong> {
+                                                                (selectedModel && selectedModel.description) || 
+                                                                (currentEmbeddingModel.includes('bge') ? 'BGE Embedding Model' : 
+                                                                 currentEmbeddingModel.includes('e5') ? 'E5 Embedding Model' :
+                                                                 currentEmbeddingModel.includes('nomic') ? 'Nomic Embedding Model' :
+                                                                 currentEmbeddingModel.includes('mxbai') ? 'MxBai Embedding Model' :
+                                                                 currentEmbeddingModel.includes('arctic') ? 'Snowflake Arctic Embedding Model' :
+                                                                 'Embedding Model for document processing')
+                                                            }</p>
+                                                            <p className="mt-1 text-amber-600 font-medium">Note: Changing the embedding model will require re-ingesting all documents.</p>
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                         )}
                                     </div>
+                                    
+                                    {/* Progress indicator for downloads/processing */}
+                                    {(downloadProgress || isChangingEmbedding) && (
+                                        <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                                            <div className="flex items-center space-x-3">
+                                                <div className="flex-shrink-0">
+                                                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                                                </div>
+                                                <div className="flex-1">
+                                                    <div className="text-sm font-medium text-blue-900">
+                                                        {isChangingEmbedding ? 'Switching embedding model...' : 'Processing...'}
+                                                    </div>
+                                                    {downloadProgress && (
+                                                        <div className="text-sm text-blue-700 mt-1">
+                                                            {downloadProgress}
+                                                        </div>
+                                                    )}
+                                                    <div className="mt-2">
+                                                        <div className="w-full bg-blue-200 rounded-full h-2">
+                                                            <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{width: '45%'}}></div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         </div>
                     )}
                 </div>
             </div>
-            
+
             {/* GPU Compatibility Warning Dialog */}
             {showWarningDialog && warningData && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
@@ -791,45 +861,27 @@ const ModelSettingsPage = () => {
                                         <p className="text-sm text-gray-600">{warningData.compatibility.llm_check?.message}</p>
                                         <p className="text-sm text-gray-600">{warningData.compatibility.embedding_check?.message}</p>
                                         <p className="text-sm font-medium text-gray-800">{warningData.compatibility.combined_check?.message}</p>
-                                        {warningData.compatibility.recommendation && (
-                                            <p className="text-sm text-yellow-700 mt-2">💡 {warningData.compatibility.recommendation}</p>
-                                        )}
                                     </div>
                                 )}
-                                
-                                {warningData.isLargeModel && (
-                                    <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-md">
-                                        <p className="text-sm text-red-800">
-                                            <strong>Large Model Warning:</strong> This model requires significant computational resources. 
-                                            Ensure you have adequate GPU memory (typically 24GB+ for 70B models).
-                                        </p>
-                                    </div>
-                                )}
-                            </div>
-                            
-                            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
-                                <p className="text-sm text-yellow-800">
-                                    <strong>Recommendation:</strong> Consider selecting smaller models (7B-13B) for better performance 
-                                    on consumer hardware, or ensure you have sufficient GPU memory before proceeding.
-                                </p>
                             </div>
                         </div>
                         
                         <div className="flex justify-end space-x-3">
                             <button
-                                onClick={() => {
-                                    setShowWarningDialog(false);
-                                    setWarningData(null);
-                                    setDownloading(false);
-                                    setDownloadProgress('');
-                                }}
+                                onClick={() => setShowWarningDialog(false)}
                                 className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                             >
-                                Choose Different Models
+                                Cancel
                             </button>
                             <button
-                                onClick={() => proceedWithDownload(warningData.payload)}
-                                className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+                                onClick={() => {
+                                    setShowWarningDialog(false);
+                                    // Actually apply the settings that triggered the warning
+                                    if (warningData.action === 'save') {
+                                        handleSaveSettings();
+                                    }
+                                }}
+                                className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
                             >
                                 Proceed Anyway
                             </button>
@@ -837,41 +889,44 @@ const ModelSettingsPage = () => {
                     </div>
                 </div>
             )}
-
+            
             {/* Embedding Model Change Warning Dialog */}
             {showEmbeddingWarning && embeddingWarningData && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div className="bg-white rounded-lg p-6 m-4 max-w-md w-full">
+                    <div className="bg-white rounded-lg p-6 m-4 max-w-lg w-full">
                         <div className="flex items-center mb-4">
                             <div className="flex-shrink-0">
-                                <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                <svg className="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
                                 </svg>
                             </div>
                             <div className="ml-3">
-                                <h3 className="text-lg font-medium text-gray-900">Switch Embedding Model</h3>
+                                <h3 className="text-lg font-medium text-gray-900">⚠️ Change Embedding Model</h3>
                             </div>
                         </div>
                         
                         <div className="mb-6">
                             <p className="text-sm text-gray-600 mb-4">
-                                You are about to switch the embedding model. This will require re-ingesting all documents and may take some time.
+                                Changing the embedding model will require re-ingesting all documents. This process may take some time.
                             </p>
                             
-                            <div className="bg-blue-50 p-4 rounded-md space-y-2">
-                                <p className="text-sm text-gray-700">
-                                    <strong>Current model:</strong> {embeddingWarningData.currentEmbedding || 'None'}
-                                </p>
-                                <p className="text-sm text-gray-700">
-                                    <strong>New model:</strong> {embeddingWarningData.modelName}
-                                </p>
-                            </div>
-                            
-                            <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-md">
-                                <p className="text-sm text-yellow-800">
-                                    <strong>Note:</strong> All existing documents will need to be re-processed with the new embedding model. 
-                                    This process may take several minutes depending on the number of documents.
-                                </p>
+                            <div className="bg-yellow-50 p-4 rounded-md">
+                                <div className="flex">
+                                    <div className="flex-shrink-0">
+                                        <svg className="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                                        </svg>
+                                    </div>
+                                    <div className="ml-3">
+                                        <h3 className="text-sm font-medium text-yellow-800">Important</h3>
+                                        <div className="mt-2 text-sm text-yellow-700">
+                                            <p>• All documents will be re-processed with the new embedding model</p>
+                                            <p>• Search results may differ from the previous model</p>
+                                            <p>• This operation cannot be undone</p>
+                                            <p><strong>Note:</strong> All existing documents will need to be re-processed with the new embedding model. This process may take several minutes depending on the number of documents.</p>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         

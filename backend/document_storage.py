@@ -373,6 +373,69 @@ class DocumentStorageService:
             logger.error(f"Error getting document with config {document_id}: {e}")
             return None
 
+    def update_document_metadata(self, document_id: int, chunking_method: str = None, 
+                                chunk_count: int = None, metadata: Dict = None) -> bool:
+        """Update document metadata after reingestion"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Update document record if chunking method provided
+            if chunking_method:
+                cursor.execute('''
+                    UPDATE documents 
+                    SET chunking_method = ? 
+                    WHERE id = ?
+                ''', (chunking_method, document_id))
+            
+            # Update ingestion metadata if provided
+            if chunk_count is not None or metadata is not None:
+                # Get current embedding model
+                from rag import get_chatpdf_instance
+                rag_instance = get_chatpdf_instance()
+                embedding_model = rag_instance.embedding_model if rag_instance else 'unknown'
+                
+                # Update existing ingestion record
+                update_fields = []
+                update_values = []
+                
+                if chunk_count is not None:
+                    update_fields.append('chunk_count = ?')
+                    update_values.append(chunk_count)
+                
+                if metadata is not None:
+                    update_fields.append('metadata_json = ?')
+                    update_values.append(json.dumps(metadata))
+                
+                if chunking_method:
+                    update_fields.append('chunking_method = ?')
+                    update_values.append(chunking_method)
+                
+                # Add update timestamp
+                update_fields.append('ingested_at = ?')
+                update_values.append(datetime.now().isoformat())
+                
+                # Add WHERE conditions
+                update_values.extend([document_id, embedding_model])
+                
+                query = f'''
+                    UPDATE ingestion_metadata 
+                    SET {', '.join(update_fields)}
+                    WHERE document_id = ? AND embedding_model = ?
+                '''
+                
+                cursor.execute(query, update_values)
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"Updated metadata for document {document_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to update document metadata: {e}")
+            return False
+
     def get_document_file(self, document_id: int) -> str:
         """
         Retrieve document from MinIO and return temporary file path

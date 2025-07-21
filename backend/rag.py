@@ -830,38 +830,142 @@ class ChatPDF:
             return False
     
     def _extract_text_from_pdf(self, pdf_file_path: str) -> str:
-        """Extract text from PDF using multiple methods"""
+        """Extract text from PDF using multiple methods with enhanced error handling"""
+        
+        # Check if file exists and has valid size
+        if not os.path.exists(pdf_file_path):
+            raise ValueError(f"PDF file not found: {pdf_file_path}")
+            
+        file_size = os.path.getsize(pdf_file_path)
+        if file_size == 0:
+            raise ValueError("PDF file is empty")
+            
+        if file_size < 10:  # Minimum PDF size
+            raise ValueError("PDF file too small to be valid")
+        
+        logger.debug(f"Processing PDF file: {pdf_file_path} (size: {file_size} bytes)")
+        
+        # Check file header for valid PDF signature
+        try:
+            with open(pdf_file_path, 'rb') as f:
+                header = f.read(8)
+                if not header.startswith(b'%PDF-'):
+                    logger.warning(f"Invalid PDF header detected: {header}")
+                    # Try to recover if it's a text file misnamed as PDF
+                    try:
+                        with open(pdf_file_path, 'r', encoding='utf-8') as text_file:
+                            content = text_file.read()
+                            if content.strip():
+                                logger.info("File appears to be text, treating as text content")
+                                return content
+                    except:
+                        pass
+                    raise ValueError(f"File does not appear to be a valid PDF (header: {header})")
+        except Exception as e:
+            logger.warning(f"Could not check PDF header: {e}")
+        
+        extraction_errors = []
+        
         try:
             # First try PyPDF2
             logger.debug("Attempting to read PDF with PyPDF2")
             pdf = PdfReader(pdf_file_path)
+            
+            # Check if PDF is encrypted
+            if pdf.is_encrypted:
+                logger.warning("PDF is encrypted, attempting to decrypt with empty password")
+                if not pdf.decrypt(""):
+                    raise ValueError("PDF is encrypted and cannot be decrypted")
+            
             text_content = []
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text.strip():  # Only add non-empty pages
-                    text_content.append(text)
+            total_pages = len(pdf.pages)
+            logger.debug(f"PDF has {total_pages} pages")
+            
+            for i, page in enumerate(pdf.pages):
+                try:
+                    text = page.extract_text()
+                    if text and text.strip():  # Only add non-empty pages
+                        text_content.append(text.strip())
+                        logger.debug(f"Extracted text from page {i+1}/{total_pages}")
+                except Exception as page_error:
+                    logger.warning(f"Failed to extract text from page {i+1}: {page_error}")
+                    continue
             
             if text_content:
                 combined_text = "\n\n".join(text_content)
-                logger.debug(f"Extracted {len(text_content)} pages of text with PyPDF2")
-                return combined_text
+                logger.debug(f"Successfully extracted {len(text_content)} pages of text with PyPDF2")
+                if len(combined_text.strip()) > 10:  # Ensure we have meaningful content
+                    return combined_text
+                else:
+                    logger.warning("PyPDF2 extracted text is too short, trying alternative method")
+            else:
+                logger.warning("PyPDF2 extracted no readable text")
             
         except Exception as e:
-            logger.warning(f"PyPDF2 extraction failed: {str(e)}")
+            error_msg = f"PyPDF2 extraction failed: {str(e)}"
+            logger.warning(error_msg)
+            extraction_errors.append(error_msg)
         
         try:
             # Fallback to langchain's PyPDFLoader
             logger.debug("Attempting to read PDF with langchain PyPDFLoader")
             docs = PyPDFLoader(file_path=pdf_file_path).load()
             if docs:
-                combined_text = "\n\n".join([doc.page_content for doc in docs])
-                logger.debug(f"Extracted text from {len(docs)} pages with PyPDFLoader")
-                return combined_text
+                page_contents = []
+                for i, doc in enumerate(docs):
+                    if doc.page_content and doc.page_content.strip():
+                        page_contents.append(doc.page_content.strip())
+                        logger.debug(f"Extracted content from document {i+1}/{len(docs)}")
+                
+                if page_contents:
+                    combined_text = "\n\n".join(page_contents)
+                    logger.debug(f"Successfully extracted text from {len(page_contents)} pages with PyPDFLoader")
+                    if len(combined_text.strip()) > 10:
+                        return combined_text
+                    else:
+                        logger.warning("PyPDFLoader extracted text is too short")
+                else:
+                    logger.warning("PyPDFLoader extracted no readable content")
                 
         except Exception as e:
-            logger.warning(f"PyPDFLoader extraction failed: {str(e)}")
+            error_msg = f"PyPDFLoader extraction failed: {str(e)}"
+            logger.warning(error_msg)
+            extraction_errors.append(error_msg)
         
-        raise ValueError("Failed to extract text from PDF using any method")
+        # Try one more fallback - treat as binary and search for text patterns
+        try:
+            logger.debug("Attempting binary text extraction as last resort")
+            with open(pdf_file_path, 'rb') as f:
+                content = f.read()
+                # Look for readable text in the binary content
+                text_parts = []
+                # Extract strings that look like readable text
+                import re
+                text_matches = re.findall(rb'[a-zA-Z0-9\s\.,!?;:()]{10,}', content)
+                for match in text_matches[:50]:  # Limit to first 50 matches
+                    try:
+                        decoded = match.decode('utf-8', errors='ignore').strip()
+                        if len(decoded) > 10 and decoded.count(' ') > 2:  # Basic text validation
+                            text_parts.append(decoded)
+                    except:
+                        continue
+                
+                if text_parts:
+                    combined_text = "\n".join(text_parts)
+                    logger.info(f"Extracted {len(text_parts)} text segments from binary content")
+                    if len(combined_text.strip()) > 50:
+                        return combined_text
+                        
+        except Exception as e:
+            error_msg = f"Binary extraction failed: {str(e)}"
+            logger.warning(error_msg)
+            extraction_errors.append(error_msg)
+        
+        # All methods failed
+        all_errors = "; ".join(extraction_errors)
+        error_message = f"Failed to extract text from PDF using any method. Errors: {all_errors}"
+        logger.error(error_message)
+        raise ValueError(error_message)
     
     def _filter_metadata_for_chromadb(self, chunks: List[Document]) -> List[Document]:
         """Filter metadata to keep only ChromaDB-compatible fields"""
@@ -1091,14 +1195,53 @@ class ChatPDF:
                         )
                         continue
                     
-                    success = self._ingest_for_current_model(doc['id'])
-                    if success:
-                        success_count += 1
-                        logger.info(f"Successfully re-ingested: {doc['filename']} ({success_count}/{total_docs})")
-                    else:
-                        logger.warning(f"Failed to re-ingest: {doc['filename']}")
+                    # Attempt ingestion with detailed error handling
+                    try:
+                        success = self._ingest_for_current_model(doc['id'])
+                        if success:
+                            success_count += 1
+                            logger.info(f"Successfully re-ingested: {doc['filename']} ({success_count}/{total_docs})")
+                        else:
+                            logger.warning(f"Failed to re-ingest: {doc['filename']}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                "Ingestion failed - see logs for details"
+                            )
+                    except ValueError as ve:
+                        # Handle PDF extraction and validation errors more gracefully
+                        error_msg = str(ve)
+                        if "PDF" in error_msg or "extract text" in error_msg:
+                            logger.warning(f"PDF processing failed for {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"PDF processing error: {error_msg}"
+                            )
+                        else:
+                            logger.error(f"Document validation failed for {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Document validation error: {error_msg}"
+                            )
+                    except Exception as ie:
+                        # Handle other ingestion errors
+                        logger.error(f"Unexpected error re-ingesting {doc['filename']}: {str(ie)}")
+                        self.doc_storage.mark_ingestion_failed(
+                            doc['id'], 
+                            self.embedding_model, 
+                            f"Ingestion error: {str(ie)}"
+                        )
+                        
                 except Exception as e:
-                    logger.error(f"Error re-ingesting {doc['filename']}: {str(e)}")
+                    logger.error(f"Error processing document {doc.get('filename', 'unknown')}: {str(e)}")
+                    if doc.get('id'):
+                        self.doc_storage.mark_ingestion_failed(
+                            doc['id'], 
+                            self.embedding_model, 
+                            f"Processing error: {str(e)}"
+                        )
             
             logger.info(f"Re-ingestion complete: {success_count}/{total_docs} documents successful")
             

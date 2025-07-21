@@ -2123,31 +2123,174 @@ async def update_models_settings(
                 installed_models = set()
             
             # Check if LLM model needs downloading
+            llm_model_to_check = llm_model
             if llm_model not in installed_models:
-                models_to_download.append(llm_model)
+                # Check common variants for model matching
+                llm_variants = [
+                    llm_model,
+                    f"{llm_model}:latest", 
+                    llm_model.replace(":latest", "")
+                ]
+                model_found = any(variant in installed_models for variant in llm_variants)
+                if not model_found:
+                    models_to_download.append(llm_model)
+                    logger.info(f"LLM model {llm_model} needs to be downloaded")
+                else:
+                    logger.info(f"LLM model {llm_model} (or variant) already installed")
                 
-            # Check if embedding model needs downloading
+            # Check if embedding model needs downloading with special handling for BGE/nomic
+            embedding_model_to_check = embedding_model
             if embedding_model not in installed_models:
-                models_to_download.append(embedding_model)
+                # Check common variants and fix common naming issues
+                embedding_variants = [
+                    embedding_model,
+                    f"{embedding_model}:latest",
+                    embedding_model.replace(":latest", "")
+                ]
+                
+                # Special handling for BGE models
+                if "bge" in embedding_model.lower():
+                    if embedding_model == "bge-m3:1.7M":
+                        # Fix incorrect format - should be bge-m3 not bge-m3:1.7M
+                        embedding_model = "bge-m3"
+                        embedding_model_to_check = "bge-m3"
+                        logger.info(f"Fixed BGE model name from bge-m3:1.7M to bge-m3")
+                    elif embedding_model == "bge-large:335m":
+                        embedding_model = "bge-large"
+                        embedding_model_to_check = "bge-large"
+                        logger.info(f"Fixed BGE model name from bge-large:335m to bge-large")
+                    
+                    embedding_variants.extend([
+                        "bge-m3", "bge-large", "bge-m3:567m", "bge-large:335m"
+                    ])
+                
+                # Special handling for nomic models  
+                if "nomic" in embedding_model.lower():
+                    embedding_variants.extend([
+                        "nomic-embed-text", "nomic-embed-text:33.3M", "nomic-embed-text:latest"
+                    ])
+                
+                model_found = any(variant in installed_models for variant in embedding_variants)
+                if not model_found:
+                    models_to_download.append(embedding_model_to_check)
+                    logger.info(f"Embedding model {embedding_model_to_check} needs to be downloaded")
+                else:
+                    logger.info(f"Embedding model {embedding_model} (or variant) already installed")
             
-            # Download missing models
+            # Download missing models with progress tracking
             for model_name in models_to_download:
                 logger.info(f"Downloading model: {model_name}")
                 try:
-                    download_response = await client.post(
-                        f"{ollama_host}/api/pull",
-                        json={"name": model_name},
-                        timeout=300.0  # 5 minutes timeout for model download
-                    )
-                    
-                    if download_response.status_code != 200:
-                        logger.error(f"Failed to download model {model_name}: {download_response.status_code}")
-                        raise HTTPException(
-                            status_code=500, 
-                            detail=f"Failed to download model {model_name}"
+                    # Use streaming to track download progress
+                    async with httpx.AsyncClient(timeout=600.0) as client:  # 10 minute timeout for downloads
+                        download_response = await client.post(
+                            f"{ollama_host}/api/pull",
+                            json={"name": model_name, "stream": True},
+                            timeout=600.0
                         )
-                    else:
-                        logger.info(f"Successfully downloaded model: {model_name}")
+                        
+                        if download_response.status_code != 200:
+                            logger.error(f"Failed to download model {model_name}: {download_response.status_code}")
+                            raise HTTPException(
+                                status_code=500, 
+                                detail=f"Failed to download model {model_name}: HTTP {download_response.status_code}"
+                            )
+                        
+                        # Process streaming response to track progress
+                        progress_info = {
+                            "status": "downloading",
+                            "completed": 0,
+                            "total": 0,
+                            "downloading": "",
+                            "pulling_fs_layer": "",
+                            "verifying_checksum": "",
+                            "download_complete": "",
+                            "pulling_manifest": "",
+                            "success": False
+                        }
+                        
+                        async for line in download_response.aiter_lines():
+                            if line:
+                                try:
+                                    data = json.loads(line)
+                                    
+                                    # Update progress based on status
+                                    if "status" in data:
+                                        progress_info["status"] = data["status"]
+                                        
+                                    if "completed" in data and "total" in data:
+                                        progress_info["completed"] = data["completed"]
+                                        progress_info["total"] = data["total"]
+                                        
+                                        # Log progress every 10MB
+                                        if data["total"] > 0 and data["completed"] % (10 * 1024 * 1024) == 0:
+                                            percent = (data["completed"] / data["total"]) * 100
+                                            logger.info(f"Downloading {model_name}: {percent:.1f}% complete ({data['completed']}/{data['total']} bytes)")
+                                    
+                                    # Track different stages
+                                    status = data.get("status", "")
+                                    if "pulling manifest" in status.lower():
+                                        progress_info["pulling_manifest"] = status
+                                        logger.info(f"Model {model_name}: {status}")
+                                    elif "downloading" in status.lower():
+                                        progress_info["downloading"] = status
+                                    elif "verifying checksum" in status.lower():
+                                        progress_info["verifying_checksum"] = status
+                                        logger.info(f"Model {model_name}: {status}")
+                                    elif "success" in status.lower() or "pull complete" in status.lower():
+                                        progress_info["success"] = True
+                                        logger.info(f"Model {model_name}: Download completed successfully")
+                                        break
+                                        
+                                except json.JSONDecodeError:
+                                    # Skip non-JSON lines
+                                    continue
+                        
+                        # Verify download completed successfully
+                        if not progress_info["success"]:
+                            # Check one more time if model is now available
+                            check_response = await client.get(f"{ollama_host}/api/tags")
+                            if check_response.status_code == 200:
+                                models_data = check_response.json()
+                                available_models = {model.get('name', '') for model in models_data.get('models', [])}
+                                logger.info(f"Available models after download attempt: {sorted(list(available_models))}")
+                                
+                                # Check for the exact model name and common variants
+                                model_variants = [
+                                    model_name,
+                                    f"{model_name}:latest",
+                                    model_name.replace(":latest", "")
+                                ]
+                                
+                                model_found = None
+                                for variant in model_variants:
+                                    if variant in available_models:
+                                        model_found = variant
+                                        break
+                                
+                                if model_found:
+                                    progress_info["success"] = True
+                                    logger.info(f"Model {model_name} verified as downloaded (found as: {model_found})")
+                                else:
+                                    logger.error(f"Model {model_name} not found in available models. Variants checked: {model_variants}")
+                                    logger.error(f"Available embedding models: {[m for m in available_models if any(term in m.lower() for term in ['embed', 'bge', 'nomic', 'minilm'])]}")
+                        
+                        if progress_info["success"]:
+                            logger.info(f"Successfully downloaded model: {model_name}")
+                        else:
+                            error_msg = f"Model download verification failed: {model_name}"
+                            logger.error(error_msg)
+                            
+                            # For BGE and nomic models, provide specific guidance
+                            if "bge" in model_name.lower():
+                                error_msg += ". BGE models may require specific naming format. Try 'bge-m3' or 'bge-large' instead."
+                            elif "nomic" in model_name.lower():
+                                error_msg += ". Nomic models may require specific naming format. Try 'nomic-embed-text' instead."
+                                
+                            raise HTTPException(
+                                status_code=500, 
+                                detail=error_msg
+                            )
                         
                 except httpx.TimeoutException:
                     logger.error(f"Timeout downloading model {model_name}")
@@ -2168,8 +2311,30 @@ async def update_models_settings(
         # Check if embedding model changed - if so, we need to re-ingest
         embedding_changed = rag.embedding_model != embedding_model
         
-        # Update the models
-        rag.update_models(llm_model, embedding_model)
+        try:
+            # Update the models
+            rag.update_models(llm_model, embedding_model)
+        except Exception as e:
+            logger.error(f"Error updating models: {str(e)}")
+            
+            # Return detailed error information to frontend
+            error_detail = {
+                "error": "MODEL_UPDATE_FAILED",
+                "message": f"Failed to update models: {str(e)}",
+                "llm_model": llm_model,
+                "embedding_model": embedding_model,
+                "downloaded_models": models_to_download,
+                "suggestion": "Please check if the models are compatible with your system or try different models."
+            }
+            
+            # If it's a model not found error, suggest alternative
+            if "not found" in str(e).lower():
+                error_detail["suggestion"] = f"Model '{embedding_model}' not found. Please try a different embedding model or check if the model name is correct."
+            
+            raise HTTPException(
+                status_code=500,
+                detail=error_detail
+            )
         
         # Save settings to config file
         config_path = "model_settings.json"
@@ -2195,9 +2360,25 @@ async def update_models_settings(
             downloaded_list = ", ".join(models_to_download)
             response_data["message"] += f". Downloaded models: {downloaded_list}"
         
-        # If embedding model changed, suggest re-ingestion
+        # If embedding model changed, trigger automatic reingestion
         if embedding_changed:
-            response_data["message"] += ". Embedding model changed - you may want to re-ingest documents."
+            response_data["message"] += ". Embedding model changed - starting automatic reingestion of all documents."
+            response_data["reingestion_started"] = True
+            
+            # Start reingestion in background
+            try:
+                reingestion_result = rag.reingest_all_documents()
+                if reingestion_result:
+                    response_data["message"] += " Reingestion completed successfully."
+                    response_data["reingestion_success"] = True
+                else:
+                    response_data["message"] += " Reingestion failed. Please reingest documents manually."
+                    response_data["reingestion_success"] = False
+            except Exception as reingest_error:
+                logger.warning(f"Automatic reingestion failed: {reingest_error}")
+                response_data["message"] += " Automatic reingestion failed. Please reingest documents manually."
+                response_data["reingestion_success"] = False
+                response_data["reingestion_error"] = str(reingest_error)
             response_data["reingest_suggested"] = True
         
         return response_data
@@ -2219,11 +2400,23 @@ async def update_simple_models_settings(
         import asyncio
         from rag import check_model_compatibility
         
+        # Validate and normalize model names
         llm_model = request.get('llm')
         embedding_model = request.get('embedding')
         
         if not llm_model or not embedding_model:
             raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Normalize model names - fix common issues
+        if embedding_model == "bge-m3:1.7M":
+            embedding_model = "bge-m3"
+            logger.info("Normalized bge-m3:1.7M to bge-m3")
+        elif embedding_model == "bge-large:335m":
+            embedding_model = "bge-large"
+            logger.info("Normalized bge-large:335m to bge-large")
+        elif embedding_model == "nomic-embed-text:33.3M":
+            embedding_model = "nomic-embed-text"
+            logger.info("Normalized nomic-embed-text:33.3M to nomic-embed-text")
         
         # Check GPU compatibility before downloading
         try:
