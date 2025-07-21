@@ -609,9 +609,9 @@ export const api = {
         }
     },
 
-    deleteFile: async (filename) => {
+    deleteFile: async (fileId) => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/files/${encodeURIComponent(filename)}`, {
+            const response = await fetch(`${API_BASE_URL}/api/documents/${encodeURIComponent(fileId)}`, {
                 method: 'DELETE',
                 headers: {
                     ...getAuthHeader()
@@ -927,6 +927,33 @@ export const api = {
             return await response.json();
         } catch (error) {
             console.error('Reingest documents error:', error);
+            throw error;
+        }
+    },
+
+    reingestSpecificDocuments: async (reingestionData) => {
+        try {
+            // reingestionData is an array of {document_id, chunking_method, chunking_config}
+            const requestBody = {
+                documents: reingestionData
+            };
+            
+            const response = await fetch(`${API_BASE_URL}/api/documents/reingest-specific`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(requestBody)
+            });
+            
+            if (!response.ok) {
+                throw new Error('Failed to reingest specific documents');
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('Reingest specific documents error:', error);
             throw error;
         }
     },
@@ -1277,7 +1304,14 @@ export const checkFileExists = async (filename, hash) => {
             throw new Error(`Failed to check file existence: ${response.status}`);
         }
 
-        return await response.json();
+        const result = await response.json();
+        
+        // Return the existing file info only if it actually exists
+        if (result.exists === true) {
+            return result.existing_file;
+        } else {
+            return null; // No duplicate found
+        }
     } catch (error) {
         console.error('Error checking file existence:', error);
         throw error;

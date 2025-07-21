@@ -1223,6 +1223,66 @@ async def reingest_documents(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/documents/reingest-specific")
+async def reingest_specific_documents(
+    request: dict,
+    admin: dict = Depends(check_if_admin)
+):
+    """Re-ingest specific documents with per-document chunking configuration"""
+    try:
+        documents = request.get('documents', [])
+        
+        if not documents:
+            raise HTTPException(status_code=400, detail="No documents provided")
+        
+        # Parse and validate each document configuration
+        parsed_documents = []
+        for doc_config in documents:
+            document_id = doc_config.get('document_id')
+            chunking_method_str = doc_config.get('chunking_method')
+            chunking_config_dict = doc_config.get('chunking_config', {})
+            
+            if not document_id:
+                raise HTTPException(status_code=400, detail="Document ID is required for each document")
+            
+            # Parse chunking method
+            chunking_method = None
+            if chunking_method_str:
+                try:
+                    from chunking_config import ChunkingMethod
+                    chunking_method = ChunkingMethod(chunking_method_str)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"Invalid chunking method: {chunking_method_str}")
+            
+            # Parse chunking config
+            chunking_config = None
+            if chunking_config_dict:
+                try:
+                    from chunking_config import ChunkingConfig
+                    chunking_config = ChunkingConfig.from_dict(chunking_config_dict)
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid chunking config: {str(e)}")
+            
+            parsed_documents.append({
+                'document_id': document_id,
+                'chunking_method': chunking_method,
+                'chunking_config': chunking_config
+            })
+        
+        # Perform reingestion with per-document configuration
+        results = get_rag().reingest_specific_documents_with_config(parsed_documents)
+        
+        return {
+            "message": f"Reingestion completed: {results['successful']}/{results['total']} successful",
+            "results": results
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in specific document reingestion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/documents/{document_id}/retry")
 async def retry_document_processing(
     document_id: int,
@@ -1351,6 +1411,67 @@ async def delete_document(
             return {"message": f"Document {document_id} deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Document not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/documents/bulk-delete")
+async def bulk_delete_documents(
+    request_data: dict,
+    admin: dict = Depends(check_if_admin)
+):
+    """Bulk delete multiple documents from storage"""
+    try:
+        document_ids = request_data.get('document_ids', [])
+        
+        if not document_ids:
+            raise HTTPException(status_code=400, detail="No document IDs provided")
+        
+        if not isinstance(document_ids, list):
+            raise HTTPException(status_code=400, detail="document_ids must be a list")
+        
+        # Validate that all IDs are integers
+        try:
+            document_ids = [int(doc_id) for doc_id in document_ids]
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="All document IDs must be integers")
+        
+        from document_storage import get_document_storage
+        results = get_document_storage().delete_multiple_documents(document_ids)
+        
+        return {
+            "message": f"Bulk deletion completed: {results['successful']} successful, {results['failed']} failed",
+            "results": results
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/clear-all-documents")
+async def clear_all_documents(
+    admin: dict = Depends(check_if_admin)
+):
+    """Clear all documents from storage - admin only"""
+    try:
+        from document_storage import get_document_storage
+        success = get_document_storage().clear_all_documents()
+        if success:
+            return {"message": "All documents cleared successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to clear documents")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/cleanup-orphaned")
+async def cleanup_orphaned_documents(
+    admin: dict = Depends(check_if_admin)
+):
+    """Cleanup orphaned documents - admin only"""
+    try:
+        from document_storage import get_document_storage
+        count = get_document_storage().cleanup_orphaned_documents()
+        return {"message": f"Cleaned up {count} orphaned documents"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2362,15 +2483,12 @@ async def get_optimal_chunking_method(file_extension: str, token: str = Depends(
 def _get_method_description(method: ChunkingMethod) -> str:
     """Get description for chunking method"""
     descriptions = {
-        ChunkingMethod.NAIVE: "Default consecutive chunking based on token limits",
+        ChunkingMethod.GENERAL: "General document chunking for PDF, DOCX, MD, TXT files",
         ChunkingMethod.QA: "For question-answer formatted documents",
         ChunkingMethod.RESUME: "Enterprise edition for resume documents", 
-        ChunkingMethod.MANUAL: "Manual chunking for PDFs",
         ChunkingMethod.TABLE: "For spreadsheet/tabular data",
-        ChunkingMethod.LAWS: "Legal document chunking",
         ChunkingMethod.PRESENTATION: "For PPT/presentation files",
         ChunkingMethod.PICTURE: "Image/visual content processing",
-        ChunkingMethod.ONE: "Treats entire document as single chunk",
         ChunkingMethod.EMAIL: "Email content chunking"
     }
     return descriptions.get(method, "Custom chunking method")

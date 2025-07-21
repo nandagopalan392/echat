@@ -152,20 +152,14 @@ class EnhancedDocumentProcessor:
                               config: ChunkingConfig) -> List[Document]:
         """Apply specific chunking method to documents"""
         
-        if method == ChunkingMethod.ONE:
-            return self._chunk_as_one(documents, config)
-        elif method == ChunkingMethod.NAIVE:
-            return self._chunk_naive(documents, config)
+        if method == ChunkingMethod.GENERAL:
+            return self._chunk_general(documents, config)
         elif method == ChunkingMethod.QA:
             return self._chunk_qa(documents, config)
         elif method == ChunkingMethod.RESUME:
             return self._chunk_resume(documents, config)
-        elif method == ChunkingMethod.MANUAL:
-            return self._chunk_manual(documents, config)
         elif method == ChunkingMethod.TABLE:
             return self._chunk_table(documents, config)
-        elif method == ChunkingMethod.LAWS:
-            return self._chunk_laws(documents, config)
         elif method == ChunkingMethod.PRESENTATION:
             return self._chunk_presentation(documents, config)
         elif method == ChunkingMethod.PICTURE:
@@ -173,10 +167,10 @@ class EnhancedDocumentProcessor:
         elif method == ChunkingMethod.EMAIL:
             return self._chunk_email(documents, config)
         else:
-            # Default to naive chunking
-            return self._chunk_naive(documents, config)
+            # Default to general chunking
+            return self._chunk_general(documents, config)
     
-    def _chunk_naive(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
+    def _chunk_general(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
         """Standard recursive character text splitting"""
         # Parse delimiter string into list of separators
         separators = config.delimiter.split('|') if '|' in config.delimiter else [config.delimiter]
@@ -260,46 +254,7 @@ class EnhancedDocumentProcessor:
         
         return chunks
     
-    def _chunk_manual(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
-        """Manual chunking for PDFs - respect page boundaries"""
-        chunks = []
-        
-        for doc in documents:
-            # If document has page information, split by pages
-            if 'page' in doc.metadata:
-                # Single page document
-                if len(doc.page_content) > config.chunk_token_num:
-                    # Split page if too large
-                    splitter = RecursiveCharacterTextSplitter(
-                        chunk_size=config.chunk_token_num,
-                        chunk_overlap=config.chunk_overlap
-                    )
-                    page_chunks = splitter.split_documents([doc])
-                    chunks.extend(page_chunks)
-                else:
-                    chunks.append(doc)
-            else:
-                # Multi-page document - try to split by page breaks
-                content = doc.page_content
-                page_breaks = [m.start() for m in re.finditer(r'\f|\n\s*\n\s*\n', content)]
-                
-                if page_breaks:
-                    page_breaks = [0] + page_breaks + [len(content)]
-                    for i in range(len(page_breaks) - 1):
-                        start, end = page_breaks[i], page_breaks[i + 1]
-                        page_content = content[start:end].strip()
-                        
-                        if page_content:
-                            chunk = Document(
-                                page_content=page_content,
-                                metadata={'manual_page': i}  # Only simple metadata
-                            )
-                            chunks.append(chunk)
-                else:
-                    # No clear page breaks, use regular chunking
-                    chunks.extend(self._chunk_naive([doc], config))
-        
-        return chunks
+
     
     def _chunk_table(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
         """Table-aware chunking for structured data"""
@@ -333,43 +288,11 @@ class EnhancedDocumentProcessor:
                     chunks.append(chunk)
             else:
                 # Not clearly tabular, use regular chunking
-                chunks.extend(self._chunk_naive([doc], config))
+                chunks.extend(self._chunk_general([doc], config))
         
         return chunks
     
-    def _chunk_laws(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
-        """Legal document chunking based on legal structure"""
-        chunks = []
-        legal_patterns = [
-            r'Article\s+\d+', r'Section\s+\d+', r'Chapter\s+\d+',
-            r'§\s*\d+', r'Paragraph\s+\d+', r'Subsection\s+\d+'
-        ]
-        
-        for doc in documents:
-            content = doc.page_content
-            
-            # Find legal section boundaries
-            boundaries = [0]
-            for pattern in legal_patterns:
-                for match in re.finditer(pattern, content, re.IGNORECASE):
-                    boundaries.append(match.start())
-            
-            boundaries = sorted(set(boundaries))
-            boundaries.append(len(content))
-            
-            # Create chunks for each legal section
-            for i in range(len(boundaries) - 1):
-                start, end = boundaries[i], boundaries[i + 1]
-                chunk_text = content[start:end].strip()
-                
-                if len(chunk_text) > 200:  # Meaningful legal section size
-                    chunk = Document(
-                        page_content=chunk_text,
-                        metadata={'legal_section': True}  # Only simple metadata
-                    )
-                    chunks.append(chunk)
-        
-        return chunks
+
     
     def _chunk_presentation(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
         """Presentation chunking - typically one chunk per slide"""
@@ -528,26 +451,7 @@ class EnhancedDocumentProcessor:
         
         return chunks
     
-    def _chunk_as_one(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
-        """Treat entire document as single chunk"""
-        if not documents:
-            return []
-        
-        # Combine all documents into one
-        combined_content = "\n\n".join(doc.page_content for doc in documents)
-        
-        # Create single chunk with simplified metadata only
-        combined_metadata = {
-            'single_chunk': True,
-            'source_docs': len(documents)
-        }
-        
-        single_chunk = Document(
-            page_content=combined_content,
-            metadata=combined_metadata
-        )
-        
-        return [single_chunk]
+
     
     # Document loading methods
     def _process_pdf(self, file_path: str) -> List[Document]:

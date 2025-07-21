@@ -15,21 +15,18 @@ logger = logging.getLogger(__name__)
 
 class ChunkingMethod(Enum):
     """Enumeration of available chunking methods"""
-    NAIVE = "naive"          # General/Naive - Default consecutive chunking
     QA = "qa"               # Q&A formatted documents  
     RESUME = "resume"       # Resume documents (Enterprise edition)
-    MANUAL = "manual"       # Manual chunking for PDFs
+    GENERAL = "general"     # General document chunking for PDF, DOCX, MD, TXT
     TABLE = "table"         # Spreadsheet/tabular data
-    LAWS = "laws"           # Legal document chunking
     PRESENTATION = "presentation"  # PPT/presentation files
     PICTURE = "picture"     # Image/visual content processing
-    ONE = "one"             # Treats entire document as single chunk
     EMAIL = "email"         # Email content chunking
 
 @dataclass
 class ChunkingConfig:
     """Configuration for document chunking"""
-    method: ChunkingMethod = ChunkingMethod.NAIVE
+    method: ChunkingMethod = ChunkingMethod.QA
     chunk_token_num: int = 1000  # Token threshold for chunk size (128-8192)
     delimiter: str = "\\n!?。；！？"  # Text delimiters
     layout_recognize: str = "auto"  # Layout recognition method
@@ -120,15 +117,12 @@ class FileFormatSupport:
     """File format support by chunking method"""
     
     SUPPORTED_FORMATS = {
-        ChunkingMethod.NAIVE: ['md', 'docx', 'xlsx', 'ppt', 'pptx', 'pdf', 'txt', 'jpeg', 'png', 'csv', 'json', 'eml', 'html'],
         ChunkingMethod.QA: ['md', 'docx', 'txt', 'json', 'pdf'],
         ChunkingMethod.RESUME: ['docx', 'pdf', 'txt'],
-        ChunkingMethod.MANUAL: ['pdf'],
+        ChunkingMethod.GENERAL: ['pdf', 'docx', 'md', 'txt'],
         ChunkingMethod.TABLE: ['xlsx', 'xls', 'csv', 'txt'],
-        ChunkingMethod.LAWS: ['docx', 'pdf', 'txt'],
         ChunkingMethod.PRESENTATION: ['ppt', 'pptx'],
         ChunkingMethod.PICTURE: ['jpeg', 'jpg', 'png', 'tif', 'gif'],
-        ChunkingMethod.ONE: ['docx', 'xlsx', 'pdf', 'txt'],
         ChunkingMethod.EMAIL: ['eml', 'txt']
     }
     
@@ -150,8 +144,10 @@ class FileFormatSupport:
         
         # Mapping of file extensions to optimal methods
         optimal_methods = {
-            'pdf': ChunkingMethod.MANUAL,
-            'docx': ChunkingMethod.NAIVE,
+            'pdf': ChunkingMethod.GENERAL,
+            'docx': ChunkingMethod.GENERAL,
+            'md': ChunkingMethod.GENERAL,
+            'txt': ChunkingMethod.GENERAL,
             'xlsx': ChunkingMethod.TABLE,
             'xls': ChunkingMethod.TABLE,
             'csv': ChunkingMethod.TABLE,
@@ -163,13 +159,11 @@ class FileFormatSupport:
             'gif': ChunkingMethod.PICTURE,
             'tif': ChunkingMethod.PICTURE,
             'eml': ChunkingMethod.EMAIL,
-            'txt': ChunkingMethod.NAIVE,
-            'md': ChunkingMethod.NAIVE,
-            'json': ChunkingMethod.NAIVE,
-            'html': ChunkingMethod.NAIVE
+            'json': ChunkingMethod.QA,
+            'html': ChunkingMethod.QA
         }
         
-        return optimal_methods.get(ext, ChunkingMethod.NAIVE)
+        return optimal_methods.get(ext, ChunkingMethod.GENERAL)
 
 class ChunkingConfigManager:
     """Manager for chunking configurations"""
@@ -185,13 +179,6 @@ class ChunkingConfigManager:
     def _load_default_configs(self) -> Dict[ChunkingMethod, ChunkingConfig]:
         """Load default configurations for each chunking method"""
         defaults = {
-            ChunkingMethod.NAIVE: ChunkingConfig(
-                method=ChunkingMethod.NAIVE,
-                chunk_token_num=1000,
-                chunk_overlap=200,
-                delimiter="\\n\\n|\\n|\\.|\\!|\\?",
-                max_token=4096
-            ),
             ChunkingMethod.QA: ChunkingConfig(
                 method=ChunkingMethod.QA,
                 chunk_token_num=512,
@@ -206,13 +193,15 @@ class ChunkingConfigManager:
                 delimiter="\\n\\n|EXPERIENCE|EDUCATION|SKILLS",
                 max_token=3072
             ),
-            ChunkingMethod.MANUAL: ChunkingConfig(
-                method=ChunkingMethod.MANUAL,
-                chunk_token_num=1500,
-                chunk_overlap=300,
-                delimiter="page_break",
-                max_token=6144,
-                layout_recognize="advanced"
+            ChunkingMethod.GENERAL: ChunkingConfig(
+                method=ChunkingMethod.GENERAL,
+                chunk_token_num=1000,
+                chunk_overlap=200,
+                delimiter="\\n\\n|\\n|\\.|\\!|\\?",
+                max_token=4096,
+                layout_recognize="advanced",
+                preserve_formatting=True,
+                extract_tables=True
             ),
             ChunkingMethod.TABLE: ChunkingConfig(
                 method=ChunkingMethod.TABLE,
@@ -222,13 +211,6 @@ class ChunkingConfigManager:
                 max_token=8192,
                 extract_tables=True,
                 preserve_formatting=True
-            ),
-            ChunkingMethod.LAWS: ChunkingConfig(
-                method=ChunkingMethod.LAWS,
-                chunk_token_num=1200,
-                chunk_overlap=250,
-                delimiter="Article|Section|Chapter|§",
-                max_token=5120
             ),
             ChunkingMethod.PRESENTATION: ChunkingConfig(
                 method=ChunkingMethod.PRESENTATION,
@@ -246,13 +228,6 @@ class ChunkingConfigManager:
                 max_token=2048,
                 extract_images=True,
                 layout_recognize="ocr"
-            ),
-            ChunkingMethod.ONE: ChunkingConfig(
-                method=ChunkingMethod.ONE,
-                chunk_token_num=0,  # No chunking
-                chunk_overlap=0,
-                delimiter="",
-                max_token=32768  # Large single chunk
             ),
             ChunkingMethod.EMAIL: ChunkingConfig(
                 method=ChunkingMethod.EMAIL,
@@ -286,7 +261,7 @@ class ChunkingConfigManager:
                     logger.warning(f"Failed to load user config {user_config_path}: {e}")
         
         # Fall back to default config
-        return self.default_configs.get(method, self.default_configs[ChunkingMethod.NAIVE])
+        return self.default_configs.get(method, self.default_configs[ChunkingMethod.GENERAL])
     
     def save_config(self, method: ChunkingMethod, config: ChunkingConfig, user_id: Optional[str] = None):
         """Save configuration for a chunking method"""

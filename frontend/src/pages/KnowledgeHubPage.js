@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import FolderUploadReview from '../components/FolderUploadReview';
 import FileUploadReview from '../components/FileUploadReview';
+import DocumentReingestionModal from '../components/DocumentReingestionModal';
 
 // Add custom styles for resizable table
 const tableStyles = `
@@ -107,7 +108,7 @@ const KnowledgeHubPage = () => {
     const [isReingesting, setIsReingesting] = useState(false);
     const [activeTab, setActiveTab] = useState('documents');
     const [chunkingMethods, setChunkingMethods] = useState([]);
-    const [selectedMethod, setSelectedMethod] = useState('naive');
+    const [selectedMethod, setSelectedMethod] = useState('general');
     const [methodConfigs, setMethodConfigs] = useState({});
     const [defaultConfigs, setDefaultConfigs] = useState({});
     const [activeConfig, setActiveConfig] = useState(null);
@@ -127,6 +128,17 @@ const KnowledgeHubPage = () => {
     const [showFileUploadReview, setShowFileUploadReview] = useState(false);
     const [selectedFilesForReview, setSelectedFilesForReview] = useState([]);
     const [processingDocuments, setProcessingDocuments] = useState(new Set());
+
+    // Document management states
+    const [selectedDocuments, setSelectedDocuments] = useState(new Set());
+    const [searchTerm, setSearchTerm] = useState('');
+    const [showReingestionDialog, setShowReingestionDialog] = useState(false);
+    const [reingestionConfig, setReingestionConfig] = useState({
+        chunkingMethod: 'general',
+        chunkSize: 1000,
+        chunkOverlap: 200
+    });
+    const [showAdvancedReingestionConfig, setShowAdvancedReingestionConfig] = useState(false);
 
     // Utility function to extract just the filename from a path
     const extractFilename = (filepath) => {
@@ -282,7 +294,7 @@ const KnowledgeHubPage = () => {
             
             // Set active config to default method
             if (methodsList.length > 0) {
-                const defaultMethod = methodsList.includes('naive') ? 'naive' : methodsList[0];
+                const defaultMethod = methodsList.includes('general') ? 'general' : methodsList[0];
                 setSelectedMethod(defaultMethod);
                 setActiveConfig(configs[defaultMethod] || null);
             }
@@ -438,29 +450,29 @@ const KnowledgeHubPage = () => {
     // Method recommendation based on file type
     const getRecommendedMethod = (fileExtension, fileType) => {
         const recommendations = {
-            'pdf': ['manual', 'naive', 'qa'],
-            'docx': ['naive', 'resume', 'qa'],
-            'doc': ['naive', 'resume', 'qa'],
+            'pdf': ['general', 'qa'],
+            'docx': ['general', 'resume', 'qa'],
+            'doc': ['general', 'resume', 'qa'],
             'pptx': ['presentation'],
             'ppt': ['presentation'],
             'xlsx': ['table'],
             'xls': ['table'],
             'csv': ['table'],
-            'txt': ['naive', 'qa'],
-            'md': ['naive', 'qa'],
+            'txt': ['general', 'qa'],
+            'md': ['general', 'qa'],
             'jpg': ['picture'],
             'jpeg': ['picture'],
             'png': ['picture'],
             'gif': ['picture'],
             'tif': ['picture'],
             'tiff': ['picture'],
-            'json': ['naive'],
-            'html': ['naive'],
-            'htm': ['naive'],
+            'json': ['qa'],
+            'html': ['general'],
+            'htm': ['general'],
             'eml': ['email']
         };
 
-        return recommendations[fileExtension] || ['naive'];
+        return recommendations[fileExtension] || ['general'];
     };
 
     // Check if current method is good for file type
@@ -471,18 +483,18 @@ const KnowledgeHubPage = () => {
         const warnings = {
             'pdf': {
                 bad: ['resume', 'picture', 'presentation'],
-                message: 'PDF files work best with Manual, Naive, or Q&A chunking methods'
+                message: 'PDF files work best with General or Q&A chunking methods'
             },
             'docx': {
                 bad: ['picture', 'presentation', 'table'],
-                message: 'Word documents work best with Naive, Resume, or Q&A chunking methods'
+                message: 'Word documents work best with General, Resume, or Q&A chunking methods'
             },
             'pptx': {
-                bad: ['resume', 'qa', 'naive', 'picture'],
+                bad: ['resume', 'qa', 'general', 'picture'],
                 message: 'PowerPoint files should use Presentation chunking method'
             },
             'jpg': {
-                bad: ['resume', 'naive', 'qa', 'table'],
+                bad: ['resume', 'general', 'qa', 'table'],
                 message: 'Image files should use Picture chunking method'
             },
             'xlsx': {
@@ -729,15 +741,20 @@ const KnowledgeHubPage = () => {
         }
     };
 
-    const handleDeleteFile = async (filename) => {
-        if (window.confirm(`Are you sure you want to delete "${filename}"?`)) {
+    const handleDeleteFile = async (file) => {
+        const displayName = file.filename || file.name || 'Unknown file';
+        if (window.confirm(`Are you sure you want to delete "${displayName}"?`)) {
             try {
-                await api.deleteFile(filename);
+                // Ensure we have a valid file ID
+                if (!file.id) {
+                    throw new Error('File ID is required for deletion');
+                }
+                await api.deleteFile(file.id);
                 await loadFiles();
-                alert('File deleted successfully!');
+                showValidationToast('✅ File deleted successfully!', 'success');
             } catch (error) {
                 console.error('Error deleting file:', error);
-                alert('Error deleting file. Please try again.');
+                showValidationToast(`❌ Error deleting file: ${error.message}`, 'error');
             }
         }
     };
@@ -765,6 +782,114 @@ const KnowledgeHubPage = () => {
         }
     };
 
+    // Document selection handlers
+    const handleDocumentSelection = (filename, isSelected) => {
+        setSelectedDocuments(prev => {
+            const newSet = new Set(prev);
+            if (isSelected) {
+                newSet.add(filename);
+            } else {
+                newSet.delete(filename);
+            }
+            return newSet;
+        });
+    };
+
+    // Handle individual document selection
+    const handleDocumentSelect = (documentId) => {
+        setSelectedDocuments(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(documentId)) {
+                newSet.delete(documentId);
+            } else {
+                newSet.add(documentId);
+            }
+            return newSet;
+        });
+    };
+
+    const handleSelectAllDocuments = () => {
+        const filteredFileList = getFilteredFiles();
+        if (selectedDocuments.size === filteredFileList.length && filteredFileList.length > 0) {
+            setSelectedDocuments(new Set());
+        } else {
+            setSelectedDocuments(new Set(filteredFileList.map(f => f.id)));
+        }
+    };
+
+    // Bulk delete handler
+    const handleBulkDelete = async () => {
+        if (selectedDocuments.size === 0) return;
+        
+        const count = selectedDocuments.size;
+        if (!window.confirm(`Are you sure you want to delete ${count} selected document${count !== 1 ? 's' : ''}?`)) {
+            return;
+        }
+
+        try {
+            // Get the file objects for selected documents by ID
+            const selectedFiles = files.filter(f => selectedDocuments.has(f.id));
+            
+            for (const file of selectedFiles) {
+                // Ensure we have a valid file ID
+                if (!file.id) {
+                    throw new Error(`File ID is required for deletion: ${file.filename}`);
+                }
+                await api.deleteFile(file.id);
+            }
+            await loadFiles();
+            setSelectedDocuments(new Set());
+            showValidationToast(`✅ Successfully deleted ${count} document${count !== 1 ? 's' : ''}!`, 'success');
+        } catch (error) {
+            console.error('Error deleting files:', error);
+            showValidationToast(`❌ Error deleting files: ${error.message}`, 'error');
+        }
+    };
+
+    // Bulk reingestion handler
+    const handleBulkReingestion = () => {
+        if (selectedDocuments.size === 0) return;
+        
+        setShowReingestionDialog(true);
+    };
+
+    // Handle confirm reingestion with per-document configuration
+    const handleConfirmReingestion = async (reingestionData) => {
+        if (!reingestionData || reingestionData.length === 0) return;
+        
+        setIsReingesting(true);
+        try {
+            const result = await api.reingestSpecificDocuments(reingestionData);
+            
+            if (result.results.successful > 0) {
+                showValidationToast(`✅ Successfully reingested ${result.results.successful}/${result.results.total} documents`, 'success');
+                
+                // Refresh the documents list
+                await loadFiles();
+            } else {
+                showValidationToast(`⚠️ No documents were successfully reingested. Check the logs for details.`, 'warning');
+            }
+            
+            // Close dialog and clear selection
+            setShowReingestionDialog(false);
+            setSelectedDocuments(new Set());
+            
+        } catch (error) {
+            console.error('Error reingesting documents:', error);
+            showValidationToast(`❌ Error reingesting documents: ${error.message}`, 'error');
+        } finally {
+            setIsReingesting(false);
+        }
+    };
+
+    // Filter files based on search term
+    const getFilteredFiles = () => {
+        if (!searchTerm) return files;
+        return files.filter(file => 
+            file.filename.toLowerCase().includes(searchTerm.toLowerCase())
+        );
+    };
+
     const formatFileSize = (bytes) => {
         if (bytes === 0) return '0 Bytes';
         const k = 1024;
@@ -785,15 +910,12 @@ const KnowledgeHubPage = () => {
 
     const formatChunkingMethod = (method) => {
         const methodMap = {
-            'naive': 'General',
+            'general': 'General',
             'qa': 'Q&A',
             'resume': 'Resume',
-            'manual': 'Manual',
             'table': 'Table',
-            'laws': 'Legal',
             'presentation': 'Presentation',
             'picture': 'Image',
-            'one': 'Single Chunk',
             'email': 'Email'
         };
         return methodMap[method] || method || 'General';
@@ -1108,30 +1230,86 @@ const KnowledgeHubPage = () => {
                                 </div>
                             ) : (
                                 <>
-                                    {/* Table Controls */}
-                                    <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
-                                        <div className="text-sm text-gray-600">
-                                            💡 <span className="font-medium">Tip:</span> Drag the handles at column borders to resize widths. Filenames wrap automatically.
+                                    {/* Search and Bulk Actions */}
+                                    <div className="mb-4 space-y-4">
+                                        {/* Search and Select All Row */}
+                                        <div className="flex flex-wrap items-center justify-between gap-4">
+                                            <div className="flex items-center space-x-4">
+                                                {/* Search Input */}
+                                                <div className="relative">
+                                                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                                        <svg className="h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                                                        </svg>
+                                                    </div>
+                                                    <input
+                                                        type="text"
+                                                        placeholder="Search documents..."
+                                                        value={searchTerm}
+                                                        onChange={(e) => setSearchTerm(e.target.value)}
+                                                        className="pl-10 pr-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+                                                    />
+                                                </div>
+                                                
+                                                {/* Select All Checkbox */}
+                                                <label className="flex items-center space-x-2 text-sm text-gray-600 cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selectedDocuments.size === getFilteredFiles().length && getFilteredFiles().length > 0}
+                                                        onChange={handleSelectAllDocuments}
+                                                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                                    />
+                                                    <span>Select All ({getFilteredFiles().length})</span>
+                                                </label>
+                                            </div>
+                                            
+                                            {/* Bulk Actions */}
+                                            {selectedDocuments.size > 0 && (
+                                                <div className="flex items-center space-x-2">
+                                                    <span className="text-sm text-gray-600">
+                                                        {selectedDocuments.size} selected
+                                                    </span>
+                                                    <button
+                                                        onClick={handleBulkDelete}
+                                                        className="px-3 py-2 bg-red-600 text-white text-sm rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
+                                                    >
+                                                        Delete Selected
+                                                    </button>
+                                                    <button
+                                                        onClick={handleBulkReingestion}
+                                                        className="px-3 py-2 bg-indigo-600 text-white text-sm rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                                    >
+                                                        Reingest Selected
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
-                                        <div className="flex items-center space-x-2">
-                                            <button 
-                                                onClick={() => {
-                                                    // Reset to default column widths
-                                                    const table = document.querySelector('.resizable-table');
-                                                    if (table) {
-                                                        const ths = table.querySelectorAll('th');
-                                                        const defaultWidths = ['30%', '10%', '8%', '12%', '10%', '15%', '15%'];
-                                                        ths.forEach((th, index) => {
-                                                            if (defaultWidths[index]) {
-                                                                th.style.width = defaultWidths[index];
-                                                            }
-                                                        });
-                                                    }
-                                                }}
-                                                className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1 rounded-md transition-colors"
-                                            >
-                                                Reset Columns
-                                            </button>
+                                        
+                                        {/* Table Controls */}
+                                        <div className="flex flex-wrap items-center justify-between gap-4">
+                                            <div className="text-sm text-gray-600">
+                                                💡 <span className="font-medium">Tip:</span> Drag the handles at column borders to resize widths. Filenames wrap automatically.
+                                            </div>
+                                            <div className="flex items-center space-x-2">
+                                                <button 
+                                                    onClick={() => {
+                                                        // Reset to default column widths
+                                                        const table = document.querySelector('.resizable-table');
+                                                        if (table) {
+                                                            const ths = table.querySelectorAll('th');
+                                                            const defaultWidths = ['5%', '25%', '10%', '8%', '12%', '10%', '15%', '15%'];
+                                                            ths.forEach((th, index) => {
+                                                                if (defaultWidths[index]) {
+                                                                    th.style.width = defaultWidths[index];
+                                                                }
+                                                            });
+                                                        }
+                                                    }}
+                                                    className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1 rounded-md transition-colors"
+                                                >
+                                                    Reset Columns
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                     
@@ -1139,8 +1317,17 @@ const KnowledgeHubPage = () => {
                                     <table className="min-w-full divide-y divide-gray-200 resizable-table">
                                         <thead className="bg-gray-50">
                                             <tr>
+                                                <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
+                                                    style={{width: '5%', minWidth: '50px'}}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selectedDocuments.size === getFilteredFiles().length && getFilteredFiles().length > 0}
+                                                        onChange={handleSelectAllDocuments}
+                                                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                                    />
+                                                </th>
                                                 <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" 
-                                                    style={{width: '30%', minWidth: '200px'}}>
+                                                    style={{width: '25%', minWidth: '200px'}}>
                                                     File Name
                                                 </th>
                                                 <th className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider actions-cell" 
@@ -1170,8 +1357,16 @@ const KnowledgeHubPage = () => {
                                             </tr>
                                         </thead>
                                         <tbody className="bg-white divide-y divide-gray-200">
-                                            {files.map((file) => (
+                                            {getFilteredFiles().map((file) => (
                                                 <tr key={file.filename} className="hover:bg-gray-50">
+                                                    <td className="px-3 py-4">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedDocuments.has(file.id)}
+                                                            onChange={() => handleDocumentSelect(file.id)}
+                                                            className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                                        />
+                                                    </td>
                                                     <td className="px-4 py-4 filename-cell">
                                                         <div className="flex items-start">
                                                             <div className="flex-shrink-0 h-8 w-8 mt-1">
@@ -1246,7 +1441,7 @@ const KnowledgeHubPage = () => {
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
                                                                         setOpenDropdown(null);
-                                                                        handleDeleteFile(file.filename);
+                                                                        handleDeleteFile(file);
                                                                     }}
                                                                     className="text-red-600 block px-4 py-2 text-sm hover:bg-gray-100 w-full text-left"
                                                                     role="menuitem"
@@ -1308,6 +1503,17 @@ const KnowledgeHubPage = () => {
                                 </div>
                                 </>
                             )}
+                            
+                            {/* Document Reingestion Modal */}
+                            <DocumentReingestionModal
+                                selectedDocuments={selectedDocuments}
+                                onReingestion={handleConfirmReingestion}
+                                onCancel={() => setShowReingestionDialog(false)}
+                                isVisible={showReingestionDialog}
+                                isProcessing={isReingesting}
+                                documents={files}
+                                defaultConfigs={defaultConfigs}
+                            />
                         </div>
                     )}
 

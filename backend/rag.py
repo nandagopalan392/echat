@@ -12,6 +12,8 @@ import asyncio
 import httpx
 import requests
 import traceback
+import sqlite3
+from typing import List
 # Set up some reasonable defaults for ChromaDB
 os.environ["CHROMA_SERVER_NOFILE"] = "65536"
 from langchain_community.document_loaders import PyPDFLoader
@@ -26,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import aiohttp
 import json
+from chunking_config import ChunkingMethod, ChunkingConfig
 import time
 from PyPDF2 import PdfReader  # Add this import
 import time
@@ -1689,7 +1692,7 @@ class ChatPDF:
             return False
 
     def remove_document_from_vectorstore(self, filename: str) -> bool:
-        """Remove document chunks from vector store"""
+        """Remove document chunks from vector store by filename"""
         try:
             if not self.vector_store:
                 logger.warning("Vector store not initialized")
@@ -1729,6 +1732,86 @@ class ChatPDF:
                 
         except Exception as e:
             logger.error(f"Error removing document from vectorstore: {e}")
+            return False
+
+    def remove_document_by_id(self, document_id: int, embedding_models: List[str] = None) -> bool:
+        """Remove document chunks from vector store by document ID across embedding models"""
+        try:
+            if not self.vector_store:
+                logger.warning("Vector store not initialized")
+                return False
+            
+            # If no specific models provided, get all models that have ingested this document
+            if not embedding_models:
+                try:
+                    from document_storage import get_document_storage
+                    doc_storage = get_document_storage()
+                    
+                    # Get all embedding models that have ingested this document
+                    conn = sqlite3.connect(doc_storage.db_path)
+                    cursor = conn.cursor()
+                    
+                    cursor.execute('''
+                        SELECT DISTINCT embedding_model 
+                        FROM ingestion_metadata 
+                        WHERE document_id = ? AND ingestion_status = 'completed'
+                    ''', (document_id,))
+                    
+                    rows = cursor.fetchall()
+                    conn.close()
+                    
+                    embedding_models = [row[0] for row in rows] if rows else [self.embedding_model]
+                    
+                except Exception as e:
+                    logger.warning(f"Could not determine embedding models for document {document_id}: {e}")
+                    # Fallback to current embedding model
+                    embedding_models = [self.embedding_model]
+            
+            total_deleted = 0
+            
+            # Get ChromaDB client
+            chroma_client = self.vector_store._client
+            
+            # Remove from all relevant embedding model collections
+            for model in embedding_models:
+                try:
+                    collection_name = f"collection_{model.replace('/', '_').replace('-', '_')}"
+                    
+                    # Get the collection
+                    try:
+                        collection = chroma_client.get_collection(collection_name)
+                    except Exception as e:
+                        logger.warning(f"Collection {collection_name} not found: {e}")
+                        continue
+                    
+                    # Query for documents with this document_id in metadata
+                    try:
+                        results = collection.get(
+                            where={"document_id": str(document_id)}
+                        )
+                        
+                        if results and results.get('ids'):
+                            # Delete all chunks for this document
+                            collection.delete(ids=results['ids'])
+                            deleted_count = len(results['ids'])
+                            total_deleted += deleted_count
+                            logger.info(f"Removed {deleted_count} chunks for document {document_id} from model {model}")
+                        else:
+                            logger.info(f"No chunks found for document {document_id} in model {model}")
+                            
+                    except Exception as e:
+                        logger.error(f"Error removing document {document_id} from vector store {model}: {e}")
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Error processing model {model} for document {document_id}: {e}")
+                    continue
+            
+            logger.info(f"Successfully removed document {document_id} from vector stores. Total chunks deleted: {total_deleted}")
+            return True
+                
+        except Exception as e:
+            logger.error(f"Error removing document {document_id} from vectorstore: {e}")
             return False
 
     def clear_vectorstore(self):
@@ -1777,6 +1860,398 @@ class ChatPDF:
                 "models_loaded": self.models_loaded
             }
     
+    def reingest_specific_documents(self, document_ids: List[int], 
+                                   chunking_method: ChunkingMethod = None,
+                                   chunking_config: ChunkingConfig = None) -> Dict[str, any]:
+        """
+        Reingest specific documents with optional new chunking configuration
+        
+        Flow:
+        1. Check if documents exist in DB and MinIO
+        2. Delete old chunks from vector store for each document+model
+        3. Download files from MinIO (no re-upload needed)
+        4. Re-apply chunking using stored or provided chunking configuration
+        5. Regenerate embeddings using current embedding model
+        6. Re-index chunks into vector store
+        7. Update ingestion metadata in SQLite DB
+        """
+        try:
+            logger.info(f"Starting reingestion of {len(document_ids)} documents")
+            
+            results = {
+                'total': len(document_ids),
+                'successful': 0,
+                'failed': 0,
+                'failed_ids': [],
+                'details': []
+            }
+            
+            for doc_id in document_ids:
+                try:
+                    # Step 1: Check if document exists in DB and MinIO
+                    doc_info = self.doc_storage.get_document_with_config(doc_id)
+                    if not doc_info:
+                        logger.warning(f"Document {doc_id} not found in database")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'status': 'failed',
+                            'error': 'Document not found in database'
+                        })
+                        continue
+                    
+                    if not self.doc_storage.document_exists_in_storage(doc_id):
+                        logger.warning(f"Document {doc_id} not found in MinIO storage")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'filename': doc_info['filename'],
+                            'status': 'failed',
+                            'error': 'Document not found in MinIO storage'
+                        })
+                        continue
+                    
+                    # Step 2: Delete old chunks from vector store for this document+model
+                    logger.info(f"Removing old chunks for document {doc_id}")
+                    try:
+                        self.remove_document_by_id(doc_id, [self.embedding_model])
+                    except Exception as e:
+                        logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
+                    
+                    # Step 3: Download file from MinIO (temporary file)
+                    temp_file_path = self.doc_storage.get_document_file(doc_id)
+                    
+                    try:
+                        # Step 4: Determine chunking configuration to use
+                        if chunking_method is None:
+                            # Use stored chunking method
+                            stored_method = doc_info.get('chunking_method', 'general')
+                            try:
+                                chunking_method = ChunkingMethod(stored_method)
+                            except ValueError:
+                                logger.warning(f"Unknown stored chunking method '{stored_method}', using general")
+                                chunking_method = ChunkingMethod.GENERAL
+                        
+                        if chunking_config is None:
+                            # Use stored chunking config if available
+                            stored_config = doc_info.get('chunking_config')
+                            if stored_config:
+                                chunking_config = ChunkingConfig.from_dict(stored_config)
+                            else:
+                                # Get default config for the method
+                                from chunking_config import get_chunking_config_manager
+                                config_manager = get_chunking_config_manager()
+                                chunking_config = config_manager.get_config(chunking_method)
+                        
+                        logger.info(f"Reingesting document {doc_id} with method {chunking_method.value}")
+                        
+                        # Step 5-7: Process document with enhanced processor
+                        from enhanced_document_processor import get_document_processor
+                        doc_processor = get_document_processor()
+                        
+                        chunking_result = doc_processor.process_document(
+                            temp_file_path,
+                            chunking_method,
+                            chunking_config,
+                            None,  # user_id not needed for reingestion
+                            doc_info['filename']
+                        )
+                        
+                        if not chunking_result.chunks:
+                            raise ValueError("No chunks created during reprocessing")
+                        
+                        logger.info(f"Document {doc_id} reprocessed: {len(chunking_result.chunks)} chunks created")
+                        
+                        # Add chunks to vector store
+                        collection_name = self._get_collection_name()
+                        success = self._add_chunks_to_vector_store(chunking_result.chunks, collection_name)
+                        
+                        if success:
+                            # Update ingestion metadata
+                            simple_metadata = {
+                                'total_chunks': len(chunking_result.chunks),
+                                'method_used': chunking_result.method_used.value,
+                                'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                                'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                                'warnings_count': len(chunking_result.warnings),
+                                'reingestion': True
+                            }
+                            
+                            if chunking_result.warnings:
+                                simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])
+                            
+                            self.doc_storage.track_ingestion(
+                                document_id=doc_id,
+                                embedding_model=self.embedding_model,
+                                vector_store_collection=collection_name,
+                                chunk_count=len(chunking_result.chunks),
+                                metadata=simple_metadata,
+                                chunking_method=chunking_result.method_used.value,
+                                chunking_config=chunking_result.config_used.to_dict()
+                            )
+                            
+                            results['successful'] += 1
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'success',
+                                'chunks_created': len(chunking_result.chunks),
+                                'method_used': chunking_result.method_used.value
+                            })
+                            
+                            logger.info(f"Successfully reingested document {doc_id}: {doc_info['filename']}")
+                        else:
+                            raise ValueError("Failed to add chunks to vector store")
+                    
+                    finally:
+                        # Clean up temporary file
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                
+                except Exception as e:
+                    logger.error(f"Error reingesting document {doc_id}: {e}")
+                    results['failed'] += 1
+                    results['failed_ids'].append(doc_id)
+                    results['details'].append({
+                        'document_id': doc_id,
+                        'filename': doc_info.get('filename', f'document_{doc_id}'),
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+                    
+                    # Mark as failed in database
+                    self.doc_storage.mark_ingestion_failed(
+                        doc_id,
+                        self.embedding_model,
+                        f"Reingestion failed: {str(e)}"
+                    )
+            
+            logger.info(f"Reingestion complete: {results['successful']}/{results['total']} successful")
+            
+            # Ensure retriever is updated if any documents were successfully reingested
+            if results['successful'] > 0:
+                try:
+                    self._ensure_retriever_initialized()
+                    logger.info("Retriever reinitialized after reingestion")
+                except Exception as e:
+                    logger.warning(f"Failed to reinitialize retriever: {e}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error during document reingestion: {e}")
+            return {
+                'total': len(document_ids),
+                'successful': 0,
+                'failed': len(document_ids),
+                'failed_ids': document_ids,
+                'error': str(e)
+            }
+
+    def reingest_specific_documents_with_config(self, documents_config: List[dict]) -> dict:
+        """
+        Re-ingest specific documents with per-document chunking configuration
+        Each document can have its own chunking method and config
+        
+        Args:
+            documents_config: List of dicts with keys:
+                - document_id: int
+                - chunking_method: ChunkingMethod (optional)
+                - chunking_config: ChunkingConfig (optional)
+        
+        Returns:
+            Dict with reingestion results
+        """
+        try:
+            logger.info(f"Starting reingestion of {len(documents_config)} documents with per-document configuration")
+            
+            results = {
+                'total': len(documents_config),
+                'successful': 0,
+                'failed': 0,
+                'failed_ids': [],
+                'details': []
+            }
+            
+            for doc_config in documents_config:
+                doc_id = doc_config['document_id']
+                chunking_method = doc_config.get('chunking_method')
+                chunking_config = doc_config.get('chunking_config')
+                
+                try:
+                    # Step 1: Check if document exists in DB and MinIO
+                    doc_info = self.doc_storage.get_document_with_config(doc_id)
+                    if not doc_info:
+                        logger.warning(f"Document {doc_id} not found in database")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'status': 'failed',
+                            'error': 'Document not found in database'
+                        })
+                        continue
+                    
+                    if not self.doc_storage.document_exists_in_storage(doc_id):
+                        logger.warning(f"Document {doc_id} not found in MinIO storage")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'filename': doc_info['filename'],
+                            'status': 'failed',
+                            'error': 'Document not found in MinIO storage'
+                        })
+                        continue
+                    
+                    # Step 2: Delete old chunks from vector store for this document+model
+                    logger.info(f"Removing old chunks for document {doc_id}")
+                    try:
+                        self.remove_document_by_id(doc_id, [self.embedding_model])
+                    except Exception as e:
+                        logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
+                    
+                    # Step 3: Download file from MinIO (temporary file)
+                    temp_file_path = self.doc_storage.get_document_file(doc_id)
+                    
+                    try:
+                        # Step 4: Determine chunking configuration to use
+                        if chunking_method is None:
+                            # Use stored chunking method
+                            stored_method = doc_info.get('chunking_method', 'general')
+                            try:
+                                chunking_method = ChunkingMethod(stored_method)
+                            except ValueError:
+                                logger.warning(f"Unknown stored chunking method '{stored_method}', using general")
+                                chunking_method = ChunkingMethod.GENERAL
+                        
+                        if chunking_config is None:
+                            # Use stored chunking config if available
+                            stored_config = doc_info.get('chunking_config')
+                            if stored_config:
+                                chunking_config = ChunkingConfig.from_dict(stored_config)
+                            else:
+                                # Get default config for the method
+                                from chunking_config import get_chunking_config_manager
+                                config_manager = get_chunking_config_manager()
+                                chunking_config = config_manager.get_config(chunking_method)
+                        
+                        logger.info(f"Reingesting document {doc_id} with method {chunking_method.value}")
+                        
+                        # Step 5-7: Process document with enhanced processor
+                        from enhanced_document_processor import get_document_processor
+                        doc_processor = get_document_processor()
+                        
+                        chunking_result = doc_processor.process_document(
+                            temp_file_path,
+                            chunking_method,
+                            chunking_config,
+                            None,  # user_id not needed for reingestion
+                            doc_info['filename']
+                        )
+                        
+                        if not chunking_result.chunks:
+                            results['failed'] += 1
+                            results['failed_ids'].append(doc_id)
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'failed',
+                                'error': 'No chunks generated during processing'
+                            })
+                            continue
+                        
+                        # Add to vector store using existing ingest flow
+                        collection_name = f"embeddings_{self.embedding_model.replace('-', '_')}"
+                        
+                        # Track ingestion metadata
+                        simple_metadata = {
+                            'method_used': chunking_result.method_used.value,
+                            'chunk_count': len(chunking_result.chunks),
+                            'file_format': chunking_result.metadata.get('file_format', 'unknown') if chunking_result.metadata else 'unknown',
+                            'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                            'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                            'warnings_count': len(chunking_result.warnings) if chunking_result.warnings else 0
+                        }
+                        
+                        if chunking_result.warnings:
+                            simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])
+                        
+                        # Add chunks directly to vector store
+                        success = self._add_chunks_to_vector_store(chunking_result.chunks, collection_name)
+                        
+                        if success:
+                            # Update document metadata in storage
+                            try:
+                                self.storage.update_document_metadata(
+                                    doc_id,
+                                    chunking_method=chunking_result.method_used.value,
+                                    chunk_count=len(chunking_result.chunks),
+                                    metadata=simple_metadata
+                                )
+                            except Exception as storage_error:
+                                logger.warning(f"Failed to update document metadata: {storage_error}")
+                                # Continue anyway as the reingestion was successful
+                        
+                        if success:
+                            results['successful'] += 1
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'success',
+                                'chunks_created': len(chunking_result.chunks),
+                                'method_used': chunking_result.method_used.value
+                            })
+                            logger.info(f"Successfully reingested document {doc_id}: {doc_info['filename']}")
+                        else:
+                            results['failed'] += 1
+                            results['failed_ids'].append(doc_id)
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'failed',
+                                'error': 'Failed during vector store ingestion'
+                            })
+                    
+                    finally:
+                        # Clean up temporary file
+                        if temp_file_path and os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                
+                except Exception as e:
+                    logger.error(f"Error reingesting document {doc_id}: {e}")
+                    results['failed'] += 1
+                    results['failed_ids'].append(doc_id)
+                    results['details'].append({
+                        'document_id': doc_id,
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+            
+            logger.info(f"Reingestion complete: {results['successful']}/{results['total']} successful")
+            
+            # Ensure retriever is updated if any documents were successfully reingested
+            if results['successful'] > 0:
+                try:
+                    self._ensure_retriever_initialized()
+                    logger.info("Retriever reinitialized after reingestion")
+                except Exception as e:
+                    logger.warning(f"Failed to reinitialize retriever: {e}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error during document reingestion with config: {e}")
+            return {
+                'total': len(documents_config),
+                'successful': 0,
+                'failed': len(documents_config),
+                'failed_ids': [doc['document_id'] for doc in documents_config],
+                'error': str(e)
+            }
+
     def reingest_all_documents(self) -> bool:
         """Re-ingest all documents into vector store"""
         logger.info("🔍 DEBUG: reingest_all_documents() called")

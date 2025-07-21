@@ -3,13 +3,13 @@ import { checkFileExists } from '../services/api';
 
 // File type mapping and chunking method recommendations
 const fileTypeMap = {
-    pdf: { type: 'PDF Document', icon: '📄', defaultMethod: 'qa', category: 'document' },
+    pdf: { type: 'PDF Document', icon: '📄', defaultMethod: 'general', category: 'document' },
     pptx: { type: 'PowerPoint', icon: '📊', defaultMethod: 'presentation', category: 'presentation' },
     ppt: { type: 'PowerPoint', icon: '📊', defaultMethod: 'presentation', category: 'presentation' },
-    docx: { type: 'Word Document', icon: '📝', defaultMethod: 'resume', category: 'document' },
-    doc: { type: 'Word Document', icon: '📝', defaultMethod: 'resume', category: 'document' },
-    txt: { type: 'Plain Text', icon: '📄', defaultMethod: 'naive', category: 'text' },
-    md: { type: 'Markdown', icon: '📝', defaultMethod: 'naive', category: 'text' },
+    docx: { type: 'Word Document', icon: '📝', defaultMethod: 'general', category: 'document' },
+    doc: { type: 'Word Document', icon: '📝', defaultMethod: 'general', category: 'document' },
+    txt: { type: 'Plain Text', icon: '📄', defaultMethod: 'general', category: 'text' },
+    md: { type: 'Markdown', icon: '📝', defaultMethod: 'general', category: 'text' },
     jpg: { type: 'Image', icon: '🖼️', defaultMethod: 'picture', category: 'image' },
     jpeg: { type: 'Image', icon: '🖼️', defaultMethod: 'picture', category: 'image' },
     png: { type: 'Image', icon: '🖼️', defaultMethod: 'picture', category: 'image' },
@@ -17,16 +17,15 @@ const fileTypeMap = {
     csv: { type: 'Spreadsheet', icon: '📈', defaultMethod: 'table', category: 'data' },
     xlsx: { type: 'Excel', icon: '📈', defaultMethod: 'table', category: 'data' },
     xls: { type: 'Excel', icon: '📈', defaultMethod: 'table', category: 'data' },
-    html: { type: 'HTML', icon: '🌐', defaultMethod: 'naive', category: 'web' },
-    htm: { type: 'HTML', icon: '🌐', defaultMethod: 'naive', category: 'web' },
-    json: { type: 'JSON', icon: '📋', defaultMethod: 'naive', category: 'data' },
+    html: { type: 'HTML', icon: '🌐', defaultMethod: 'general', category: 'web' },
+    htm: { type: 'HTML', icon: '🌐', defaultMethod: 'general', category: 'web' },
+    json: { type: 'JSON', icon: '📋', defaultMethod: 'qa', category: 'data' },
     eml: { type: 'Email', icon: '📧', defaultMethod: 'email', category: 'email' }
 };
 
 const chunkingMethods = [
-    { value: 'naive', label: 'Naive', description: 'Simple text splitting' },
+    { value: 'general', label: 'General', description: 'General document chunking for PDF, DOCX, MD, TXT' },
     { value: 'qa', label: 'Q&A', description: 'Question-answer optimized' },
-    { value: 'manual', label: 'Manual', description: 'Manual chunking control' },
     { value: 'presentation', label: 'Presentation', description: 'Slide-based chunking' },
     { value: 'resume', label: 'Resume', description: 'Resume/CV optimized' },
     { value: 'picture', label: 'Picture', description: 'OCR-based text extraction' },
@@ -37,7 +36,7 @@ const chunkingMethods = [
 function getFileTypeAndMethod(filename) {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
     const fileInfo = fileTypeMap[ext];
-    return fileInfo || { type: 'Unknown', icon: '📄', defaultMethod: 'naive', category: 'unknown' };
+    return fileInfo || { type: 'Unknown', icon: '📄', defaultMethod: 'general', category: 'unknown' };
 }
 
 function getFileSize(bytes) {

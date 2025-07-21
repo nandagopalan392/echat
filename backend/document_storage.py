@@ -173,7 +173,7 @@ class DocumentStorageService:
             
             if 'chunking_method' not in columns:
                 logger.info("Adding chunking_method column to documents table")
-                cursor.execute('ALTER TABLE documents ADD COLUMN chunking_method TEXT DEFAULT "naive"')
+                cursor.execute('ALTER TABLE documents ADD COLUMN chunking_method TEXT DEFAULT "general"')
                 
             if 'chunking_config' not in columns:
                 logger.info("Adding chunking_config column to documents table")
@@ -185,7 +185,7 @@ class DocumentStorageService:
             
             if 'chunking_method' not in ing_columns:
                 logger.info("Adding chunking_method column to ingestion_metadata table")
-                cursor.execute('ALTER TABLE ingestion_metadata ADD COLUMN chunking_method TEXT DEFAULT "naive"')
+                cursor.execute('ALTER TABLE ingestion_metadata ADD COLUMN chunking_method TEXT DEFAULT "general"')
                 
             if 'chunking_config' not in ing_columns:
                 logger.info("Adding chunking_config column to ingestion_metadata table")
@@ -222,7 +222,7 @@ class DocumentStorageService:
                     content_type TEXT,
                     minio_object_name TEXT NOT NULL,
                     uploaded_at TEXT NOT NULL,
-                    chunking_method TEXT DEFAULT 'naive',
+                    chunking_method TEXT DEFAULT 'general',
                     chunking_config TEXT  -- JSON string of chunking configuration
                 )
             ''')
@@ -238,7 +238,7 @@ class DocumentStorageService:
                     error_message TEXT,
                     ingested_at TEXT,
                     metadata_json TEXT,  -- Additional metadata as JSON
-                    chunking_method TEXT DEFAULT 'naive',
+                    chunking_method TEXT DEFAULT 'general',
                     chunking_config TEXT,  -- JSON string of chunking configuration used
                     FOREIGN KEY (document_id) REFERENCES documents (id) ON DELETE CASCADE,
                     UNIQUE (document_id, embedding_model)
@@ -268,7 +268,7 @@ class DocumentStorageService:
         return sha256_hash.hexdigest()
     
     def store_document(self, file_path: str, original_filename: str, content_type: str = None, 
-                      chunking_method: str = "naive", chunking_config: Dict = None) -> Dict:
+                      chunking_method: str = "general", chunking_config: Dict = None) -> Dict:
         """
         Store document in MinIO and record metadata in SQLite
         Returns document info or existing document if duplicate
@@ -339,6 +339,40 @@ class DocumentStorageService:
             logger.error(f"Failed to store document {original_filename}: {e}")
             raise
     
+    def get_document_with_config(self, document_id: int) -> Optional[Dict]:
+        """Get document by ID with chunking configuration"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT d.id, d.filename, d.file_hash, d.file_size, d.content_type, 
+                       d.minio_object_name, d.uploaded_at, d.chunking_method, d.chunking_config
+                FROM documents d
+                WHERE d.id = ?
+            ''', (document_id,))
+            
+            row = cursor.fetchone()
+            conn.close()
+            
+            if row:
+                return {
+                    'id': row[0],
+                    'filename': row[1],
+                    'file_hash': row[2],
+                    'file_size': row[3],
+                    'content_type': row[4],
+                    'minio_object_name': row[5],
+                    'uploaded_at': row[6],
+                    'chunking_method': row[7] if row[7] else 'general',
+                    'chunking_config': json.loads(row[8]) if row[8] else None
+                }
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting document with config {document_id}: {e}")
+            return None
+
     def get_document_file(self, document_id: int) -> str:
         """
         Retrieve document from MinIO and return temporary file path
@@ -373,7 +407,7 @@ class DocumentStorageService:
     
     def track_ingestion(self, document_id: int, embedding_model: str, 
                        vector_store_collection: str, chunk_count: int = None,
-                       metadata: Dict = None, chunking_method: str = "naive",
+                       metadata: Dict = None, chunking_method: str = "general",
                        chunking_config: Dict = None) -> bool:
         """Track successful ingestion of document with specific embedding model"""
         try:
@@ -457,7 +491,7 @@ class DocumentStorageService:
             
             cursor.execute('''
                 SELECT d.*, im.chunk_count, im.ingested_at, im.vector_store_collection, 
-                       COALESCE(im.chunking_method, d.chunking_method, 'naive') as chunking_method
+                       COALESCE(im.chunking_method, d.chunking_method, 'general') as chunking_method
                 FROM documents d
                 INNER JOIN ingestion_metadata im ON d.id = im.document_id
                 WHERE im.embedding_model = ? AND im.ingestion_status = 'completed'
@@ -480,7 +514,7 @@ class DocumentStorageService:
                     'chunk_count': row[8],
                     'ingested_at': row[9],
                     'vector_store_collection': row[10],
-                    'chunking_method': row[11] if row[11] else 'naive'
+                    'chunking_method': row[11] if row[11] else 'general'
                 })
             
             return documents
@@ -532,11 +566,17 @@ class DocumentStorageService:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
+            # Debug: Check total documents in DB
+            cursor.execute('SELECT COUNT(*) FROM documents')
+            total_docs = cursor.fetchone()[0]
+            logger.info(f"Total documents in database: {total_docs}")
+            
             cursor.execute('SELECT * FROM documents WHERE file_hash = ?', (file_hash,))
             row = cursor.fetchone()
             conn.close()
             
             if row:
+                logger.info(f"Found duplicate document: {row[1]} (hash: {file_hash[:16]}...)")
                 return {
                     'id': row[0],
                     'filename': row[1],
@@ -545,9 +585,11 @@ class DocumentStorageService:
                     'content_type': row[4],
                     'minio_object_name': row[5],
                     'upload_date': row[6],  # Changed from uploaded_at to match API response
-                    'chunking_method': row[7] if len(row) > 7 else 'naive',
+                    'chunking_method': row[7] if len(row) > 7 else 'general',
                     'chunking_config': row[8] if len(row) > 8 else None
                 }
+            else:
+                logger.info(f"No duplicate found for hash: {file_hash[:16]}...")
             return None
             
         except Exception as e:
@@ -636,7 +678,7 @@ class DocumentStorageService:
                        GROUP_CONCAT(im.embedding_model || ':' || im.ingestion_status) as model_status,
                        im_current.ingestion_status as current_model_status,
                        im_current.embedding_model as current_embedding_model,
-                       COALESCE(im_current.chunking_method, d.chunking_method, 'naive') as chunking_method
+                       COALESCE(im_current.chunking_method, d.chunking_method, 'general') as chunking_method
                 FROM documents d
                 LEFT JOIN ingestion_metadata im ON d.id = im.document_id
                 LEFT JOIN ingestion_metadata im_current ON d.id = im_current.document_id 
@@ -670,7 +712,7 @@ class DocumentStorageService:
                 indexed = current_status == 'completed' if current_status else False
                 
                 # Get chunking method
-                chunking_method = row[10] if row[10] else 'naive'  # chunking_method column
+                chunking_method = row[10] if row[10] else 'general'  # chunking_method column
                 
                 # Get embedding model for current document (prioritize current model, fallback to any available)
                 if indexed and current_embedding_model:
@@ -707,35 +749,87 @@ class DocumentStorageService:
             return []
     
     def delete_document(self, document_id: int) -> bool:
-        """Delete document from both MinIO and SQLite"""
+        """
+        Comprehensive document deletion:
+        1. Delete chunks from vector store (all embedding models)
+        2. Delete file from MinIO
+        3. Delete metadata from SQLite
+        """
         try:
-            # Get document info
+            # Get document info first
             doc_info = self._get_document_by_id(document_id)
             if not doc_info:
                 logger.warning(f"Document not found for deletion: {document_id}")
                 return False
             
-            # Delete from MinIO
+            deletion_success = True
+            filename = doc_info['filename']
+            
+            # Step 1: Delete from vector store across all embedding models
+            try:
+                from rag import get_chatpdf_instance
+                rag_instance = get_chatpdf_instance()
+                
+                if rag_instance:
+                    vector_deletion_success = rag_instance.remove_document_by_id(document_id)
+                    if not vector_deletion_success:
+                        logger.warning(f"Failed to completely remove document {document_id} from vector stores")
+                        deletion_success = False
+                else:
+                    logger.warning("RAG instance not available for vector store cleanup")
+                    deletion_success = False
+                    
+            except Exception as e:
+                logger.error(f"Error removing document {document_id} from vector stores: {e}")
+                deletion_success = False
+            
+            # Step 2: Delete from MinIO
             try:
                 self.minio_client.remove_object(self.bucket_name, doc_info['minio_object_name'])
+                logger.info(f"Removed file from MinIO: {doc_info['minio_object_name']}")
             except S3Error as e:
                 if e.code != 'NoSuchKey':
-                    raise
-                logger.warning(f"Object not found in MinIO: {doc_info['minio_object_name']}")
+                    logger.error(f"Error removing from MinIO: {e}")
+                    deletion_success = False
+                else:
+                    logger.warning(f"Object not found in MinIO (already deleted?): {doc_info['minio_object_name']}")
+            except Exception as e:
+                logger.error(f"Error removing from MinIO: {e}")
+                deletion_success = False
             
-            # Delete from SQLite
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
+            # Step 3: Delete from SQLite (metadata and ingestion records)
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                # Delete ingestion metadata first (foreign key constraint)
+                cursor.execute('DELETE FROM ingestion_metadata WHERE document_id = ?', (document_id,))
+                deleted_ingestion_records = cursor.rowcount
+                
+                # Delete document record
+                cursor.execute('DELETE FROM documents WHERE id = ?', (document_id,))
+                deleted_document_records = cursor.rowcount
+                
+                conn.commit()
+                conn.close()
+                
+                logger.info(f"Deleted {deleted_ingestion_records} ingestion records and {deleted_document_records} document record for {filename}")
+                
+                if deleted_document_records == 0:
+                    logger.warning(f"No document record found to delete for ID {document_id}")
+                    deletion_success = False
+                    
+            except Exception as e:
+                logger.error(f"Error deleting from database: {e}")
+                deletion_success = False
             
-            # Delete ingestion metadata first (foreign key constraint)
-            cursor.execute('DELETE FROM ingestion_metadata WHERE document_id = ?', (document_id,))
-            cursor.execute('DELETE FROM documents WHERE id = ?', (document_id,))
+            # Summary
+            if deletion_success:
+                logger.info(f"Document deleted successfully: {filename} (ID: {document_id})")
+            else:
+                logger.warning(f"Document deletion completed with some failures: {filename} (ID: {document_id})")
             
-            conn.commit()
-            conn.close()
-            
-            logger.info(f"Document deleted successfully: {doc_info['filename']}")
-            return True
+            return deletion_success
             
         except Exception as e:
             logger.error(f"Failed to delete document {document_id}: {e}")
@@ -755,6 +849,45 @@ class DocumentStorageService:
         except Exception as e:
             logger.error(f"Failed to delete document {filename}: {e}")
             return False
+
+    def delete_multiple_documents(self, document_ids: List[int]) -> Dict[str, int]:
+        """
+        Bulk delete multiple documents
+        Returns a summary of deletion results
+        """
+        try:
+            results = {
+                'total': len(document_ids),
+                'successful': 0,
+                'failed': 0,
+                'failed_ids': []
+            }
+            
+            logger.info(f"Starting bulk deletion of {len(document_ids)} documents")
+            
+            for doc_id in document_ids:
+                try:
+                    if self.delete_document(doc_id):
+                        results['successful'] += 1
+                    else:
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                except Exception as e:
+                    logger.error(f"Error deleting document {doc_id}: {e}")
+                    results['failed'] += 1
+                    results['failed_ids'].append(doc_id)
+            
+            logger.info(f"Bulk deletion completed: {results['successful']} successful, {results['failed']} failed")
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in bulk deletion: {e}")
+            return {
+                'total': len(document_ids),
+                'successful': 0,
+                'failed': len(document_ids),
+                'failed_ids': document_ids
+            }
     
     def document_exists_in_storage(self, document_id: int) -> bool:
         """Check if a document exists in MinIO storage"""
@@ -818,6 +951,37 @@ class DocumentStorageService:
         except Exception as e:
             logger.error(f"Failed to cleanup orphaned documents: {e}")
             return 0
+
+    def clear_all_documents(self) -> bool:
+        """Clear all documents from both database and MinIO storage"""
+        try:
+            logger.info("Clearing all documents from storage...")
+            
+            # Clear MinIO bucket
+            try:
+                objects = self.minio_client.list_objects(self.bucket_name, recursive=True)
+                for obj in objects:
+                    self.minio_client.remove_object(self.bucket_name, obj.object_name)
+                    logger.info(f"Removed object from MinIO: {obj.object_name}")
+            except Exception as e:
+                logger.warning(f"Error clearing MinIO bucket: {e}")
+            
+            # Clear database
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('DELETE FROM ingestion_metadata')
+            cursor.execute('DELETE FROM documents')
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info("All documents cleared successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to clear all documents: {e}")
+            return False
 
 
 # Global instance
