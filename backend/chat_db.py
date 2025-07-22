@@ -249,10 +249,14 @@ class ChatDB:
                 sessions = []
                 for row in cursor.fetchall():
                     topic = row['topic'] if row['topic'] else "New Chat"
+                    # Truncate long topics for better display
+                    if topic and len(topic) > 50:
+                        topic = topic[:50] + "..."
                     sessions.append({
                         "id": row['id'],
                         "date": row['created_at'],
-                        "topic": topic
+                        "topic": topic,
+                        "title": topic  # Add title field for compatibility
                     })
                 return sessions
         except Exception as e:
@@ -388,9 +392,21 @@ class ChatDB:
     def get_all_users(self):
         try:
             with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute('SELECT username, is_admin, role FROM users')
-                return [{"username": row[0], "is_admin": row[1], "role": row[2]} for row in cursor.fetchall()]
+                cursor.execute('''
+                    SELECT username, is_admin, role 
+                    FROM users 
+                    ORDER BY username
+                ''')
+                users = []
+                for row in cursor.fetchall():
+                    users.append({
+                        "username": row["username"], 
+                        "is_admin": row["is_admin"], 
+                        "role": row["role"]
+                    })
+                return users
         except Exception as e:
             logger.error(f"Get users error: {str(e)}")
             return []
@@ -1021,3 +1037,117 @@ class ChatDB:
         except Exception as e:
             logger.error(f"Error getting total messages: {str(e)}")
             return 0
+
+    def get_user_by_username(self, username):
+        """Get user details by username"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT username, created_at, is_admin, role, 
+                           last_login, is_active, email
+                    FROM users 
+                    WHERE username = ?
+                """, (username,))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "username": row["username"],
+                        "created_at": row["created_at"],
+                        "role": row["role"] if row["role"] else "user",
+                        "is_admin": bool(row["is_admin"]),
+                        "last_login": row.get("last_login", ""),
+                        "is_active": row.get("is_active", True),
+                        "email": row.get("email", "")
+                    }
+                return None
+        except Exception as e:
+            logger.error(f"Error getting user by username: {str(e)}")
+            return None
+
+    def get_user_sessions(self, username, limit=None):
+        """Get user sessions with optional limit"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                query = """
+                    SELECT cs.id, cs.created_at, cs.last_updated,
+                           COALESCE(cs.topic, 
+                                   (SELECT content FROM messages 
+                                    WHERE session_id = cs.id AND is_user = 1 
+                                    ORDER BY timestamp ASC LIMIT 1)
+                           ) as title,
+                           (SELECT COUNT(*) FROM messages WHERE session_id = cs.id) as message_count
+                    FROM chat_sessions cs
+                    WHERE username = ? 
+                    ORDER BY last_updated DESC
+                """
+                
+                if limit:
+                    query += f" LIMIT {limit}"
+                
+                cursor.execute(query, (username,))
+                sessions = []
+                for row in cursor.fetchall():
+                    sessions.append({
+                        "id": row["id"],
+                        "title": row["title"][:100] if row["title"] else "Untitled Session",
+                        "created_at": row["created_at"],
+                        "last_updated": row["last_updated"],
+                        "message_count": row["message_count"]
+                    })
+                return sessions
+        except Exception as e:
+            logger.error(f"Error getting user sessions: {str(e)}")
+            return []
+
+    def get_user_chat_stats(self, username):
+        """Get user chat statistics"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                # Get total session and message counts
+                cursor.execute("""
+                    SELECT 
+                        COUNT(DISTINCT cs.id) as session_count,
+                        COUNT(m.id) as message_count
+                    FROM chat_sessions cs
+                    LEFT JOIN messages m ON cs.id = m.session_id
+                    WHERE cs.username = ?
+                """, (username,))
+                
+                totals = cursor.fetchone()
+                
+                # Get recent activity (last 7 days)
+                cursor.execute("""
+                    SELECT 
+                        COUNT(DISTINCT cs.id) as recent_sessions,
+                        COUNT(m.id) as recent_messages
+                    FROM chat_sessions cs
+                    LEFT JOIN messages m ON cs.id = m.session_id
+                    WHERE cs.username = ? 
+                    AND cs.created_at >= datetime('now', '-7 days')
+                """, (username,))
+                
+                recent = cursor.fetchone()
+                
+                return {
+                    "session_count": totals["session_count"] if totals else 0,
+                    "message_count": totals["message_count"] if totals else 0,
+                    "recent_sessions": recent["recent_sessions"] if recent else 0,
+                    "recent_messages": recent["recent_messages"] if recent else 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting user chat stats: {str(e)}")
+            return {
+                "session_count": 0,
+                "message_count": 0,
+                "recent_sessions": 0,
+                "recent_messages": 0
+            }

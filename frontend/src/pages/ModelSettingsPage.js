@@ -2,55 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 
-// Safe utility: handles model as string or object
-const getModelName = (model) => {
-    if (!model) return '';
-    if (typeof model === 'string') return model;
-    if (typeof model === 'object' && model.name) return model.name;
-    return '';
-};
-
-// Safe formatting of display name
-const formatModelDisplayName = (model) => {
-    const displayName = getModelName(model);
-
-    // Parameter info
-    let parameterInfo = '';
-    const nameMatch = displayName.match(/(\d+\.?\d*)[bB]/i);
-    if (nameMatch) {
-        parameterInfo = ` (${nameMatch[1]}B params)`;
-    } else if (displayName.includes(':')) {
-        const colonMatch = displayName.match(/:(\d+\.?\d*)([bB])?/i);
-        if (colonMatch) {
-            parameterInfo = ` (${colonMatch[1]}B params)`;
-        }
-    }
-
-    // Size info
-    let sizeInfo = '';
-    if (model && typeof model === 'object' && model.size && model.size !== 'Unknown') {
-        if (model.size.match(/\d+(\.\d+)?\s*(GB|MB|KB)/i)) {
-            sizeInfo = ` - ${model.size}`;
-            parameterInfo = ''; // override paramInfo for actual file size
-        } else if (model.size.toLowerCase().includes('various')) {
-            sizeInfo = ` - ${model.size}`;
-            parameterInfo = '';
-        } else if (model.size.match(/^\d+\.?\d*[bB]$/i)) {
-            if (!parameterInfo) {
-                const sizeParam = model.size.match(/^(\d+\.?\d*)[bB]$/i);
-                if (sizeParam) {
-                    parameterInfo = ` (${sizeParam[1]}B params)`;
-                }
-            }
-        } else {
-            sizeInfo = ` - ${model.size}`;
-        }
-    }
-
-    return `${displayName}${parameterInfo}${sizeInfo}`;
-};
-
-
 const ModelSettingsPage = () => {
     const navigate = useNavigate();
     
@@ -372,18 +323,25 @@ const ModelSettingsPage = () => {
         }
     };
 
+    // Helper function to extract model name from both string and object formats
+    const getModelName = (model) => {
+        if (typeof model === 'string') return model;
+        if (typeof model === 'object' && model && model.name) return model.name;
+        return '';
+    };
+
     // Helper function to format model display name with size and parameters
     const formatModelDisplayName = (model) => {
-        let displayName = model.name;
+        let displayName = getModelName(model);
         
         // Extract parameter count from model name (this shows model complexity)
         let parameterInfo = '';
-        const nameMatch = model.name.match(/(\d+\.?\d*)[bB]/i);
+        const nameMatch = displayName.match(/(\d+\.?\d*)[bB]/i);
         if (nameMatch) {
             parameterInfo = ` (${nameMatch[1]}B params)`;
-        } else if (model.name.includes(':')) {
+        } else if (displayName.includes(':')) {
             // For models like "llama3:8b", extract the parameter info
-            const colonMatch = model.name.match(/:(\d+\.?\d*)([bB])?/i);
+            const colonMatch = displayName.match(/:(\d+\.?\d*)([bB])?/i);
             if (colonMatch) {
                 parameterInfo = ` (${colonMatch[1]}B params)`;
             }
@@ -391,7 +349,7 @@ const ModelSettingsPage = () => {
         
         // Add size information 
         let sizeInfo = '';
-        if (model.size && model.size !== 'Unknown') {
+        if (model && typeof model === 'object' && model.size && model.size !== 'Unknown') {
             // Check if this is a file size (contains GB, MB, KB) or parameter/variant info
             if (model.size.match(/\d+(\.\d+)?\s*(GB|MB|KB)/i)) {
                 // This is an actual file size - show it

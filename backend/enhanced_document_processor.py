@@ -93,7 +93,11 @@ class EnhancedDocumentProcessor:
             raise ValueError(f"Unsupported file format: {file_ext}")
         
         # Use original filename if provided, otherwise use the file path name
-        source_filename = original_filename if original_filename else Path(file_path).name
+        # Always extract just the filename (no path) for consistent metadata storage
+        if original_filename:
+            source_filename = Path(original_filename).name
+        else:
+            source_filename = Path(file_path).name
         if method is None:
             from chunking_config import FileFormatSupport
             method = FileFormatSupport.get_optimal_method(file_ext[1:])  # Remove dot

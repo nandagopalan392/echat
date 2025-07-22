@@ -555,6 +555,129 @@ async def get_activity_stats(admin: dict = Depends(check_if_admin)):
         logger.error(f"Error getting activity stats: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# User endpoints for ManageUserPage
+@app.get("/api/users/profile")
+async def get_user_profile(current_user: dict = Depends(get_current_user)):
+    """Get current user's profile"""
+    try:
+        username = current_user["sub"]
+        # Get user data from database
+        user_data = chat_db.get_user_by_username(username)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Return user profile data
+        return {
+            "user": {
+                "username": user_data.get("username", username),
+                "email": user_data.get("email", ""),
+                "role": user_data.get("role", "user"),
+                "created_at": user_data.get("created_at", ""),
+                "last_login": user_data.get("last_login", ""),
+                "is_active": user_data.get("is_active", True)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting user profile: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/users/activities")
+async def get_user_activities(current_user: dict = Depends(get_current_user)):
+    """Get user activities/recent actions"""
+    try:
+        username = current_user["sub"]
+        
+        # Get recent user activities from chat history and other sources
+        activities = []
+        
+        # Get recent chat sessions
+        try:
+            sessions = chat_db.get_user_sessions(username, limit=10)
+            for session in sessions:
+                activities.append({
+                    "id": f"chat_{session.get('id', '')}",
+                    "type": "chat",
+                    "action": "Started conversation",
+                    "details": session.get("title", "Chat session")[:100],
+                    "timestamp": session.get("created_at", ""),
+                    "metadata": {
+                        "session_id": session.get("id"),
+                        "message_count": session.get("message_count", 0)
+                    }
+                })
+        except Exception as e:
+            logger.warning(f"Error getting chat sessions: {e}")
+        
+        # Add document upload activities if available
+        try:
+            # This would need to be implemented based on your document tracking
+            # For now, we'll add placeholder data
+            activities.append({
+                "id": "doc_recent",
+                "type": "document",
+                "action": "Document processing",
+                "details": "Recent document activities",
+                "timestamp": datetime.datetime.now().isoformat(),
+                "metadata": {"source": "system"}
+            })
+        except Exception as e:
+            logger.warning(f"Error getting document activities: {e}")
+        
+        # Sort by timestamp (newest first)
+        activities.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        
+        return {"activities": activities[:20]}  # Return last 20 activities
+        
+    except Exception as e:
+        logger.error(f"Error getting user activities: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/users/stats")
+async def get_user_stats_general(current_user: dict = Depends(get_current_user)):
+    """Get general system statistics for admin dashboard"""
+    try:
+        # Get overall system statistics
+        stats = {
+            "totalUsers": 0,
+            "activeUsers": 0,
+            "totalSessions": 0,
+            "totalMessages": 0
+        }
+        
+        try:
+            # Get total users count
+            with sqlite3.connect(chat_db.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Total users
+                cursor.execute("SELECT COUNT(*) FROM users")
+                stats["totalUsers"] = cursor.fetchone()[0]
+                
+                # Active users (users with sessions in last 30 days)
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT username) 
+                    FROM chat_sessions 
+                    WHERE created_at >= datetime('now', '-30 days')
+                """)
+                stats["activeUsers"] = cursor.fetchone()[0]
+                
+                # Total sessions
+                cursor.execute("SELECT COUNT(*) FROM chat_sessions")
+                stats["totalSessions"] = cursor.fetchone()[0]
+                
+                # Total messages
+                cursor.execute("SELECT COUNT(*) FROM messages")
+                stats["totalMessages"] = cursor.fetchone()[0]
+                
+        except Exception as e:
+            logger.warning(f"Error getting system stats: {e}")
+        
+        return {"stats": stats}
+        
+    except Exception as e:
+        logger.error(f"Error getting user stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Chat endpoints
 @contextmanager
 def timeout(seconds):
@@ -1569,7 +1692,7 @@ async def get_document_chunks(
         try:
             logger.info(f"Searching for chunks with filename: {filename}")
             
-            # Try both 'source' and 'source_file' metadata keys
+            # Try both 'source' and 'source_file' metadata keys with exact match first
             results = None
             for metadata_key in ['source_file', 'source']:
                 try:
@@ -1578,11 +1701,42 @@ async def get_document_chunks(
                         include=["documents", "metadatas", "embeddings"]
                     )
                     if results and results.get('ids'):
-                        logger.info(f"Found {len(results['ids'])} chunks using metadata key '{metadata_key}'")
+                        logger.info(f"Found {len(results['ids'])} chunks using exact match on metadata key '{metadata_key}'")
                         break
                 except Exception as e:
-                    logger.debug(f"Query with '{metadata_key}' failed: {e}")
+                    logger.debug(f"Exact query with '{metadata_key}' failed: {e}")
                     continue
+            
+            # If exact match didn't work, try to find files ending with the filename (for folder uploads)
+            if not results or not results.get('ids'):
+                logger.info("No exact match found, trying filename suffix search...")
+                for metadata_key in ['source_file', 'source']:
+                    try:
+                        # Get all documents and filter by filename suffix
+                        all_results = collection.get(
+                            include=["documents", "metadatas", "embeddings"]
+                        )
+                        
+                        if all_results and all_results.get('metadatas'):
+                            matching_indices = []
+                            for i, metadata in enumerate(all_results['metadatas']):
+                                source_value = metadata.get(metadata_key, '')
+                                if source_value and source_value.endswith(filename):
+                                    matching_indices.append(i)
+                            
+                            if matching_indices:
+                                # Build filtered results
+                                results = {
+                                    'ids': [all_results['ids'][i] for i in matching_indices],
+                                    'documents': [all_results['documents'][i] for i in matching_indices],
+                                    'metadatas': [all_results['metadatas'][i] for i in matching_indices],
+                                    'embeddings': [all_results['embeddings'][i] for i in matching_indices] if all_results.get('embeddings') else None
+                                }
+                                logger.info(f"Found {len(results['ids'])} chunks using suffix match on metadata key '{metadata_key}'")
+                                break
+                    except Exception as e:
+                        logger.debug(f"Suffix search with '{metadata_key}' failed: {e}")
+                        continue
             
             logger.info(f"ChromaDB query results: found {len(results.get('ids', [])) if results else 0} chunks")
             if results and results.get('metadatas'):

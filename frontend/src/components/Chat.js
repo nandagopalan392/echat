@@ -725,6 +725,7 @@ const Chat = () => {
     const [responseOptions, setResponseOptions] = useState([]);
     const [optionsMessageId, setOptionsMessageId] = useState(null);
     const [showModelSettings, setShowModelSettings] = useState(false);
+    const [pendingRlhfSelection, setPendingRlhfSelection] = useState(false);
     // Removed showKnowledgeHub state as Knowledge Hub now navigates directly
 
 
@@ -970,6 +971,7 @@ const Chat = () => {
             setShowResponseOptions(false);
             setResponseOptions([]);
             setOptionsMessageId(null);  // Clear the options message ID
+            setPendingRlhfSelection(false); // Allow new messages after selection
             
             // Handle RLHF feedback and save selected response to backend
             if (isRLHF && sessionId) {
@@ -1252,7 +1254,22 @@ const Chat = () => {
     // Improved handleSubmit function with better error handling
 const handleSubmit = async (e) => {
   e.preventDefault();
+  
+  // Debug logging
+  debugLog("handleSubmit called - pendingRlhfSelection:", pendingRlhfSelection);
+  debugLog("handleSubmit called - showResponseOptions:", showResponseOptions);
+  debugLog("handleSubmit called - inputMessage:", inputMessage);
+  
   if (!inputMessage.trim()) return;
+  
+  // Strong prevention for RLHF scenarios
+  if (pendingRlhfSelection || showResponseOptions) {
+    debugLog("BLOCKING: RLHF selection pending");
+    showNotification('Please select one of the response options before sending a new message.', true);
+    // Clear the input to prevent confusion
+    setInputMessage('');
+    return;
+  }
   
   // Add user message immediately 
   const userMsgObj = { 
@@ -1331,6 +1348,7 @@ const handleSubmit = async (e) => {
       setResponseOptions(responseData.response_options);
       setOptionsMessageId(aiMessageId);
       setShowResponseOptions(true);
+      setPendingRlhfSelection(true); // Prevent new messages until selection is made
     } else {
       // Regular response - just use content without think tags
       // The thinking information is typically not shown for regular responses
@@ -1502,22 +1520,51 @@ const handleSubmit = async (e) => {
 
                         {/* Input form */}
                         <div className="bg-white border-t p-4">
+                            {/* RLHF Selection Pending Warning */}
+                            {(pendingRlhfSelection || showResponseOptions) && (
+                                <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                                    <div className="flex items-center">
+                                        <svg className="w-5 h-5 text-amber-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                        </svg>
+                                        <span className="text-amber-800 font-medium">
+                                            Please select one of the response options above before continuing the conversation.
+                                        </span>
+                                    </div>
+                                </div>
+                            )}
+                            
                             <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex gap-4">
                                 <input
                                     type="text"
                                     value={inputMessage}
-                                    onChange={(e) => setInputMessage(e.target.value)}
-                                    placeholder="Type your message..."
+                                    onChange={(e) => {
+                                        // Prevent typing when RLHF selection is pending
+                                        if (pendingRlhfSelection || showResponseOptions) {
+                                            showNotification('Please select a response option first.', true);
+                                            return;
+                                        }
+                                        setInputMessage(e.target.value);
+                                    }}
+                                    onKeyDown={(e) => {
+                                        // Also prevent Enter key when RLHF selection is pending
+                                        if ((pendingRlhfSelection || showResponseOptions) && e.key === 'Enter') {
+                                            e.preventDefault();
+                                            showNotification('Please select a response option first.', true);
+                                            return;
+                                        }
+                                    }}
+                                    placeholder={pendingRlhfSelection ? "Please select a response option first..." : "Type your message..."}
                                     className={`flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent ${
-                                        isProcessing ? 'opacity-50' : ''
+                                        isProcessing || pendingRlhfSelection ? 'opacity-50' : ''
                                     }`}
-                                    disabled={isProcessing}
+                                    disabled={isProcessing || pendingRlhfSelection}
                                 />
                                 <button 
                                     type="submit"
-                                    disabled={isProcessing}
+                                    disabled={isProcessing || pendingRlhfSelection}
                                     className={`px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                                        isProcessing ? 'opacity-50 cursor-not-allowed' : ''
+                                        isProcessing || pendingRlhfSelection ? 'opacity-50 cursor-not-allowed' : ''
                                     }`}
                                 >
                                     {isProcessing ? <LoadingSpinner /> : 'Send'}

@@ -4,15 +4,10 @@ import { api } from '../services/api';
 
 const ManageUserPage = () => {
     const navigate = useNavigate();
-    const [activeTab, setActiveTab] = useState('profile');
+    const [activeTab, setActiveTab] = useState('users');
     const [loading, setLoading] = useState(true);
     const [users, setUsers] = useState([]);
     const [activities, setActivities] = useState([]);
-    const [userProfile, setUserProfile] = useState({
-        username: '',
-        email: '',
-        role: ''
-    });
     const [stats, setStats] = useState({
         totalUsers: 0,
         activeUsers: 0,
@@ -35,7 +30,6 @@ const ManageUserPage = () => {
         try {
             setLoading(true);
             await Promise.all([
-                loadUserProfile(),
                 loadUsers(),
                 loadActivities(),
                 loadStats()
@@ -47,18 +41,10 @@ const ManageUserPage = () => {
         }
     };
 
-    const loadUserProfile = async () => {
-        try {
-            const response = await api.getUserProfile();
-            setUserProfile(response.user || {});
-        } catch (error) {
-            console.error('Error loading user profile:', error);
-        }
-    };
-
     const loadUsers = async () => {
         try {
             const response = await api.getUsers();
+            console.log('Users API response:', response);
             setUsers(response.users || []);
         } catch (error) {
             console.error('Error loading users:', error);
@@ -68,6 +54,7 @@ const ManageUserPage = () => {
     const loadActivities = async () => {
         try {
             const response = await api.getUserActivities();
+            console.log('Activities API response:', response);
             setActivities(response.activities || []);
         } catch (error) {
             console.error('Error loading activities:', error);
@@ -77,7 +64,13 @@ const ManageUserPage = () => {
     const loadStats = async () => {
         try {
             const response = await api.getUserStatsGeneral();
-            setStats(response.stats || {});
+            console.log('Stats API response:', response);
+            setStats(response.stats || {
+                totalUsers: 0,
+                activeUsers: 0,
+                totalSessions: 0,
+                totalMessages: 0
+            });
         } catch (error) {
             console.error('Error loading stats:', error);
         }
@@ -122,17 +115,29 @@ const ManageUserPage = () => {
     };
 
     const formatDate = (dateString) => {
-        return new Date(dateString).toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
+        if (!dateString) return 'N/A';
+        
+        try {
+            const date = new Date(dateString);
+            // Check if date is valid
+            if (isNaN(date.getTime())) {
+                return 'Invalid Date';
+            }
+            
+            return date.toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        } catch (error) {
+            console.error('Date formatting error:', error);
+            return 'Invalid Date';
+        }
     };
 
     const tabs = [
-        { id: 'profile', name: 'User Profile', icon: '👤' },
         { id: 'users', name: 'All Users', icon: '👥' },
         { id: 'activities', name: 'Activities', icon: '📊' },
         { id: 'stats', name: 'Statistics', icon: '📈' }
@@ -221,7 +226,6 @@ const ManageUserPage = () => {
                                     {tabs.find(t => t.id === activeTab)?.name}
                                 </h2>
                                 <p className="mt-1 text-sm text-gray-500">
-                                    {activeTab === 'profile' && 'Manage your user profile and account settings'}
                                     {activeTab === 'users' && 'View and manage all system users'}
                                     {activeTab === 'activities' && 'Monitor user activities and system usage'}
                                     {activeTab === 'stats' && 'View detailed system statistics and analytics'}
@@ -233,52 +237,6 @@ const ManageUserPage = () => {
 
                 {/* Content */}
                 <div className="flex-1 p-6">
-                {/* User Profile Tab */}
-                {activeTab === 'profile' && (
-                    <div className="bg-white rounded-lg shadow">
-                        <div className="px-6 py-4 border-b border-gray-200">
-                            <h2 className="text-lg font-medium text-gray-900">User Profile</h2>
-                        </div>
-                        <div className="p-6">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                                        Username
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={userProfile.username}
-                                        readOnly
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                                        Email
-                                    </label>
-                                    <input
-                                        type="email"
-                                        value={userProfile.email}
-                                        readOnly
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50"
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                                        Role
-                                    </label>
-                                    <input
-                                        type="text"
-                                        value={userProfile.role}
-                                        readOnly
-                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50"
-                                    />
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
                 {/* All Users Tab */}
                 {activeTab === 'users' && (
                     <div className="bg-white rounded-lg shadow">

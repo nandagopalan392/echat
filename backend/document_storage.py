@@ -301,12 +301,15 @@ class DocumentStorageService:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
+            # Store only the filename (not the full path) for consistency
+            filename_only = Path(original_filename).name
+            
             cursor.execute('''
                 INSERT INTO documents (filename, file_hash, file_size, content_type, 
                                      minio_object_name, uploaded_at, chunking_method, chunking_config)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                original_filename, 
+                filename_only,  # Store only filename, not full path 
                 file_hash, 
                 file_size, 
                 content_type, 
@@ -322,7 +325,7 @@ class DocumentStorageService:
             
             document_info = {
                 'id': document_id,
-                'filename': original_filename,
+                'filename': filename_only,  # Use consistent filename
                 'file_hash': file_hash,
                 'file_size': file_size,
                 'content_type': content_type,
@@ -332,7 +335,7 @@ class DocumentStorageService:
                 'chunking_config': chunking_config
             }
             
-            logger.info(f"Document stored successfully: {original_filename}")
+            logger.info(f"Document stored successfully: {filename_only}")
             return document_info
             
         except Exception as e:
