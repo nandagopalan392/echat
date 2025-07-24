@@ -118,6 +118,17 @@ class ChatDB:
                     )
                 ''')
 
+                # Create model settings table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS model_settings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        llm TEXT NOT NULL,
+                        embedding TEXT NOT NULL,
+                        parameters TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
                 conn.commit()
                 logger.info("Database initialized successfully")
 
@@ -1151,3 +1162,43 @@ class ChatDB:
                 "recent_sessions": 0,
                 "recent_messages": 0
             }
+
+    def save_model_settings(self, llm, embedding, parameters):
+        """Save model settings to the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Insert new settings
+                cursor.execute('''
+                    INSERT INTO model_settings (llm, embedding, parameters, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (llm, embedding, json.dumps(parameters)))
+                conn.commit()
+                logger.info(f"Saved model settings: LLM={llm}, Embedding={embedding}, Parameters={parameters}")
+                return True
+        except Exception as e:
+            logger.error(f"Error saving model settings: {e}")
+            return False
+
+    def get_latest_model_settings(self):
+        """Get the latest model settings from the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT llm, embedding, parameters FROM model_settings
+                    ORDER BY updated_at DESC LIMIT 1
+                ''')
+                row = cursor.fetchone()
+                if row:
+                    llm, embedding, parameters_json = row
+                    parameters = json.loads(parameters_json)
+                    logger.info(f"Loaded model settings: LLM={llm}, Embedding={embedding}")
+                    return {
+                        'llm': llm,
+                        'embedding': embedding,
+                        'parameters': parameters
+                    }
+        except Exception as e:
+            logger.error(f"Error loading model settings: {e}")
+        return None

@@ -2078,13 +2078,40 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
 
 @app.get("/api/models/current")
 async def get_current_models(current_user: dict = Depends(get_current_user)):
-    """Get current model settings"""
+    """Get current model settings including parameters"""
     try:
         rag = get_chatpdf_instance()
+        
+        # Load parameters from database first, then fallback to config file
+        parameters = {
+            'temperature': 0.7,
+            'max_tokens': 2048,
+            'top_p': 0.9,
+            'frequency_penalty': 0.0,
+            'presence_penalty': 0.0
+        }
+        
+        try:
+            # Try database first
+            db_settings = chat_db.get_latest_model_settings()
+            if db_settings and 'parameters' in db_settings:
+                parameters.update(db_settings['parameters'])
+            else:
+                # Fallback to config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        if 'parameters' in settings:
+                            parameters.update(settings['parameters'])
+        except Exception as e:
+            logger.warning(f"Could not load parameters from database or config: {e}")
+        
         return {
             "success": True,
             "llm": rag.llm_model,
-            "embedding": rag.embedding_model
+            "embedding": rag.embedding_model,
+            "parameters": parameters
         }
     except Exception as e:
         logger.error(f"Error getting current models: {str(e)}")
@@ -2202,9 +2229,57 @@ async def update_models_settings(
         llm_size = request.get('llm_size')
         embedding_size = request.get('embedding_size')
         force_update = request.get('force', False)  # Allow bypassing compatibility check
+        model_parameters = request.get('parameters', {})
         
         if not llm_model or not embedding_model:
             raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Validate model parameters
+        valid_parameters = {}
+        if model_parameters:
+            # Temperature (0.0 to 2.0)
+            temp = model_parameters.get('temperature', 0.7)
+            if isinstance(temp, (int, float)) and 0.0 <= temp <= 2.0:
+                valid_parameters['temperature'] = float(temp)
+            else:
+                valid_parameters['temperature'] = 0.7
+            
+            # Max tokens (1 to 32768)
+            max_tokens = model_parameters.get('max_tokens', 2048)
+            if isinstance(max_tokens, int) and 1 <= max_tokens <= 32768:
+                valid_parameters['max_tokens'] = max_tokens
+            else:
+                valid_parameters['max_tokens'] = 2048
+            
+            # Top-p (0.0 to 1.0)
+            top_p = model_parameters.get('top_p', 0.9)
+            if isinstance(top_p, (int, float)) and 0.0 <= top_p <= 1.0:
+                valid_parameters['top_p'] = float(top_p)
+            else:
+                valid_parameters['top_p'] = 0.9
+            
+            # Frequency penalty (-2.0 to 2.0)
+            freq_penalty = model_parameters.get('frequency_penalty', 0.0)
+            if isinstance(freq_penalty, (int, float)) and -2.0 <= freq_penalty <= 2.0:
+                valid_parameters['frequency_penalty'] = float(freq_penalty)
+            else:
+                valid_parameters['frequency_penalty'] = 0.0
+            
+            # Presence penalty (-2.0 to 2.0)
+            presence_penalty = model_parameters.get('presence_penalty', 0.0)
+            if isinstance(presence_penalty, (int, float)) and -2.0 <= presence_penalty <= 2.0:
+                valid_parameters['presence_penalty'] = float(presence_penalty)
+            else:
+                valid_parameters['presence_penalty'] = 0.0
+        else:
+            # Default parameters
+            valid_parameters = {
+                'temperature': 0.7,
+                'max_tokens': 2048,
+                'top_p': 0.9,
+                'frequency_penalty': 0.0,
+                'presence_penalty': 0.0
+            }
         
         # Check GPU compatibility before proceeding (unless forced)
         if not force_update:
@@ -2259,6 +2334,58 @@ async def update_models_settings(
                 logger.warning(f"Could not check GPU compatibility: {str(e)}, proceeding anyway")
         
         ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        # Check if only parameters changed (no model downloads needed)
+        rag = get_chatpdf_instance()
+        current_llm = rag.llm_model
+        current_embedding = rag.embedding_model
+        
+        logger.info(f"[API /api/models/settings] Current models - LLM: '{current_llm}', Embedding: '{current_embedding}'")
+        logger.info(f"[API /api/models/settings] Requested models - LLM: '{llm_model}', Embedding: '{embedding_model}'")
+        
+        models_unchanged = (current_llm == llm_model and current_embedding == embedding_model)
+        logger.info(f"[API /api/models/settings] Models unchanged check: {models_unchanged}")
+        
+        if models_unchanged:
+            logger.info("Models unchanged, only updating parameters - skipping model downloads")
+            
+            # Update the models in the RAG system (this will only update parameters)
+            try:
+                rag.update_models(llm_model, embedding_model)
+            except Exception as e:
+                logger.error(f"Error updating parameters: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to update parameters: {str(e)}"
+                )
+            
+            # Save settings to database and config file
+            config_path = "model_settings.json"
+            settings = {
+                'llm': llm_model,
+                'embedding': embedding_model,
+                'parameters': valid_parameters
+            }
+            
+            # Save to database
+            try:
+                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+            except Exception as e:
+                logger.warning(f"Could not save to database: {e}")
+            
+            # Also save to config file as backup
+            with open(config_path, 'w') as f:
+                json.dump(settings, f, indent=2)
+            
+            return {
+                "success": True,
+                "message": "Model parameters updated successfully (no downloads needed)",
+                "llm": llm_model,
+                "embedding": embedding_model,
+                "embedding_changed": False,
+                "downloaded_models": [],
+                "parameters_only": True
+            }
         
         # Check which models need to be downloaded
         models_to_download = []
@@ -2490,13 +2617,21 @@ async def update_models_settings(
                 detail=error_detail
             )
         
-        # Save settings to config file
+        # Save settings to database and config file
         config_path = "model_settings.json"
         settings = {
             'llm': llm_model,
-            'embedding': embedding_model
+            'embedding': embedding_model,
+            'parameters': valid_parameters
         }
         
+        # Save to database
+        try:
+            chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+        except Exception as e:
+            logger.warning(f"Could not save to database: {e}")
+        
+        # Also save to config file as backup
         with open(config_path, 'w') as f:
             json.dump(settings, f, indent=2)
         
@@ -2557,9 +2692,57 @@ async def update_simple_models_settings(
         # Validate and normalize model names
         llm_model = request.get('llm')
         embedding_model = request.get('embedding')
+        model_parameters = request.get('parameters', {})
         
         if not llm_model or not embedding_model:
             raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Validate model parameters
+        valid_parameters = {}
+        if model_parameters:
+            # Temperature (0.0 to 2.0)
+            temp = model_parameters.get('temperature', 0.7)
+            if isinstance(temp, (int, float)) and 0.0 <= temp <= 2.0:
+                valid_parameters['temperature'] = float(temp)
+            else:
+                valid_parameters['temperature'] = 0.7
+            
+            # Max tokens (1 to 32768)
+            max_tokens = model_parameters.get('max_tokens', 2048)
+            if isinstance(max_tokens, int) and 1 <= max_tokens <= 32768:
+                valid_parameters['max_tokens'] = max_tokens
+            else:
+                valid_parameters['max_tokens'] = 2048
+            
+            # Top-p (0.0 to 1.0)
+            top_p = model_parameters.get('top_p', 0.9)
+            if isinstance(top_p, (int, float)) and 0.0 <= top_p <= 1.0:
+                valid_parameters['top_p'] = float(top_p)
+            else:
+                valid_parameters['top_p'] = 0.9
+            
+            # Frequency penalty (-2.0 to 2.0)
+            freq_penalty = model_parameters.get('frequency_penalty', 0.0)
+            if isinstance(freq_penalty, (int, float)) and -2.0 <= freq_penalty <= 2.0:
+                valid_parameters['frequency_penalty'] = float(freq_penalty)
+            else:
+                valid_parameters['frequency_penalty'] = 0.0
+            
+            # Presence penalty (-2.0 to 2.0)
+            presence_penalty = model_parameters.get('presence_penalty', 0.0)
+            if isinstance(presence_penalty, (int, float)) and -2.0 <= presence_penalty <= 2.0:
+                valid_parameters['presence_penalty'] = float(presence_penalty)
+            else:
+                valid_parameters['presence_penalty'] = 0.0
+        else:
+            # Default parameters
+            valid_parameters = {
+                'temperature': 0.7,
+                'max_tokens': 2048,
+                'top_p': 0.9,
+                'frequency_penalty': 0.0,
+                'presence_penalty': 0.0
+            }
         
         # Normalize model names - fix common issues
         if embedding_model == "bge-m3:1.7M":
@@ -2615,6 +2798,64 @@ async def update_simple_models_settings(
             compatibility_warnings = [f"Could not verify GPU compatibility: {str(e)}"]
         
         ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        # Check if only parameters changed (no model downloads needed)
+        rag = get_chatpdf_instance()
+        current_llm = rag.llm_model
+        current_embedding = rag.embedding_model
+        
+        logger.info(f"[API /api/models/simple-settings] Current models - LLM: '{current_llm}', Embedding: '{current_embedding}'")
+        logger.info(f"[API /api/models/simple-settings] Requested models - LLM: '{llm_model}', Embedding: '{embedding_model}'")
+        
+        models_unchanged = (current_llm == llm_model and current_embedding == embedding_model)
+        logger.info(f"[API /api/models/simple-settings] Models unchanged check: {models_unchanged}")
+        
+        if models_unchanged:
+            logger.info("Models unchanged, only updating parameters - skipping model downloads")
+            
+            # Update the models in the RAG system (this will only update parameters)
+            try:
+                rag.update_models(llm_model, embedding_model)
+            except Exception as e:
+                logger.error(f"Error updating parameters: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to update parameters: {str(e)}"
+                )
+            
+            # Save settings to database and config file
+            config_path = "model_settings.json"
+            settings = {
+                'llm': llm_model,
+                'embedding': embedding_model,
+                'parameters': valid_parameters
+            }
+            
+            # Save to database
+            try:
+                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+            except Exception as e:
+                logger.warning(f"Could not save to database: {e}")
+            
+            # Also save to config file as backup
+            with open(config_path, 'w') as f:
+                json.dump(settings, f, indent=2)
+            
+            response_data = {
+                "success": True,
+                "message": "Model parameters updated successfully (no downloads needed)",
+                "llm": llm_model,
+                "embedding": embedding_model,
+                "embedding_changed": False,
+                "downloaded_models": [],
+                "parameters_only": True
+            }
+            
+            # Add GPU compatibility warnings if any
+            if 'compatibility_warnings' in locals() and compatibility_warnings:
+                response_data["gpu_warnings"] = compatibility_warnings
+            
+            return response_data
         
         # Check which models need to be downloaded
         models_to_download = []
@@ -2680,13 +2921,21 @@ async def update_simple_models_settings(
         # Update the models
         rag.update_models(llm_model, embedding_model)
         
-        # Save settings to config file
+        # Save settings to database and config file
         config_path = "model_settings.json"
         settings = {
             'llm': llm_model,
-            'embedding': embedding_model
+            'embedding': embedding_model,
+            'parameters': valid_parameters
         }
         
+        # Save to database
+        try:
+            chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+        except Exception as e:
+            logger.warning(f"Could not save to database: {e}")
+        
+        # Also save to config file as backup
         with open(config_path, 'w') as f:
             json.dump(settings, f, indent=2)
         

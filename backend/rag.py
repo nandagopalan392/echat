@@ -95,17 +95,48 @@ class ChatPDF:
     """A class for handling PDF ingestion and question answering using RAG."""
 
     def __init__(self, llm_model: str = "deepseek-r1:latest", embedding_model: str = "mxbai-embed-large"):
-        # Try to load model settings from config file first
+        # Initialize default parameters
+        self.model_parameters = {
+            'temperature': 0.7,
+            'max_tokens': 2048,
+            'top_p': 0.9,
+            'frequency_penalty': 0.0,
+            'presence_penalty': 0.0
+        }
+        
+        # Try to load model settings from database first, then fallback to config file
         try:
-            config_path = "model_settings.json"
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    settings = json.load(f)
-                    llm_model = settings.get('llm', llm_model)
-                    embedding_model = settings.get('embedding', embedding_model)
-                    logger.info(f"Loaded model settings from config: LLM={llm_model}, Embedding={embedding_model}")
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            db_settings = chat_db.get_latest_model_settings()
+            
+            if db_settings:
+                llm_model = db_settings.get('llm', llm_model)
+                embedding_model = db_settings.get('embedding', embedding_model)
+                
+                # Load model parameters if available
+                if 'parameters' in db_settings:
+                    self.model_parameters.update(db_settings['parameters'])
+                
+                logger.info(f"Loaded model settings from database: LLM={llm_model}, Embedding={embedding_model}")
+                logger.info(f"Model parameters: {self.model_parameters}")
+            else:
+                # Fallback to JSON config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        llm_model = settings.get('llm', llm_model)
+                        embedding_model = settings.get('embedding', embedding_model)
+                        
+                        # Load model parameters if available
+                        if 'parameters' in settings:
+                            self.model_parameters.update(settings['parameters'])
+                        
+                        logger.info(f"Loaded model settings from config file: LLM={llm_model}, Embedding={embedding_model}")
+                        logger.info(f"Model parameters: {self.model_parameters}")
         except Exception as e:
-            logger.warning(f"Could not load model settings from config: {e}")
+            logger.warning(f"Could not load model settings from database or config: {e}")
         
         # Initialize base attributes
         self.llm_model = llm_model
@@ -238,6 +269,68 @@ class ChatPDF:
             except Exception as fix_error:
                 logger.error(f"Failed to fix permissions: {fix_error}")
                 raise RuntimeError(f"ChromaDB directory is not writable: {e}")
+
+    def reload_model_settings(self):
+        """Reload model settings from database and recreate models if parameters changed"""
+        try:
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            db_settings = chat_db.get_latest_model_settings()
+            
+            settings_changed = False
+            models_changed = False
+            
+            if db_settings:
+                # Check if model names changed
+                new_llm = db_settings.get('llm', self.llm_model)
+                new_embedding = db_settings.get('embedding', self.embedding_model)
+                
+                if new_llm != self.llm_model or new_embedding != self.embedding_model:
+                    logger.info(f"Model change detected: LLM {self.llm_model} -> {new_llm}, Embedding {self.embedding_model} -> {new_embedding}")
+                    self.llm_model = new_llm
+                    self.embedding_model = new_embedding
+                    models_changed = True
+                
+                # Check if parameters changed
+                new_parameters = db_settings.get('parameters', {})
+                if new_parameters != self.model_parameters:
+                    logger.info(f"Parameter change detected: {self.model_parameters} -> {new_parameters}")
+                    self.model_parameters.update(new_parameters)
+                    settings_changed = True
+                
+                # Force model reload if parameters or models changed
+                if settings_changed or models_changed:
+                    logger.info("Reloading models due to settings change...")
+                    
+                    # Clear existing models
+                    self.model = None
+                    if models_changed:
+                        self.embeddings = None
+                        self.vector_store = None
+                        self.retriever = None
+                    
+                    # Clear loaded flag to force recreation
+                    self.models_loaded = False
+                    
+                    # Reload models with new settings
+                    self.ensure_models_loaded()
+                    
+                    # Reinitialize vector store if embedding model changed
+                    if models_changed:
+                        self._initialize_vector_store()
+                    
+                    logger.info("Models reloaded successfully with updated settings")
+                    return True
+                else:
+                    logger.debug("No model settings changes detected")
+                    return False
+            else:
+                logger.warning("No model settings found in database")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error reloading model settings: {e}")
+            return False
 
     def _initialize_vector_store(self):
         """Initialize vector store with existing data if available"""
@@ -449,12 +542,45 @@ class ChatPDF:
             raise
 
     def update_models(self, llm_model: str, embedding_model: str):
-        """Update models and reload them, handling embedding dimension changes"""
+        """Update models and reload them, handling embedding dimension changes and parameter updates"""
         try:
             logger.info(f"Updating models - LLM: {llm_model}, Embedding: {embedding_model}")
             
             # Check if embedding model is changing
             embedding_changed = self.embedding_model != embedding_model
+            llm_changed = self.llm_model != llm_model
+            
+            # Check if parameters changed
+            parameters_changed = False
+            try:
+                # First try to load from database
+                from chat_db import ChatDB
+                chat_db = ChatDB()
+                db_settings = chat_db.get_latest_model_settings()
+                
+                new_parameters = {}
+                if db_settings and 'parameters' in db_settings:
+                    new_parameters = db_settings['parameters']
+                else:
+                    # Fallback to config file
+                    config_path = "model_settings.json"
+                    if os.path.exists(config_path):
+                        with open(config_path, 'r') as f:
+                            settings = json.load(f)
+                            new_parameters = settings.get('parameters', {})
+                
+                # Compare parameters
+                for key, value in new_parameters.items():
+                    if self.model_parameters.get(key) != value:
+                        parameters_changed = True
+                        break
+                
+                # Update stored parameters
+                if parameters_changed:
+                    self.model_parameters.update(new_parameters)
+                    logger.info(f"Updated model parameters: {self.model_parameters}")
+            except Exception as e:
+                logger.warning(f"Could not check parameter changes: {e}")
             
             # Clear GPU memory first to prevent out-of-memory issues
             logger.info("Clearing GPU memory before model switch...")
@@ -463,6 +589,12 @@ class ChatPDF:
             # Update model names
             self.llm_model = llm_model
             self.embedding_model = embedding_model
+            
+            # Clear models if LLM changed or parameters changed
+            if llm_changed or parameters_changed:
+                logger.info(f"LLM or parameters changed, clearing model. LLM changed: {llm_changed}, Parameters changed: {parameters_changed}")
+                self.model = None
+                self.models_loaded = False
             
             # Force reload with new models
             self.ensure_models_loaded()
@@ -515,16 +647,32 @@ class ChatPDF:
                 
                 if not self.model:
                     logger.info(f"Loading LLM model: {self.llm_model}")
-                    self.model = ChatOllama(
-                        model=self.llm_model,
-                        base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434'),
-                        temperature=0.1,
-                        num_ctx=2048,
-                        timeout=120,  # Increase timeout to 2 minutes
-                        streaming=True,  # Enable streaming
-                        seed=42  # Add seed for consistent responses
-                    )
-                    logger.info("LLM model loaded successfully")
+                    logger.info(f"Using model parameters: {self.model_parameters}")
+                    
+                    # Build model kwargs with parameters
+                    model_kwargs = {
+                        'model': self.llm_model,
+                        'base_url': os.getenv('OLLAMA_HOST', 'http://ollama:11434'),
+                        'temperature': self.model_parameters.get('temperature', 0.7),
+                        'num_ctx': self.model_parameters.get('max_tokens', 2048),
+                        'top_p': self.model_parameters.get('top_p', 0.9),
+                        'timeout': 120,  # Keep timeout for stability
+                        'streaming': True,  # Enable streaming
+                        'seed': 42  # Add seed for consistent responses
+                    }
+                    
+                    # Add frequency and presence penalties if supported by Ollama
+                    # Note: These might not be directly supported by Ollama, but we'll include them for future compatibility
+                    freq_penalty = self.model_parameters.get('frequency_penalty', 0.0)
+                    presence_penalty = self.model_parameters.get('presence_penalty', 0.0)
+                    
+                    if freq_penalty != 0.0:
+                        model_kwargs['frequency_penalty'] = freq_penalty
+                    if presence_penalty != 0.0:
+                        model_kwargs['presence_penalty'] = presence_penalty
+                    
+                    self.model = ChatOllama(**model_kwargs)
+                    logger.info("LLM model loaded successfully with custom parameters")
                 
                 # Mark models as loaded after successful initialization
                 self.models_loaded = True
@@ -2567,7 +2715,40 @@ def get_chatpdf_instance():
     """Get singleton instance of ChatPDF"""
     global _chatpdf_instance
     if _chatpdf_instance is None:
-        _chatpdf_instance = ChatPDF()
+        # Load current model settings from database or config file first
+        llm_model = "deepseek-r1:latest"
+        embedding_model = "mxbai-embed-large"
+        
+        try:
+            # First try to load from database
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            db_settings = chat_db.get_latest_model_settings()
+            
+            if db_settings:
+                llm_model = db_settings.get('llm', llm_model)
+                embedding_model = db_settings.get('embedding', embedding_model)
+                logger.info(f"Loaded current models from database for singleton: LLM={llm_model}, Embedding={embedding_model}")
+            else:
+                # Fallback to config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        llm_model = settings.get('llm', llm_model)
+                        embedding_model = settings.get('embedding', embedding_model)
+                        logger.info(f"Loaded current models from config for singleton: LLM={llm_model}, Embedding={embedding_model}")
+        except Exception as e:
+            logger.warning(f"Could not load current models for singleton, using defaults: {e}")
+        
+        _chatpdf_instance = ChatPDF(llm_model=llm_model, embedding_model=embedding_model)
+    else:
+        # Instance exists, check for updated settings
+        try:
+            _chatpdf_instance.reload_model_settings()
+        except Exception as e:
+            logger.warning(f"Could not reload model settings: {e}")
+            
     return _chatpdf_instance
 
 def reset_chatpdf_instance():

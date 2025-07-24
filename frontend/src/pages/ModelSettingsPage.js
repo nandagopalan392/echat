@@ -48,6 +48,19 @@ const ModelSettingsPage = () => {
             if (response) {
                 setCurrentEmbeddingModel(response.embedding);
                 setCurrentLLMModel(response.llm);
+                
+                // Load parameters if available
+                if (response.parameters) {
+                    setSettings(prev => ({
+                        ...prev,
+                        model: response.llm,
+                        temperature: response.parameters.temperature || 0.7,
+                        max_tokens: response.parameters.max_tokens || 2048,
+                        top_p: response.parameters.top_p || 0.9,
+                        frequency_penalty: response.parameters.frequency_penalty || 0,
+                        presence_penalty: response.parameters.presence_penalty || 0
+                    }));
+                }
             }
         } catch (error) {
             console.error('Error loading model settings:', error);
@@ -110,7 +123,15 @@ const ModelSettingsPage = () => {
             // Prepare data in the format expected by the backend
             const payload = {
                 llm: settings.model,
-                embedding: currentEmbeddingModel
+                embedding: currentEmbeddingModel,
+                // Include language model parameters
+                parameters: {
+                    temperature: settings.temperature,
+                    max_tokens: settings.max_tokens,
+                    top_p: settings.top_p,
+                    frequency_penalty: settings.frequency_penalty,
+                    presence_penalty: settings.presence_penalty
+                }
             };
             
             console.log('Saving settings payload:', payload);
@@ -122,6 +143,16 @@ const ModelSettingsPage = () => {
             
             if (!payload.embedding) {
                 alert('Please select an embedding model first');
+                return;
+            }
+
+            // Check if models are the same - if so, skip GPU compatibility check
+            const modelsUnchanged = (payload.llm === currentLLMModel && payload.embedding === currentEmbeddingModel);
+            
+            if (modelsUnchanged) {
+                console.log('Models unchanged, skipping GPU compatibility check and proceeding directly');
+                // Skip GPU check and proceed directly with parameter update
+                proceedWithDownload(payload);
                 return;
             }
             
@@ -154,6 +185,7 @@ const ModelSettingsPage = () => {
                         embeddingModel: payload.embedding,
                         compatibility: compatibilityResponse,
                         payload: payload,
+                        action: 'save',
                         isLargeModel: isLargeModel
                     });
                     setShowWarningDialog(true);
@@ -224,10 +256,12 @@ const ModelSettingsPage = () => {
 
     const proceedWithDownload = async (payload) => {
         try {
+            console.log('proceedWithDownload called with payload:', payload);
             setDownloading(true);
             setDownloadProgress('Downloading models if needed...');
             setShowWarningDialog(false);
             
+            console.log('Calling /api/models/simple-settings with payload:', payload);
             const response = await api.post('/api/models/simple-settings', payload);
             
             if (response && response.success) {
@@ -590,7 +624,7 @@ const ModelSettingsPage = () => {
                                         <input
                                             type="range"
                                             min="0"
-                                            max="1"
+                                            max="2"
                                             step="0.05"
                                             value={settings.top_p || 0.9}
                                             onChange={(e) => handleInputChange('top_p', parseFloat(e.target.value))}
@@ -608,7 +642,7 @@ const ModelSettingsPage = () => {
                                         </label>
                                         <input
                                             type="range"
-                                            min="-2"
+                                            min="0"
                                             max="2"
                                             step="0.1"
                                             value={settings.frequency_penalty || 0}
@@ -627,7 +661,7 @@ const ModelSettingsPage = () => {
                                         </label>
                                         <input
                                             type="range"
-                                            min="-2"
+                                            min="0"
                                             max="2"
                                             step="0.1"
                                             value={settings.presence_penalty || 0}
@@ -833,10 +867,12 @@ const ModelSettingsPage = () => {
                             </button>
                             <button
                                 onClick={() => {
-                                    setShowWarningDialog(false);
-                                    // Actually apply the settings that triggered the warning
-                                    if (warningData.action === 'save') {
-                                        handleSaveSettings();
+                                    console.log('User clicked "Proceed Anyway" - calling proceedWithDownload directly');
+                                    // Directly proceed with the settings that triggered the warning
+                                    if (warningData.action === 'save' && warningData.payload) {
+                                        proceedWithDownload(warningData.payload);
+                                    } else {
+                                        setShowWarningDialog(false);
                                     }
                                 }}
                                 className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
