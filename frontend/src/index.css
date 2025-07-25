@@ -48,17 +48,120 @@ code {
   position: relative;
 }
 
+/* Styles for PPTX HTML slide content */
+.slide-html-container {
+  font-family: Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* Enhanced styles for new PPTX HTML structure */
+.slide-html-content .pptx-slide {
+  margin: 0 auto;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+  border-radius: 4px;
+}
+
+.slide-html-content .text-shape {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  font-family: inherit;
+  background: transparent;
+}
+
+.slide-html-content .slide-table {
+  font-size: 0.9em;
+  max-width: 100%;
+  background: white;
+}
+
+.slide-html-content .slide-table td {
+  vertical-align: top;
+}
+
+.slide-html-content .slide-image {
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.slide-html-content .shape-placeholder,
+.slide-html-content .image-placeholder {
+  background-color: #f3f4f6;
+  color: #6b7280;
+  text-align: center;
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+  border: 2px dashed #d1d5db;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+
+.slide-html-content .text-shape.simple {
+  padding: 0.5rem;
+  background-color: #f9fafb;
+  border-radius: 0.25rem;
+  border-left: 4px solid #3b82f6;
+}
+
+/* Responsive adjustments for slide content */
+@media (max-width: 768px) {
+  .slide-html-content .pptx-slide {
+    transform: scale(0.7);
+    transform-origin: top center;
+    margin-bottom: -150px; /* Adjust spacing after scaling */
+  }
+}
+
+@media (max-width: 480px) {
+  .slide-html-content .pptx-slide {
+    transform: scale(0.5);
+    transform-origin: top center;
+    margin-bottom: -270px; /* Adjust spacing after scaling */
+  }
+}
+
 .think-bubble:before {
   content: "💡";
-  @apply absolute -top-2 -left-1;
+  position: absolute;
+  top: -0.5rem;
+  left: -0.25rem;
 }
 
 @layer components {
     .btn-primary {
-        @apply px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-200;
+        padding: 1rem 1rem;
+        background-color: #4f46e5;
+        color: white;
+        border-radius: 0.5rem;
+        transition: background-color 0.2s;
+    }
+    
+    .btn-primary:hover {
+        background-color: #4338ca;
+    }
+    
+    .btn-primary:focus {
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.5);
     }
     
     .input-primary {
-        @apply block w-full px-4 py-3 border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent;
+        display: block;
+        width: 100%;
+        padding: 0.75rem 1rem;
+        border: 1px solid #d1d5db;
+        border-radius: 0.5rem;
+        color: #111827;
+    }
+    
+    .input-primary::placeholder {
+        color: #9ca3af;
+    }
+    
+    .input-primary:focus {
+        outline: none;
+        border-color: transparent;
+        box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.5);
     }
 }

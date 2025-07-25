@@ -2,10 +2,18 @@
 from langchain_core.globals import set_verbose, set_debug
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain.schema.output_parser import StrOutputParser
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 import chromadb
 from chromadb.config import Settings
 import os
+import gc
+import tempfile
+import asyncio
+import httpx
+import requests
+import traceback
+import sqlite3
+from typing import List
 # Set up some reasonable defaults for ChromaDB
 os.environ["CHROMA_SERVER_NOFILE"] = "65536"
 from langchain_community.document_loaders import PyPDFLoader
@@ -20,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import aiohttp
 import json
+from chunking_config import ChunkingMethod, ChunkingConfig
 import time
 from PyPDF2 import PdfReader  # Add this import
 import time
@@ -28,6 +37,8 @@ from langchain.schema import Document
 from document_storage import get_document_storage
 import subprocess
 import re
+from enhanced_document_processor import get_document_processor
+from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
 
 # Add stub for reranker that will be dynamically loaded
 _reranker_instance = None
@@ -84,17 +95,48 @@ class ChatPDF:
     """A class for handling PDF ingestion and question answering using RAG."""
 
     def __init__(self, llm_model: str = "deepseek-r1:latest", embedding_model: str = "mxbai-embed-large"):
-        # Try to load model settings from config file first
+        # Initialize default parameters
+        self.model_parameters = {
+            'temperature': 0.7,
+            'max_tokens': 2048,
+            'top_p': 0.9,
+            'frequency_penalty': 0.0,
+            'presence_penalty': 0.0
+        }
+        
+        # Try to load model settings from database first, then fallback to config file
         try:
-            config_path = "model_settings.json"
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    settings = json.load(f)
-                    llm_model = settings.get('llm', llm_model)
-                    embedding_model = settings.get('embedding', embedding_model)
-                    logger.info(f"Loaded model settings from config: LLM={llm_model}, Embedding={embedding_model}")
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            db_settings = chat_db.get_latest_model_settings()
+            
+            if db_settings:
+                llm_model = db_settings.get('llm', llm_model)
+                embedding_model = db_settings.get('embedding', embedding_model)
+                
+                # Load model parameters if available
+                if 'parameters' in db_settings:
+                    self.model_parameters.update(db_settings['parameters'])
+                
+                logger.info(f"Loaded model settings from database: LLM={llm_model}, Embedding={embedding_model}")
+                logger.info(f"Model parameters: {self.model_parameters}")
+            else:
+                # Fallback to JSON config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        llm_model = settings.get('llm', llm_model)
+                        embedding_model = settings.get('embedding', embedding_model)
+                        
+                        # Load model parameters if available
+                        if 'parameters' in settings:
+                            self.model_parameters.update(settings['parameters'])
+                        
+                        logger.info(f"Loaded model settings from config file: LLM={llm_model}, Embedding={embedding_model}")
+                        logger.info(f"Model parameters: {self.model_parameters}")
         except Exception as e:
-            logger.warning(f"Could not load model settings from config: {e}")
+            logger.warning(f"Could not load model settings from database or config: {e}")
         
         # Initialize base attributes
         self.llm_model = llm_model
@@ -227,6 +269,68 @@ class ChatPDF:
             except Exception as fix_error:
                 logger.error(f"Failed to fix permissions: {fix_error}")
                 raise RuntimeError(f"ChromaDB directory is not writable: {e}")
+
+    def reload_model_settings(self):
+        """Reload model settings from database and recreate models if parameters changed"""
+        try:
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            db_settings = chat_db.get_latest_model_settings()
+            
+            settings_changed = False
+            models_changed = False
+            
+            if db_settings:
+                # Check if model names changed
+                new_llm = db_settings.get('llm', self.llm_model)
+                new_embedding = db_settings.get('embedding', self.embedding_model)
+                
+                if new_llm != self.llm_model or new_embedding != self.embedding_model:
+                    logger.info(f"Model change detected: LLM {self.llm_model} -> {new_llm}, Embedding {self.embedding_model} -> {new_embedding}")
+                    self.llm_model = new_llm
+                    self.embedding_model = new_embedding
+                    models_changed = True
+                
+                # Check if parameters changed
+                new_parameters = db_settings.get('parameters', {})
+                if new_parameters != self.model_parameters:
+                    logger.info(f"Parameter change detected: {self.model_parameters} -> {new_parameters}")
+                    self.model_parameters.update(new_parameters)
+                    settings_changed = True
+                
+                # Force model reload if parameters or models changed
+                if settings_changed or models_changed:
+                    logger.info("Reloading models due to settings change...")
+                    
+                    # Clear existing models
+                    self.model = None
+                    if models_changed:
+                        self.embeddings = None
+                        self.vector_store = None
+                        self.retriever = None
+                    
+                    # Clear loaded flag to force recreation
+                    self.models_loaded = False
+                    
+                    # Reload models with new settings
+                    self.ensure_models_loaded()
+                    
+                    # Reinitialize vector store if embedding model changed
+                    if models_changed:
+                        self._initialize_vector_store()
+                    
+                    logger.info("Models reloaded successfully with updated settings")
+                    return True
+                else:
+                    logger.debug("No model settings changes detected")
+                    return False
+            else:
+                logger.warning("No model settings found in database")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error reloading model settings: {e}")
+            return False
 
     def _initialize_vector_store(self):
         """Initialize vector store with existing data if available"""
@@ -438,12 +542,45 @@ class ChatPDF:
             raise
 
     def update_models(self, llm_model: str, embedding_model: str):
-        """Update models and reload them, handling embedding dimension changes"""
+        """Update models and reload them, handling embedding dimension changes and parameter updates"""
         try:
             logger.info(f"Updating models - LLM: {llm_model}, Embedding: {embedding_model}")
             
             # Check if embedding model is changing
             embedding_changed = self.embedding_model != embedding_model
+            llm_changed = self.llm_model != llm_model
+            
+            # Check if parameters changed
+            parameters_changed = False
+            try:
+                # First try to load from database
+                from chat_db import ChatDB
+                chat_db = ChatDB()
+                db_settings = chat_db.get_latest_model_settings()
+                
+                new_parameters = {}
+                if db_settings and 'parameters' in db_settings:
+                    new_parameters = db_settings['parameters']
+                else:
+                    # Fallback to config file
+                    config_path = "model_settings.json"
+                    if os.path.exists(config_path):
+                        with open(config_path, 'r') as f:
+                            settings = json.load(f)
+                            new_parameters = settings.get('parameters', {})
+                
+                # Compare parameters
+                for key, value in new_parameters.items():
+                    if self.model_parameters.get(key) != value:
+                        parameters_changed = True
+                        break
+                
+                # Update stored parameters
+                if parameters_changed:
+                    self.model_parameters.update(new_parameters)
+                    logger.info(f"Updated model parameters: {self.model_parameters}")
+            except Exception as e:
+                logger.warning(f"Could not check parameter changes: {e}")
             
             # Clear GPU memory first to prevent out-of-memory issues
             logger.info("Clearing GPU memory before model switch...")
@@ -452,6 +589,12 @@ class ChatPDF:
             # Update model names
             self.llm_model = llm_model
             self.embedding_model = embedding_model
+            
+            # Clear models if LLM changed or parameters changed
+            if llm_changed or parameters_changed:
+                logger.info(f"LLM or parameters changed, clearing model. LLM changed: {llm_changed}, Parameters changed: {parameters_changed}")
+                self.model = None
+                self.models_loaded = False
             
             # Force reload with new models
             self.ensure_models_loaded()
@@ -504,16 +647,32 @@ class ChatPDF:
                 
                 if not self.model:
                     logger.info(f"Loading LLM model: {self.llm_model}")
-                    self.model = ChatOllama(
-                        model=self.llm_model,
-                        base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434'),
-                        temperature=0.1,
-                        num_ctx=2048,
-                        timeout=120,  # Increase timeout to 2 minutes
-                        streaming=True,  # Enable streaming
-                        seed=42  # Add seed for consistent responses
-                    )
-                    logger.info("LLM model loaded successfully")
+                    logger.info(f"Using model parameters: {self.model_parameters}")
+                    
+                    # Build model kwargs with parameters
+                    model_kwargs = {
+                        'model': self.llm_model,
+                        'base_url': os.getenv('OLLAMA_HOST', 'http://ollama:11434'),
+                        'temperature': self.model_parameters.get('temperature', 0.7),
+                        'num_ctx': self.model_parameters.get('max_tokens', 2048),
+                        'top_p': self.model_parameters.get('top_p', 0.9),
+                        'timeout': 120,  # Keep timeout for stability
+                        'streaming': True,  # Enable streaming
+                        'seed': 42  # Add seed for consistent responses
+                    }
+                    
+                    # Add frequency and presence penalties if supported by Ollama
+                    # Note: These might not be directly supported by Ollama, but we'll include them for future compatibility
+                    freq_penalty = self.model_parameters.get('frequency_penalty', 0.0)
+                    presence_penalty = self.model_parameters.get('presence_penalty', 0.0)
+                    
+                    if freq_penalty != 0.0:
+                        model_kwargs['frequency_penalty'] = freq_penalty
+                    if presence_penalty != 0.0:
+                        model_kwargs['presence_penalty'] = presence_penalty
+                    
+                    self.model = ChatOllama(**model_kwargs)
+                    logger.info("LLM model loaded successfully with custom parameters")
                 
                 # Mark models as loaded after successful initialization
                 self.models_loaded = True
@@ -596,8 +755,22 @@ class ChatPDF:
                 logger.error("No chunks created from text splitting")
                 return False
 
-            # Clean metadata
-            chunks = filter_complex_metadata(chunks)
+            # Add filename to chunk metadata 
+            filename = Path(pdf_file_path).name
+            for chunk in chunks:
+                if not chunk.metadata:
+                    chunk.metadata = {}
+                chunk.metadata['source'] = filename
+
+            # Debug: Log metadata before filtering
+            logger.info(f"Before filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+
+            # Use our custom metadata filtering instead of langchain's filter_complex_metadata
+            chunks = self._filter_metadata_for_chromadb(chunks)
+            
+            # Debug: Log metadata after filtering
+            logger.info(f"After filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+            logger.info(f"Total chunks after filtering: {len(chunks)}")
 
             # Create or update vector store with embedding-specific collection
             try:
@@ -711,7 +884,7 @@ class ChatPDF:
             return False
     
     def _ingest_for_current_model(self, document_id: int, file_path: str = None) -> bool:
-        """Ingest a specific document for the current embedding model"""
+        """Ingest a specific document for the current embedding model using stored chunking configuration"""
         try:
             # Get file path if not provided
             if file_path is None:
@@ -720,30 +893,82 @@ class ChatPDF:
             else:
                 cleanup_temp_file = False
             
-            # Extract text from PDF
-            text_content = self._extract_text_from_pdf(file_path)
-            if not text_content:
+            # Get document info with chunking configuration
+            doc_info = self.doc_storage.get_document_with_config(document_id)
+            if not doc_info:
+                logger.error(f"Document {document_id} not found in database")
+                return False
+            
+            filename = doc_info['filename']
+            
+            # Get stored chunking configuration
+            stored_method = doc_info.get('chunking_method', 'general')
+            stored_config = doc_info.get('chunking_config')
+            
+            # Convert stored method to ChunkingMethod enum
+            try:
+                from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
+                chunking_method = ChunkingMethod(stored_method)
+            except ValueError:
+                logger.warning(f"Unknown stored chunking method '{stored_method}', using general")
+                chunking_method = ChunkingMethod.GENERAL
+            
+            # Get chunking configuration
+            config_manager = get_chunking_config_manager()
+            if stored_config:
+                try:
+                    chunking_config = ChunkingConfig.from_dict(stored_config)
+                    logger.info(f"Using stored chunking config for document {document_id}: {chunking_method.value}")
+                except Exception as e:
+                    logger.warning(f"Failed to load stored chunking config for document {document_id}: {e}")
+                    chunking_config = config_manager.get_config(chunking_method)
+            else:
+                # Get default config for the method
+                chunking_config = config_manager.get_config(chunking_method)
+                logger.info(f"Using default chunking config for document {document_id}: {chunking_method.value}")
+            
+            # Use enhanced document processor with stored configuration
+            try:
+                from enhanced_document_processor import get_document_processor
+                doc_processor = get_document_processor()
+                
+                chunking_result = doc_processor.process_document(
+                    file_path,
+                    chunking_method,
+                    chunking_config,
+                    None,  # user_id not needed for reingestion
+                    original_filename=filename
+                )
+                
+                if not chunking_result or not chunking_result.chunks:
+                    error_msg = f"No chunks created from document {filename} using {chunking_method.value} method"
+                    logger.error(error_msg)
+                    self.doc_storage.mark_ingestion_failed(
+                        document_id, 
+                        self.embedding_model, 
+                        error_msg
+                    )
+                    return False
+                
+                chunks = chunking_result.chunks
+                logger.info(f"Document {document_id} reprocessed: {len(chunks)} chunks created using stored {chunking_result.method_used.value} method")
+                
+            except Exception as e:
+                error_msg = f"Enhanced processor failed for {filename}: {e}"
+                logger.error(error_msg)
                 self.doc_storage.mark_ingestion_failed(
                     document_id, 
                     self.embedding_model, 
-                    "No text content extracted from PDF"
+                    error_msg
                 )
                 return False
             
-            # Create document and split into chunks
-            docs = [Document(page_content=text_content)]
-            chunks = self.text_splitter.split_documents(docs)
+            # Use our custom metadata filtering instead of langchain's filter_complex_metadata
+            chunks = self._filter_metadata_for_chromadb(chunks)
             
-            if not chunks:
-                self.doc_storage.mark_ingestion_failed(
-                    document_id, 
-                    self.embedding_model, 
-                    "No chunks created from text splitting"
-                )
-                return False
-            
-            # Clean metadata
-            chunks = filter_complex_metadata(chunks)
+            # Debug: Log metadata after filtering
+            logger.info(f"After filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+            logger.info(f"Total chunks after filtering: {len(chunks)}")
             
             # Get collection name for current model
             collection_name = self._get_collection_name()
@@ -752,19 +977,29 @@ class ChatPDF:
             success = self._add_chunks_to_vector_store(chunks, collection_name)
             
             if success:
-                # Track successful ingestion
+                # Track successful ingestion with enhanced metadata
+                simple_metadata = {
+                    'method_used': chunking_result.method_used.value,
+                    'chunk_count': len(chunks),
+                    'file_format': chunking_result.metadata.get('file_format', 'unknown') if chunking_result.metadata else 'unknown',
+                    'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                    'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                    'warnings_count': len(chunking_result.warnings) if chunking_result.warnings else 0
+                }
+                
+                if chunking_result.warnings:
+                    simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])
+                
                 self.doc_storage.track_ingestion(
                     document_id=document_id,
                     embedding_model=self.embedding_model,
                     vector_store_collection=collection_name,
                     chunk_count=len(chunks),
-                    metadata={
-                        'text_length': len(text_content),
-                        'chunk_size': self.text_splitter._chunk_size,
-                        'chunk_overlap': self.text_splitter._chunk_overlap
-                    }
+                    metadata=simple_metadata,
+                    chunking_method=chunking_result.method_used.value,
+                    chunking_config=chunking_result.config_used.to_dict()
                 )
-                logger.info(f"Successfully ingested document {document_id} for model {self.embedding_model}")
+                logger.info(f"Successfully reingested document {document_id} for model {self.embedding_model} using {chunking_result.method_used.value} method")
             else:
                 self.doc_storage.mark_ingestion_failed(
                     document_id, 
@@ -788,44 +1023,200 @@ class ChatPDF:
             return False
     
     def _extract_text_from_pdf(self, pdf_file_path: str) -> str:
-        """Extract text from PDF using multiple methods"""
+        """Extract text from PDF using multiple methods with enhanced error handling"""
+        
+        # Check if file exists and has valid size
+        if not os.path.exists(pdf_file_path):
+            raise ValueError(f"PDF file not found: {pdf_file_path}")
+            
+        file_size = os.path.getsize(pdf_file_path)
+        if file_size == 0:
+            raise ValueError("PDF file is empty")
+            
+        if file_size < 10:  # Minimum PDF size
+            raise ValueError("PDF file too small to be valid")
+        
+        logger.debug(f"Processing PDF file: {pdf_file_path} (size: {file_size} bytes)")
+        
+        # Check file header for valid PDF signature
+        try:
+            with open(pdf_file_path, 'rb') as f:
+                header = f.read(8)
+                if not header.startswith(b'%PDF-'):
+                    logger.warning(f"Invalid PDF header detected: {header}")
+                    # Try to recover if it's a text file misnamed as PDF
+                    try:
+                        with open(pdf_file_path, 'r', encoding='utf-8') as text_file:
+                            content = text_file.read()
+                            if content.strip():
+                                logger.info("File appears to be text, treating as text content")
+                                return content
+                    except:
+                        pass
+                    raise ValueError(f"File does not appear to be a valid PDF (header: {header})")
+        except Exception as e:
+            logger.warning(f"Could not check PDF header: {e}")
+        
+        extraction_errors = []
+        
         try:
             # First try PyPDF2
             logger.debug("Attempting to read PDF with PyPDF2")
             pdf = PdfReader(pdf_file_path)
+            
+            # Check if PDF is encrypted
+            if pdf.is_encrypted:
+                logger.warning("PDF is encrypted, attempting to decrypt with empty password")
+                if not pdf.decrypt(""):
+                    raise ValueError("PDF is encrypted and cannot be decrypted")
+            
             text_content = []
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text.strip():  # Only add non-empty pages
-                    text_content.append(text)
+            total_pages = len(pdf.pages)
+            logger.debug(f"PDF has {total_pages} pages")
+            
+            for i, page in enumerate(pdf.pages):
+                try:
+                    text = page.extract_text()
+                    if text and text.strip():  # Only add non-empty pages
+                        text_content.append(text.strip())
+                        logger.debug(f"Extracted text from page {i+1}/{total_pages}")
+                except Exception as page_error:
+                    logger.warning(f"Failed to extract text from page {i+1}: {page_error}")
+                    continue
             
             if text_content:
                 combined_text = "\n\n".join(text_content)
-                logger.debug(f"Extracted {len(text_content)} pages of text with PyPDF2")
-                return combined_text
+                logger.debug(f"Successfully extracted {len(text_content)} pages of text with PyPDF2")
+                if len(combined_text.strip()) > 10:  # Ensure we have meaningful content
+                    return combined_text
+                else:
+                    logger.warning("PyPDF2 extracted text is too short, trying alternative method")
+            else:
+                logger.warning("PyPDF2 extracted no readable text")
             
         except Exception as e:
-            logger.warning(f"PyPDF2 extraction failed: {str(e)}")
+            error_msg = f"PyPDF2 extraction failed: {str(e)}"
+            logger.warning(error_msg)
+            extraction_errors.append(error_msg)
         
         try:
             # Fallback to langchain's PyPDFLoader
             logger.debug("Attempting to read PDF with langchain PyPDFLoader")
             docs = PyPDFLoader(file_path=pdf_file_path).load()
             if docs:
-                combined_text = "\n\n".join([doc.page_content for doc in docs])
-                logger.debug(f"Extracted text from {len(docs)} pages with PyPDFLoader")
-                return combined_text
+                page_contents = []
+                for i, doc in enumerate(docs):
+                    if doc.page_content and doc.page_content.strip():
+                        page_contents.append(doc.page_content.strip())
+                        logger.debug(f"Extracted content from document {i+1}/{len(docs)}")
+                
+                if page_contents:
+                    combined_text = "\n\n".join(page_contents)
+                    logger.debug(f"Successfully extracted text from {len(page_contents)} pages with PyPDFLoader")
+                    if len(combined_text.strip()) > 10:
+                        return combined_text
+                    else:
+                        logger.warning("PyPDFLoader extracted text is too short")
+                else:
+                    logger.warning("PyPDFLoader extracted no readable content")
                 
         except Exception as e:
-            logger.warning(f"PyPDFLoader extraction failed: {str(e)}")
+            error_msg = f"PyPDFLoader extraction failed: {str(e)}"
+            logger.warning(error_msg)
+            extraction_errors.append(error_msg)
         
-        raise ValueError("Failed to extract text from PDF using any method")
+        # Try one more fallback - treat as binary and search for text patterns
+        try:
+            logger.debug("Attempting binary text extraction as last resort")
+            with open(pdf_file_path, 'rb') as f:
+                content = f.read()
+                # Look for readable text in the binary content
+                text_parts = []
+                # Extract strings that look like readable text
+                import re
+                text_matches = re.findall(rb'[a-zA-Z0-9\s\.,!?;:()]{10,}', content)
+                for match in text_matches[:50]:  # Limit to first 50 matches
+                    try:
+                        decoded = match.decode('utf-8', errors='ignore').strip()
+                        if len(decoded) > 10 and decoded.count(' ') > 2:  # Basic text validation
+                            text_parts.append(decoded)
+                    except:
+                        continue
+                
+                if text_parts:
+                    combined_text = "\n".join(text_parts)
+                    logger.info(f"Extracted {len(text_parts)} text segments from binary content")
+                    if len(combined_text.strip()) > 50:
+                        return combined_text
+                        
+        except Exception as e:
+            error_msg = f"Binary extraction failed: {str(e)}"
+            logger.warning(error_msg)
+            extraction_errors.append(error_msg)
+        
+        # All methods failed
+        all_errors = "; ".join(extraction_errors)
+        error_message = f"Failed to extract text from PDF using any method. Errors: {all_errors}"
+        logger.error(error_message)
+        raise ValueError(error_message)
     
+    def _filter_metadata_for_chromadb(self, chunks: List[Document]) -> List[Document]:
+        """Filter metadata to keep only ChromaDB-compatible fields"""
+        logger.info(f"🔍 METADATA DEBUG: Filtering {len(chunks)} chunks")
+        
+        filtered_chunks = []
+        for i, chunk in enumerate(chunks):
+            logger.info(f"🔍 CHUNK {i}: Original metadata: {chunk.metadata}")
+            
+            # Create a new document with filtered metadata
+            filtered_metadata = {}
+            if chunk.metadata:
+                for key, value in chunk.metadata.items():
+                    logger.debug(f"🔍 Processing metadata key '{key}': {type(value)} = {value}")
+                    # Keep simple types that ChromaDB can handle
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        filtered_metadata[key] = value
+                        logger.debug(f"✅ Kept metadata '{key}': {value}")
+                    elif isinstance(value, dict) and len(str(value)) < 1000:  # Small dicts
+                        filtered_metadata[key] = str(value)
+                        logger.debug(f"✅ Converted dict metadata '{key}': {str(value)}")
+                    else:
+                        logger.debug(f"❌ Skipped complex metadata '{key}': {type(value)}")
+            
+            logger.info(f"🔍 CHUNK {i}: Filtered metadata: {filtered_metadata}")
+            
+            filtered_chunk = Document(
+                page_content=chunk.page_content,
+                metadata=filtered_metadata
+            )
+            filtered_chunks.append(filtered_chunk)
+        
+        logger.info(f"🔍 METADATA DEBUG: Returning {len(filtered_chunks)} filtered chunks")
+        return filtered_chunks
+
     def _add_chunks_to_vector_store(self, chunks: List[Document], collection_name: str) -> bool:
         """Add document chunks to the vector store"""
         try:
+            if not chunks:
+                logger.warning("No chunks provided for vector store addition")
+                return False
+            
             # Ensure ChromaDB directory has proper permissions
             self._ensure_writable_before_operation()
+            
+            logger.info(f"🔍 DEBUG: Adding {len(chunks)} chunks to vector store collection '{collection_name}'")
+            
+            # Log original metadata before filtering
+            for i, chunk in enumerate(chunks[:3]):  # Show first 3 chunks
+                logger.info(f"🔍 DEBUG: Original chunk {i} metadata: {chunk.metadata}")
+                logger.info(f"🔍 DEBUG: Original chunk {i} content preview: {chunk.page_content[:100]}...")
+            
+            # Use our custom metadata filtering instead of langchain's filter_complex_metadata
+            filtered_chunks = self._filter_metadata_for_chromadb(chunks)
+            
+            # Log filtered metadata
+            for i, chunk in enumerate(filtered_chunks[:3]):  # Show first 3 chunks
+                logger.info(f"🔍 DEBUG: Filtered chunk {i} metadata: {chunk.metadata}")
             
             if not self.vector_store:
                 logger.debug("Creating new vector store with embedding-specific collection")
@@ -845,24 +1236,48 @@ class ChatPDF:
                     embedding_function=self.embeddings,
                 )
             
+            # Before adding to vector store, let's manually verify what we're sending
+            logger.info(f"🔍 DEBUG: About to add {len(filtered_chunks)} filtered chunks to ChromaDB")
+            
             # Add documents to vector store
-            self._handle_chromadb_operation(self.vector_store.add_documents, chunks)
+            success = self._handle_chromadb_operation(self.vector_store.add_documents, filtered_chunks)
             
-            # Update retriever
-            self.retriever = self.vector_store.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": 3}
-            )
-            
-            # Backup to MinIO after successful ingestion
-            backup_success = self._backup_vector_store_to_minio(collection_name)
-            if backup_success:
-                logger.info(f"Vector store backed up to MinIO after adding {len(chunks)} chunks")
+            if success:
+                # After successful addition, let's verify what was actually stored
+                logger.info("🔍 DEBUG: Verifying chunks were stored with metadata...")
+                try:
+                    # Get the collection directly and check what was stored
+                    chroma_client = self.vector_store._client
+                    collection = chroma_client.get_collection(collection_name)
+                    
+                    # Get the last few documents to see their metadata
+                    recent_docs = collection.get(limit=3, include=["metadatas", "documents"])
+                    
+                    logger.info(f"🔍 DEBUG: Recent documents in collection: {len(recent_docs.get('ids', []))}")
+                    for i, metadata in enumerate(recent_docs.get('metadatas', [])[:3]):
+                        logger.info(f"🔍 DEBUG: Recently stored document {i} metadata: {metadata}")
+                        
+                except Exception as verify_error:
+                    logger.error(f"🔍 DEBUG: Could not verify stored chunks: {verify_error}")
+                
+                # Update retriever
+                self.retriever = self.vector_store.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 3}
+                )
+                
+                # Backup to MinIO after successful ingestion
+                backup_success = self._backup_vector_store_to_minio(collection_name)
+                if backup_success:
+                    logger.info(f"Vector store backed up to MinIO after adding {len(chunks)} chunks")
+                else:
+                    logger.warning("Failed to backup vector store to MinIO")
+                
+                logger.info(f"✅ Added {len(filtered_chunks)} chunks to vector store collection '{collection_name}'")
+                return True
             else:
-                logger.warning("Failed to backup vector store to MinIO")
-            
-            logger.info(f"Added {len(chunks)} chunks to vector store collection '{collection_name}'")
-            return True
+                logger.error("❌ Failed to add chunks to vector store")
+                return False
             
         except Exception as e:
             logger.error(f"Failed to add chunks to vector store: {e}")
@@ -973,14 +1388,86 @@ class ChatPDF:
                         )
                         continue
                     
-                    success = self._ingest_for_current_model(doc['id'])
-                    if success:
-                        success_count += 1
-                        logger.info(f"Successfully re-ingested: {doc['filename']} ({success_count}/{total_docs})")
-                    else:
-                        logger.warning(f"Failed to re-ingest: {doc['filename']}")
+                    # Attempt ingestion with detailed error handling
+                    try:
+                        success = self._ingest_for_current_model(doc['id'])
+                        if success:
+                            success_count += 1
+                            logger.info(f"Successfully re-ingested: {doc['filename']} ({success_count}/{total_docs})")
+                        else:
+                            logger.warning(f"Failed to re-ingest: {doc['filename']}")
+                            # Don't mark as failed here since _ingest_for_current_model already handles it
+                    except ValueError as ve:
+                        # Handle document processing and validation errors more gracefully
+                        error_msg = str(ve)
+                        file_ext = Path(doc['filename']).suffix.lower()
+                        
+                        if "PDF" in error_msg or "extract text" in error_msg:
+                            if file_ext == '.pdf':
+                                logger.warning(f"PDF processing failed for {doc['filename']}: {error_msg}")
+                                self.doc_storage.mark_ingestion_failed(
+                                    doc['id'], 
+                                    self.embedding_model, 
+                                    f"PDF processing error: {error_msg}"
+                                )
+                            else:
+                                logger.warning(f"File {doc['filename']} (ext: {file_ext}) incorrectly processed as PDF: {error_msg}")
+                                self.doc_storage.mark_ingestion_failed(
+                                    doc['id'], 
+                                    self.embedding_model, 
+                                    f"File type mismatch - {file_ext} file processed as PDF: {error_msg}"
+                                )
+                        else:
+                            logger.error(f"Document validation failed for {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Document validation error: {error_msg}"
+                            )
+                    except ImportError as ie:
+                        # Handle missing dependencies for document processing
+                        logger.error(f"Missing dependency for processing {doc['filename']}: {str(ie)}")
+                        self.doc_storage.mark_ingestion_failed(
+                            doc['id'], 
+                            self.embedding_model, 
+                            f"Missing dependency: {str(ie)}"
+                        )
+                    except Exception as ie:
+                        # Handle other ingestion errors
+                        error_msg = str(ie)
+                        file_ext = Path(doc['filename']).suffix.lower()
+                        
+                        # Provide more specific error messages based on file type
+                        if file_ext in ['.docx', '.doc'] and ('permission' in error_msg.lower() or 'access' in error_msg.lower()):
+                            logger.error(f"Permission error accessing Word document {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Word document access error: {error_msg}"
+                            )
+                        elif 'corrupt' in error_msg.lower() or 'damaged' in error_msg.lower():
+                            logger.error(f"Corrupted document {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Corrupted document: {error_msg}"
+                            )
+                        else:
+                            logger.error(f"Unexpected error re-ingesting {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Ingestion error: {error_msg}"
+                            )
+                        
                 except Exception as e:
-                    logger.error(f"Error re-ingesting {doc['filename']}: {str(e)}")
+                    logger.error(f"Error processing document {doc.get('filename', 'unknown')}: {str(e)}")
+                    if doc.get('id'):
+                        self.doc_storage.mark_ingestion_failed(
+                            doc['id'], 
+                            self.embedding_model, 
+                            f"Processing error: {str(e)}"
+                        )
             
             logger.info(f"Re-ingestion complete: {success_count}/{total_docs} documents successful")
             
@@ -1010,23 +1497,44 @@ class ChatPDF:
         """Get statistics about the vector store and collections"""
         try:
             if not self.vector_store:
+                logger.warning("Vector store not initialized")
                 return {
                     "error": "No vector store initialized",
                     "collections": 0,
-                    "total_documents": 0
+                    "total_documents": 0,
+                    "models_loaded": self.models_loaded,
+                    "embedding_model": self.embedding_model
                 }
             
             # Get ChromaDB client
-            chroma_client = self.vector_store._client
+            try:
+                chroma_client = self.vector_store._client
+            except AttributeError as e:
+                logger.error(f"Vector store client not accessible: {e}")
+                return {
+                    "error": "Vector store client not accessible",
+                    "collections": 0,
+                    "total_documents": 0,
+                    "vector_store_type": type(self.vector_store).__name__
+                }
             
             # Get all collections
-            collections = chroma_client.list_collections()
+            try:
+                collections = chroma_client.list_collections()
+            except Exception as e:
+                logger.error(f"Failed to list collections: {e}")
+                return {
+                    "error": f"Failed to list collections: {str(e)}",
+                    "collections": 0,
+                    "total_documents": 0
+                }
             
             stats = {
                 "total_collections": len(collections),
                 "current_collection": self._get_collection_name(),
                 "current_embedding_model": self.embedding_model,
-                "collections": []
+                "collections": [],
+                "size_bytes": 0  # Initialize size counter
             }
             
             total_docs = 0
@@ -1050,15 +1558,110 @@ class ChatPDF:
                     })
             
             stats["total_documents"] = total_docs
+            
+            # Calculate approximate size by checking ChromaDB directory
+            try:
+                import os
+                chroma_path = Path(self.chroma_path)
+                if chroma_path.exists():
+                    total_size = 0
+                    for root, dirs, files in os.walk(chroma_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            try:
+                                total_size += os.path.getsize(file_path)
+                            except OSError:
+                                pass  # Skip files we can't access
+                    stats["size_bytes"] = total_size
+            except Exception as e:
+                logger.warning(f"Could not calculate vector store size: {e}")
+                stats["size_bytes"] = 0
+            
             return stats
             
         except Exception as e:
             logger.error(f"Error getting vector store stats: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 "error": str(e),
                 "collections": 0,
-                "total_documents": 0
+                "total_documents": 0,
+                "traceback": traceback.format_exc()
             }
+    
+    def get_available_embedding_models(self) -> List[str]:
+        """Get list of available embedding models from Ollama"""
+        try:
+            # Get all models from Ollama
+            response = requests.get(f"{self.ollama_url}/api/tags")
+            if response.status_code == 200:
+                models_data = response.json()
+                models = models_data.get('models', [])
+                
+                # Filter for embedding models
+                embedding_models = []
+                for model in models:
+                    model_name = model.get('name', '').lower()
+                    # Check if it's an embedding model based on name patterns
+                    if any(keyword in model_name for keyword in [
+                        'embed', 'embedding', 'bge', 'e5', 'sentence-transformer',
+                        'all-minilm', 'multilingual-e5'
+                    ]):
+                        embedding_models.append(model.get('name', ''))
+                
+                return embedding_models
+            else:
+                logger.error(f"Failed to fetch models from Ollama: {response.status_code}")
+                return []
+        except Exception as e:
+            logger.error(f"Error getting available embedding models: {e}")
+            return []
+    
+    def get_current_embedding_model(self) -> str:
+        """Get the currently configured embedding model"""
+        return self.embedding_model if self.embedding_model else ""
+    
+    def switch_embedding_model(self, model_name: str) -> bool:
+        """Switch to a different embedding model"""
+        try:
+            # Validate model is available
+            available_models = self.get_available_embedding_models()
+            if model_name not in available_models:
+                logger.error(f"Model {model_name} is not available")
+                return False
+            
+            # Update the embedding model
+            old_model = self.embedding_model
+            self.embedding_model = model_name
+            
+            # Reinitialize the embeddings with new model
+            try:
+                self.embeddings = OllamaEmbeddings(
+                    model=model_name,
+                    base_url=self.ollama_url
+                )
+                
+                # Clear the vector store to force reinitialization with new embeddings
+                self.vector_store = None
+                self.retriever = None
+                
+                # Update config if available
+                if hasattr(self, 'config'):
+                    self.config['embedding_model'] = model_name
+                
+                logger.info(f"Successfully switched embedding model from {old_model} to {model_name}")
+                return True
+                
+            except Exception as e:
+                # Rollback on failure
+                self.embedding_model = old_model
+                logger.error(f"Failed to switch embedding model: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error switching embedding model: {e}")
+            return False
 
     async def stream_response(self, question: str, style: str = "standard"):
         """
@@ -1358,10 +1961,25 @@ class ChatPDF:
 
     def _handle_chromadb_operation(self, operation_func, *args, **kwargs):
         """Wrapper to handle ChromaDB operations with automatic permission fixing"""
+        # Debug the documents being added
+        if hasattr(operation_func, '__name__') and operation_func.__name__ == 'add_documents':
+            if args and len(args) > 0:
+                docs = args[0]
+                logger.info(f"🔍 ADD_DOCUMENTS DEBUG: Adding {len(docs)} documents")
+                for i, doc in enumerate(docs[:3]):  # Log first 3 documents
+                    logger.info(f"🔍 DOC {i}: metadata = {doc.metadata}")
+                    logger.info(f"🔍 DOC {i}: content preview = {doc.page_content[:100]}...")
+        
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                return operation_func(*args, **kwargs)
+                result = operation_func(*args, **kwargs)
+                
+                # Log result if it's add_documents
+                if hasattr(operation_func, '__name__') and operation_func.__name__ == 'add_documents':
+                    logger.info(f"✅ ADD_DOCUMENTS SUCCESS: Operation completed")
+                
+                return True  # Return True for success
             except Exception as e:
                 error_msg = str(e).lower()
                 if any(perm_error in error_msg for perm_error in 
@@ -1384,18 +2002,20 @@ class ChatPDF:
                             try:
                                 self._initialize_vector_store()
                                 # Retry the operation once more
-                                return operation_func(*args, **kwargs)
+                                operation_func(*args, **kwargs)
+                                return True
                             except Exception as reinit_error:
                                 logger.error(f"Failed to reinitialize after directory recreation: {reinit_error}")
                         
                         logger.error(f"ChromaDB operation failed after {max_retries} attempts: {e}")
-                        raise
+                        return False
                 else:
                     # Non-permission error, re-raise immediately
-                    raise
+                    logger.error(f"ChromaDB operation failed: {e}")
+                    return False
         
         # This should never be reached
-        raise RuntimeError("Unexpected state in ChromaDB operation handler")
+        return False
 
     def _recreate_chromadb_directory(self):
         """Recreate ChromaDB directory from scratch as a last resort"""
@@ -1440,148 +2060,782 @@ class ChatPDF:
             logger.error(f"ChromaDB write test failed: {e}")
             return False
 
-def get_gpu_memory_info() -> Dict[str, int]:
-    """Get GPU memory information in MB"""
-    try:
-        # Try nvidia-smi first
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'], 
-                              capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            if lines:
-                # Take the first GPU
-                memory_info = lines[0].split(', ')
-                if len(memory_info) >= 3:
-                    total_mb = int(memory_info[0])
-                    used_mb = int(memory_info[1])
-                    free_mb = int(memory_info[2])
-                    return {
-                        'total': total_mb,
-                        'used': used_mb,
-                        'free': free_mb,
-                        'available': free_mb
-                    }
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        pass
-    
-    try:
-        # Fallback: Try to get info from /proc/driver/nvidia/gpus/
-        gpu_dirs = [d for d in os.listdir('/proc/driver/nvidia/gpus/') if os.path.isdir(f'/proc/driver/nvidia/gpus/{d}')]
-        if gpu_dirs:
-            # Read memory info from the first GPU
-            gpu_dir = gpu_dirs[0]
-            with open(f'/proc/driver/nvidia/gpus/{gpu_dir}/information', 'r') as f:
-                content = f.read()
-                # Extract memory info
-                memory_match = re.search(r'Video Memory:\s+(\d+)\s+MB', content)
-                if memory_match:
-                    total_mb = int(memory_match.group(1))
-                    # Estimate available as 80% of total (conservative)
-                    available_mb = int(total_mb * 0.8)
-                    return {
-                        'total': total_mb,
-                        'used': total_mb - available_mb,
-                        'free': available_mb,
-                        'available': available_mb
-                    }
-    except (FileNotFoundError, PermissionError, ValueError):
-        pass
-    
-    # If no GPU info available, return default values
-    logger.warning("Could not determine GPU memory, using default estimates")
-    return {
-        'total': 8192,  # 8GB default
-        'used': 2048,   # 2GB used
-        'free': 6144,   # 6GB free
-        'available': 6144
-    }
-
-def estimate_model_memory_requirement(model_name: str, model_size: str = None) -> int:
-    """Estimate memory requirement for a model in MB"""
-    name_lower = model_name.lower()
-    
-    # If size is provided, try to parse it
-    if model_size and isinstance(model_size, str):
-        size_lower = model_size.lower()
-        # Extract numeric value from size string
-        size_match = re.search(r'(\d+\.?\d*)', size_lower)
-        if size_match:
-            size_value = float(size_match.group(1))
+    def remove_document_from_vectorstore(self, filename: str) -> bool:
+        """Remove document chunks from vector store by filename"""
+        try:
+            if not self.vector_store:
+                logger.warning("Vector store not initialized")
+                return False
             
-            # Convert based on unit
-            if 'gb' in size_lower:
-                return int(size_value * 1024)  # Convert GB to MB
-            elif 'mb' in size_lower:
-                return int(size_value)
-            elif 'b' in size_lower and 'gb' not in size_lower and 'mb' not in size_lower:
-                # Assume it's parameters (e.g., "7b", "13b")
-                # Rule of thumb: 1B parameters ≈ 2GB in FP16, ≈ 1GB in Q4
-                return int(size_value * 1500)  # Conservative estimate for Q4 quantization
-    
-    # Fallback: estimate based on model name patterns
-    if any(size in name_lower for size in ['0.5b', '500m']):
-        return 1024   # ~1GB
-    elif any(size in name_lower for size in ['1b', '1.5b']):
-        return 2048   # ~2GB
-    elif any(size in name_lower for size in ['3b', '2.8b']):
-        return 4096   # ~4GB
-    elif any(size in name_lower for size in ['7b', '6.7b', '8b']):
-        return 8192   # ~8GB
-    elif any(size in name_lower for size in ['13b', '14b', '15b']):
-        return 16384  # ~16GB
-    elif any(size in name_lower for size in ['30b', '32b', '34b']):
-        return 32768  # ~32GB
-    elif any(size in name_lower for size in ['70b', '72b']):
-        return 65536  # ~64GB
-    elif any(size in name_lower for size in ['175b', '180b']):
-        return 131072 # ~128GB
-    
-    # Embedding models are typically smaller
-    if any(keyword in name_lower for keyword in ['embed', 'bge', 'minilm', 'e5', 'sentence']):
-        if 'large' in name_lower:
-            return 1024   # ~1GB for large embedding models
-        else:
-            return 512    # ~512MB for smaller embedding models
-    
-    # Default estimate for unknown models
-    return 4096  # ~4GB default
+            # Get collection name for current embedding model
+            collection_name = f"collection_{self.embedding_model.replace('/', '_').replace('-', '_')}"
+            
+            # Get ChromaDB client
+            chroma_client = self.vector_store._client
+            
+            # Get the collection
+            try:
+                collection = chroma_client.get_collection(collection_name)
+            except Exception as e:
+                logger.warning(f"Collection {collection_name} not found: {e}")
+                return True  # Consider it success if collection doesn't exist
+            
+            # Query for documents with this filename in metadata
+            try:
+                results = collection.get(
+                    where={"source": filename}
+                )
+                
+                if results and results.get('ids'):
+                    # Delete all chunks for this document
+                    collection.delete(ids=results['ids'])
+                    logger.info(f"Removed {len(results['ids'])} chunks for document {filename}")
+                    return True
+                else:
+                    logger.info(f"No chunks found for document {filename}")
+                    return True
+                    
+            except Exception as e:
+                logger.error(f"Error removing document {filename} from vector store: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error removing document from vectorstore: {e}")
+            return False
 
-def check_model_compatibility(model_name: str, model_size: str = None) -> Tuple[bool, str, Dict]:
-    """Check if a model is compatible with current GPU memory"""
-    gpu_info = get_gpu_memory_info()
-    required_memory = estimate_model_memory_requirement(model_name, model_size)
-    
-    # Leave some buffer for system and other processes (20% of total or min 1GB)
-    buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
-    usable_memory = gpu_info['available'] - buffer_memory
-    
-    is_compatible = required_memory <= usable_memory
-    
-    if is_compatible:
-        message = f"✅ Model {model_name} is compatible (requires ~{required_memory}MB, {usable_memory}MB available)"
-    else:
-        shortage = required_memory - usable_memory
-        message = f"❌ Model {model_name} requires ~{required_memory}MB but only {usable_memory}MB available (shortage: {shortage}MB)"
-    
-    return is_compatible, message, {
-        'required_memory_mb': required_memory,
-        'available_memory_mb': usable_memory,
-        'gpu_total_mb': gpu_info['total'],
-        'gpu_used_mb': gpu_info['used'],
-        'gpu_free_mb': gpu_info['free'],
-        'buffer_memory_mb': buffer_memory,
-        'compatible': is_compatible,
-        'shortage_mb': max(0, required_memory - usable_memory)
-    }
+    def remove_document_by_id(self, document_id: int, embedding_models: List[str] = None) -> bool:
+        """Remove document chunks from vector store by document ID across embedding models"""
+        try:
+            if not self.vector_store:
+                logger.warning("Vector store not initialized")
+                return False
+            
+            # If no specific models provided, get all models that have ingested this document
+            if not embedding_models:
+                try:
+                    from document_storage import get_document_storage
+                    doc_storage = get_document_storage()
+                    
+                    # Get all embedding models that have ingested this document
+                    conn = sqlite3.connect(doc_storage.db_path)
+                    cursor = conn.cursor()
+                    
+                    cursor.execute('''
+                        SELECT DISTINCT embedding_model 
+                        FROM ingestion_metadata 
+                        WHERE document_id = ? AND ingestion_status = 'completed'
+                    ''', (document_id,))
+                    
+                    rows = cursor.fetchall()
+                    conn.close()
+                    
+                    embedding_models = [row[0] for row in rows] if rows else [self.embedding_model]
+                    
+                except Exception as e:
+                    logger.warning(f"Could not determine embedding models for document {document_id}: {e}")
+                    # Fallback to current embedding model
+                    embedding_models = [self.embedding_model]
+            
+            total_deleted = 0
+            
+            # Get ChromaDB client
+            chroma_client = self.vector_store._client
+            
+            # Remove from all relevant embedding model collections
+            for model in embedding_models:
+                try:
+                    collection_name = f"collection_{model.replace('/', '_').replace('-', '_')}"
+                    
+                    # Get the collection
+                    try:
+                        collection = chroma_client.get_collection(collection_name)
+                    except Exception as e:
+                        logger.warning(f"Collection {collection_name} not found: {e}")
+                        continue
+                    
+                    # Query for documents with this document_id in metadata
+                    try:
+                        results = collection.get(
+                            where={"document_id": str(document_id)}
+                        )
+                        
+                        if results and results.get('ids'):
+                            # Delete all chunks for this document
+                            collection.delete(ids=results['ids'])
+                            deleted_count = len(results['ids'])
+                            total_deleted += deleted_count
+                            logger.info(f"Removed {deleted_count} chunks for document {document_id} from model {model}")
+                        else:
+                            logger.info(f"No chunks found for document {document_id} in model {model}")
+                            
+                    except Exception as e:
+                        logger.error(f"Error removing document {document_id} from vector store {model}: {e}")
+                        continue
+                        
+                except Exception as e:
+                    logger.error(f"Error processing model {model} for document {document_id}: {e}")
+                    continue
+            
+            logger.info(f"Successfully removed document {document_id} from vector stores. Total chunks deleted: {total_deleted}")
+            return True
+                
+        except Exception as e:
+            logger.error(f"Error removing document {document_id} from vectorstore: {e}")
+            return False
 
-# Add a singleton instance to be used throughout the application
+    def clear_vectorstore(self):
+        """Clear the entire vector store"""
+        try:
+            if self.vector_store and hasattr(self.vector_store, '_collection'):
+                collection = self.vector_store._collection
+                if collection:
+                    # Delete all documents from the collection
+                    collection.delete()
+                    logger.info("Vector store cleared successfully")
+                    return True
+            logger.warning("Vector store not available for clearing")
+            return False
+        except Exception as e:
+            logger.error(f"Error clearing vector store: {e}")
+            return False
+
+    def get_vectorstore_stats(self) -> dict:
+        """Get statistics about the vector store - alias for get_vector_store_stats with debug info"""
+        logger.info("🔍 DEBUG: get_vectorstore_stats() called")
+        try:
+            logger.info(f"🔍 DEBUG: vector_store exists: {self.vector_store is not None}")
+            logger.info(f"🔍 DEBUG: models_loaded: {self.models_loaded}")
+            logger.info(f"🔍 DEBUG: embedding_model: {self.embedding_model}")
+            
+            # Force initialization if not done
+            if not self.vector_store:
+                logger.warning("🔍 DEBUG: Vector store not initialized, attempting initialization")
+                self._initialize_vector_store()
+                logger.info(f"🔍 DEBUG: After initialization, vector_store exists: {self.vector_store is not None}")
+            
+            logger.info("🔍 DEBUG: Calling get_vector_store_stats()")
+            result = self.get_vector_store_stats()
+            logger.info(f"🔍 DEBUG: get_vector_store_stats() returned: {type(result)}")
+            return result
+        except Exception as e:
+            logger.error(f"🔍 DEBUG: Error in get_vectorstore_stats: {e}")
+            import traceback
+            logger.error(f"🔍 DEBUG: Traceback: {traceback.format_exc()}")
+            return {
+                "error": f"Failed to get vectorstore stats: {str(e)}",
+                "collections": 0,
+                "total_documents": 0,
+                "vector_store_initialized": self.vector_store is not None,
+                "models_loaded": self.models_loaded
+            }
+    
+    def reingest_specific_documents(self, document_ids: List[int], 
+                                   chunking_method: ChunkingMethod = None,
+                                   chunking_config: ChunkingConfig = None) -> Dict[str, any]:
+        """
+        Reingest specific documents with optional new chunking configuration
+        
+        Flow:
+        1. Check if documents exist in DB and MinIO
+        2. Delete old chunks from vector store for each document+model
+        3. Download files from MinIO (no re-upload needed)
+        4. Re-apply chunking using stored or provided chunking configuration
+        5. Regenerate embeddings using current embedding model
+        6. Re-index chunks into vector store
+        7. Update ingestion metadata in SQLite DB
+        """
+        try:
+            logger.info(f"Starting reingestion of {len(document_ids)} documents")
+            
+            results = {
+                'total': len(document_ids),
+                'successful': 0,
+                'failed': 0,
+                'failed_ids': [],
+                'details': []
+            }
+            
+            for doc_id in document_ids:
+                try:
+                    # Step 1: Check if document exists in DB and MinIO
+                    doc_info = self.doc_storage.get_document_with_config(doc_id)
+                    if not doc_info:
+                        logger.warning(f"Document {doc_id} not found in database")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'status': 'failed',
+                            'error': 'Document not found in database'
+                        })
+                        continue
+                    
+                    if not self.doc_storage.document_exists_in_storage(doc_id):
+                        logger.warning(f"Document {doc_id} not found in MinIO storage")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'filename': doc_info['filename'],
+                            'status': 'failed',
+                            'error': 'Document not found in MinIO storage'
+                        })
+                        continue
+                    
+                    # Step 2: Delete old chunks from vector store for this document+model
+                    logger.info(f"Removing old chunks for document {doc_id}")
+                    try:
+                        self.remove_document_by_id(doc_id, [self.embedding_model])
+                    except Exception as e:
+                        logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
+                    
+                    # Step 3: Download file from MinIO (temporary file)
+                    temp_file_path = self.doc_storage.get_document_file(doc_id)
+                    
+                    try:
+                        # Step 4: Determine chunking configuration to use
+                        if chunking_method is None:
+                            # Use stored chunking method
+                            stored_method = doc_info.get('chunking_method', 'general')
+                            try:
+                                chunking_method = ChunkingMethod(stored_method)
+                            except ValueError:
+                                logger.warning(f"Unknown stored chunking method '{stored_method}', using general")
+                                chunking_method = ChunkingMethod.GENERAL
+                        
+                        if chunking_config is None:
+                            # Use stored chunking config if available
+                            stored_config = doc_info.get('chunking_config')
+                            if stored_config:
+                                chunking_config = ChunkingConfig.from_dict(stored_config)
+                            else:
+                                # Get default config for the method
+                                from chunking_config import get_chunking_config_manager
+                                config_manager = get_chunking_config_manager()
+                                chunking_config = config_manager.get_config(chunking_method)
+                        
+                        logger.info(f"Reingesting document {doc_id} with method {chunking_method.value}")
+                        
+                        # Step 5-7: Process document with enhanced processor
+                        from enhanced_document_processor import get_document_processor
+                        doc_processor = get_document_processor()
+                        
+                        chunking_result = doc_processor.process_document(
+                            temp_file_path,
+                            chunking_method,
+                            chunking_config,
+                            None,  # user_id not needed for reingestion
+                            original_filename=doc_info['filename']
+                        )
+                        
+                        if not chunking_result.chunks:
+                            raise ValueError("No chunks created during reprocessing")
+                        
+                        logger.info(f"Document {doc_id} reprocessed: {len(chunking_result.chunks)} chunks created")
+                        
+                        # Add chunks to vector store
+                        collection_name = self._get_collection_name()
+                        success = self._add_chunks_to_vector_store(chunking_result.chunks, collection_name)
+                        
+                        if success:
+                            # Update ingestion metadata
+                            simple_metadata = {
+                                'total_chunks': len(chunking_result.chunks),
+                                'method_used': chunking_result.method_used.value,
+                                'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                                'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                                'warnings_count': len(chunking_result.warnings),
+                                'reingestion': True
+                            }
+                            
+                            if chunking_result.warnings:
+                                simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])
+                            
+                            self.doc_storage.track_ingestion(
+                                document_id=doc_id,
+                                embedding_model=self.embedding_model,
+                                vector_store_collection=collection_name,
+                                chunk_count=len(chunking_result.chunks),
+                                metadata=simple_metadata,
+                                chunking_method=chunking_result.method_used.value,
+                                chunking_config=chunking_result.config_used.to_dict()
+                            )
+                            
+                            results['successful'] += 1
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'success',
+                                'chunks_created': len(chunking_result.chunks),
+                                'method_used': chunking_result.method_used.value
+                            })
+                            
+                            logger.info(f"Successfully reingested document {doc_id}: {doc_info['filename']}")
+                        else:
+                            raise ValueError("Failed to add chunks to vector store")
+                    
+                    finally:
+                        # Clean up temporary file
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                
+                except Exception as e:
+                    logger.error(f"Error reingesting document {doc_id}: {e}")
+                    results['failed'] += 1
+                    results['failed_ids'].append(doc_id)
+                    results['details'].append({
+                        'document_id': doc_id,
+                        'filename': doc_info.get('filename', f'document_{doc_id}'),
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+                    
+                    # Mark as failed in database
+                    self.doc_storage.mark_ingestion_failed(
+                        doc_id,
+                        self.embedding_model,
+                        f"Reingestion failed: {str(e)}"
+                    )
+            
+            logger.info(f"Reingestion complete: {results['successful']}/{results['total']} successful")
+            
+            # Ensure retriever is updated if any documents were successfully reingested
+            if results['successful'] > 0:
+                try:
+                    self._ensure_retriever_initialized()
+                    logger.info("Retriever reinitialized after reingestion")
+                except Exception as e:
+                    logger.warning(f"Failed to reinitialize retriever: {e}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error during document reingestion: {e}")
+            return {
+                'total': len(document_ids),
+                'successful': 0,
+                'failed': len(document_ids),
+                'failed_ids': document_ids,
+                'error': str(e)
+            }
+
+    def reingest_specific_documents_with_config(self, documents_config: List[dict]) -> dict:
+        """
+        Re-ingest specific documents with per-document chunking configuration
+        Each document can have its own chunking method and config
+        
+        Args:
+            documents_config: List of dicts with keys:
+                - document_id: int
+                - chunking_method: ChunkingMethod (optional)
+                - chunking_config: ChunkingConfig (optional)
+        
+        Returns:
+            Dict with reingestion results
+        """
+        try:
+            logger.info(f"Starting reingestion of {len(documents_config)} documents with per-document configuration")
+            
+            results = {
+                'total': len(documents_config),
+                'successful': 0,
+                'failed': 0,
+                'failed_ids': [],
+                'details': []
+            }
+            
+            for doc_config in documents_config:
+                doc_id = doc_config['document_id']
+                chunking_method = doc_config.get('chunking_method')
+                chunking_config = doc_config.get('chunking_config')
+                
+                try:
+                    # Step 1: Check if document exists in DB and MinIO
+                    doc_info = self.doc_storage.get_document_with_config(doc_id)
+                    if not doc_info:
+                        logger.warning(f"Document {doc_id} not found in database")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'status': 'failed',
+                            'error': 'Document not found in database'
+                        })
+                        continue
+                    
+                    if not self.doc_storage.document_exists_in_storage(doc_id):
+                        logger.warning(f"Document {doc_id} not found in MinIO storage")
+                        results['failed'] += 1
+                        results['failed_ids'].append(doc_id)
+                        results['details'].append({
+                            'document_id': doc_id,
+                            'filename': doc_info['filename'],
+                            'status': 'failed',
+                            'error': 'Document not found in MinIO storage'
+                        })
+                        continue
+                    
+                    # Step 2: Delete old chunks from vector store for this document+model
+                    logger.info(f"Removing old chunks for document {doc_id}")
+                    try:
+                        self.remove_document_by_id(doc_id, [self.embedding_model])
+                    except Exception as e:
+                        logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
+                    
+                    # Step 3: Download file from MinIO (temporary file)
+                    temp_file_path = self.doc_storage.get_document_file(doc_id)
+                    
+                    try:
+                        # Step 4: Determine chunking configuration to use
+                        if chunking_method is None:
+                            # Use stored chunking method
+                            stored_method = doc_info.get('chunking_method', 'general')
+                            try:
+                                chunking_method = ChunkingMethod(stored_method)
+                            except ValueError:
+                                logger.warning(f"Unknown stored chunking method '{stored_method}', using general")
+                                chunking_method = ChunkingMethod.GENERAL
+                        
+                        if chunking_config is None:
+                            # Use stored chunking config if available
+                            stored_config = doc_info.get('chunking_config')
+                            if stored_config:
+                                chunking_config = ChunkingConfig.from_dict(stored_config)
+                            else:
+                                # Get default config for the method
+                                from chunking_config import get_chunking_config_manager
+                                config_manager = get_chunking_config_manager()
+                                chunking_config = config_manager.get_config(chunking_method)
+                        
+                        logger.info(f"Reingesting document {doc_id} with method {chunking_method.value}")
+                        
+                        # Step 5-7: Process document with enhanced processor
+                        from enhanced_document_processor import get_document_processor
+                        doc_processor = get_document_processor()
+                        
+                        chunking_result = doc_processor.process_document(
+                            temp_file_path,
+                            chunking_method,
+                            chunking_config,
+                            None,  # user_id not needed for reingestion
+                            original_filename=doc_info['filename']
+                        )
+                        
+                        if not chunking_result.chunks:
+                            results['failed'] += 1
+                            results['failed_ids'].append(doc_id)
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'failed',
+                                'error': 'No chunks generated during processing'
+                            })
+                            continue
+                        
+                        # Add to vector store using existing ingest flow
+                        collection_name = f"embeddings_{self.embedding_model.replace('-', '_')}"
+                        
+                        # Track ingestion metadata
+                        simple_metadata = {
+                            'method_used': chunking_result.method_used.value,
+                            'chunk_count': len(chunking_result.chunks),
+                            'file_format': chunking_result.metadata.get('file_format', 'unknown') if chunking_result.metadata else 'unknown',
+                            'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                            'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                            'warnings_count': len(chunking_result.warnings) if chunking_result.warnings else 0
+                        }
+                        
+                        if chunking_result.warnings:
+                            simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])
+                        
+                        # Add chunks directly to vector store
+                        success = self._add_chunks_to_vector_store(chunking_result.chunks, collection_name)
+                        
+                        if success:
+                            # Update document metadata in storage
+                            try:
+                                self.storage.update_document_metadata(
+                                    doc_id,
+                                    chunking_method=chunking_result.method_used.value,
+                                    chunk_count=len(chunking_result.chunks),
+                                    metadata=simple_metadata
+                                )
+                            except Exception as storage_error:
+                                logger.warning(f"Failed to update document metadata: {storage_error}")
+                                # Continue anyway as the reingestion was successful
+                        
+                        if success:
+                            results['successful'] += 1
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'success',
+                                'chunks_created': len(chunking_result.chunks),
+                                'method_used': chunking_result.method_used.value
+                            })
+                            logger.info(f"Successfully reingested document {doc_id}: {doc_info['filename']}")
+                        else:
+                            results['failed'] += 1
+                            results['failed_ids'].append(doc_id)
+                            results['details'].append({
+                                'document_id': doc_id,
+                                'filename': doc_info['filename'],
+                                'status': 'failed',
+                                'error': 'Failed during vector store ingestion'
+                            })
+                    
+                    finally:
+                        # Clean up temporary file
+                        if temp_file_path and os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                
+                except Exception as e:
+                    logger.error(f"Error reingesting document {doc_id}: {e}")
+                    results['failed'] += 1
+                    results['failed_ids'].append(doc_id)
+                    results['details'].append({
+                        'document_id': doc_id,
+                        'status': 'failed',
+                        'error': str(e)
+                    })
+            
+            logger.info(f"Reingestion complete: {results['successful']}/{results['total']} successful")
+            
+            # Ensure retriever is updated if any documents were successfully reingested
+            if results['successful'] > 0:
+                try:
+                    self._ensure_retriever_initialized()
+                    logger.info("Retriever reinitialized after reingestion")
+                except Exception as e:
+                    logger.warning(f"Failed to reinitialize retriever: {e}")
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error during document reingestion with config: {e}")
+            return {
+                'total': len(documents_config),
+                'successful': 0,
+                'failed': len(documents_config),
+                'failed_ids': [doc['document_id'] for doc in documents_config],
+                'error': str(e)
+            }
+
+    def reingest_all_documents(self) -> bool:
+        """Re-ingest all documents into vector store"""
+        logger.info("🔍 DEBUG: reingest_all_documents() called")
+        return self.reingest_all_documents_for_current_model()
+
+    def ingest_with_storage_and_chunking(self, file_path: str, original_filename: str = None,
+                                        chunking_method: ChunkingMethod = None, 
+                                        chunking_config: ChunkingConfig = None,
+                                        user_id: str = None) -> bool:
+        """
+        Ingest a document using enhanced processing with configurable chunking methods
+        """
+        try:
+            logger.info(f"Starting enhanced ingestion: {file_path}")
+            
+            if not os.path.exists(file_path):
+                logger.error(f"File not found: {file_path}")
+                return False
+
+            # Use provided original filename or extract from path
+            if original_filename is None:
+                original_filename = Path(file_path).name
+            
+            # Determine file type and optimal chunking method
+            file_ext = Path(file_path).suffix[1:]  # Remove dot
+            if chunking_method is None:
+                chunking_method = FileFormatSupport.get_optimal_method(file_ext)
+            
+            # Get chunking configuration
+            config_manager = get_chunking_config_manager()
+            if chunking_config is None:
+                chunking_config = config_manager.get_config(chunking_method, user_id)
+            
+            # Validate that the method supports this file type
+            if not FileFormatSupport.is_supported(chunking_method, file_ext):
+                logger.warning(f"Method {chunking_method.value} not supported for {file_ext}, using general")
+                chunking_method = ChunkingMethod.GENERAL
+                chunking_config = config_manager.get_config(chunking_method, user_id)
+            
+            # Determine content type
+            content_type_map = {
+                'pdf': 'application/pdf',
+                'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                'doc': 'application/msword',
+                'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'xls': 'application/vnd.ms-excel',
+                'ppt': 'application/vnd.ms-powerpoint',
+                'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                'txt': 'text/plain',
+                'csv': 'text/csv',
+                'html': 'text/html',
+                'json': 'application/json',
+                'eml': 'message/rfc822'
+            }
+            content_type = content_type_map.get(file_ext, 'application/octet-stream')
+            
+            # Store document in MinIO with chunking configuration
+            doc_info = self.doc_storage.store_document(
+                file_path, 
+                original_filename, 
+                content_type,
+                chunking_method.value,
+                chunking_config.to_dict()
+            )
+            
+            logger.info(f"Document stored with ID: {doc_info['id']}")
+            
+            # Process document with enhanced processor
+            doc_processor = get_document_processor()
+            
+            try:
+                chunking_result = doc_processor.process_document(
+                    file_path, 
+                    chunking_method, 
+                    chunking_config, 
+                    user_id,
+                    original_filename  # Pass the original filename
+                )
+                
+                logger.info(f"Document processed: {len(chunking_result.chunks)} chunks created using {chunking_result.method_used.value}")
+                
+                # Log any warnings
+                if chunking_result.warnings:
+                    for warning in chunking_result.warnings:
+                        logger.warning(f"Chunking warning: {warning}")
+                
+                # Add chunks to vector store
+                collection_name = self._get_collection_name()
+                success = self._add_chunks_to_vector_store(chunking_result.chunks, collection_name)
+                
+                if success:
+                    # Track successful ingestion with chunking information
+                    # Create simple metadata instead of spreading complex objects
+                    simple_metadata = {
+                        'total_chunks': len(chunking_result.chunks),
+                        'method_used': chunking_result.method_used.value,
+                        'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                        'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                        'warnings_count': len(chunking_result.warnings)
+                    }
+                    
+                    # Add warning messages as a simple string
+                    if chunking_result.warnings:
+                        simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])  # Limit to first 3 warnings
+                    
+                    self.doc_storage.track_ingestion(
+                        document_id=doc_info['id'],
+                        embedding_model=self.embedding_model,
+                        vector_store_collection=collection_name,
+                        chunk_count=len(chunking_result.chunks),
+                        metadata=simple_metadata,
+                        chunking_method=chunking_result.method_used.value,
+                        chunking_config=chunking_result.config_used.to_dict()
+                    )
+                    logger.info(f"Successfully ingested document {doc_info['id']} with {chunking_method.value} chunking")
+                    return True
+                else:
+                    self.doc_storage.mark_ingestion_failed(
+                        doc_info['id'], 
+                        self.embedding_model, 
+                        "Failed to add chunks to vector store"
+                    )
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Failed to process document with enhanced processor: {e}")
+                self.doc_storage.mark_ingestion_failed(
+                    doc_info['id'], 
+                    self.embedding_model, 
+                    f"Document processing failed: {str(e)}"
+                )
+                return False
+            
+        except Exception as e:
+            logger.error(f"Enhanced document ingestion failed: {str(e)}", exc_info=True)
+            return False
+
+
+def check_model_compatibility(model_name, model_size=None):
+    """
+    Check if a model is compatible with the current system.
+    Returns: (is_compatible, message, details)
+    """
+    try:
+        # Import the detailed compatibility check from main
+        from main import check_model_compatibility_detailed
+        return check_model_compatibility_detailed(model_name, model_size)
+    except ImportError:
+        # Fallback implementation if main functions are not available
+        logger.warning("Could not import detailed GPU compatibility check, using fallback")
+        
+        if not model_name:
+            return False, "No model specified", {}
+        
+        # Basic compatibility check - if model name is valid, consider it compatible
+        return True, f"Model {model_name} is compatible (fallback check)", {
+            "model": model_name,
+            "size": model_size or "Unknown",
+            "status": "compatible_fallback"
+        }
+    except Exception as e:
+        logger.error(f"Error checking model compatibility for {model_name}: {e}")
+        return False, f"Error checking compatibility: {str(e)}", {}
+
+
+# Global singleton instance
 _chatpdf_instance = None
 
 def get_chatpdf_instance():
-    """Get the singleton instance of ChatPDF"""
+    """Get singleton instance of ChatPDF"""
     global _chatpdf_instance
-    if (_chatpdf_instance is None):
-        logger.info("Creating new ChatPDF instance")
-        _chatpdf_instance = ChatPDF()
-        logger.info("ChatPDF instance created successfully")
+    if _chatpdf_instance is None:
+        # Load current model settings from database or config file first
+        llm_model = "deepseek-r1:latest"
+        embedding_model = "mxbai-embed-large"
+        
+        try:
+            # First try to load from database
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            db_settings = chat_db.get_latest_model_settings()
+            
+            if db_settings:
+                llm_model = db_settings.get('llm', llm_model)
+                embedding_model = db_settings.get('embedding', embedding_model)
+                logger.info(f"Loaded current models from database for singleton: LLM={llm_model}, Embedding={embedding_model}")
+            else:
+                # Fallback to config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        llm_model = settings.get('llm', llm_model)
+                        embedding_model = settings.get('embedding', embedding_model)
+                        logger.info(f"Loaded current models from config for singleton: LLM={llm_model}, Embedding={embedding_model}")
+        except Exception as e:
+            logger.warning(f"Could not load current models for singleton, using defaults: {e}")
+        
+        _chatpdf_instance = ChatPDF(llm_model=llm_model, embedding_model=embedding_model)
+    else:
+        # Instance exists, check for updated settings
+        try:
+            _chatpdf_instance.reload_model_settings()
+        except Exception as e:
+            logger.warning(f"Could not reload model settings: {e}")
+            
     return _chatpdf_instance
+
+def reset_chatpdf_instance():
+    """Reset the singleton instance (useful for testing or model changes)"""
+    global _chatpdf_instance
+    if _chatpdf_instance:
+        # Clear GPU memory before resetting
+        try:
+            _chatpdf_instance.clear_gpu_memory()
+        except Exception as e:
+            logger.warning(f"Error clearing GPU memory during reset: {e}")
+    _chatpdf_instance = None

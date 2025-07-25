@@ -1,6 +1,6 @@
 # eChat - AI Chat Application
 
-A modern chat application with AI capabilities using DeepSeek R1, Ollama, and RLHF (Reinforcement Learning from Human Feedback).
+A modern, intelligent chat application with comprehensive AI capabilities featuring multi-model support through Ollama, advanced document processing with RAG (Retrieval-Augmented Generation), and RLHF (Reinforcement Learning from Human Feedback) for enhanced AI responses.
 
 ![Demo](assets/demo.gif)
 

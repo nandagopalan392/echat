@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import UserMenu from './UserMenu';
 import ChatSidebar from './ChatSidebar';
@@ -534,8 +535,6 @@ const cleanStreamingContent = (content) => {
     .replace(/\\+}/g, '}')         // Fix escaped braces
     .replace(/"{/g, '{')           // Remove quotes before object start
     .replace(/}"/g, '}')           // Remove quotes after object end
-    .replace(/^"/, '')             // Remove start quote
-    .replace(/"$/, '')             // Remove end quote
     // Then remove JSON structure artifacts
     .replace(/^{"type": "start"}\s*/, '')              // Remove start markers
     .replace(/{"type": "end"[^}]*}\s*$/, '')           // Remove end markers
@@ -703,6 +702,7 @@ const cleanSelectedResponse = (response) => {
 };
 
 const Chat = () => {
+    const navigate = useNavigate();
     const [messages, setMessages] = useState([]);
     const [inputMessage, setInputMessage] = useState('');
     const [sessionId, setSessionId] = useState(null);
@@ -724,8 +724,10 @@ const Chat = () => {
     const [showResponseOptions, setShowResponseOptions] = useState(false);
     const [responseOptions, setResponseOptions] = useState([]);
     const [optionsMessageId, setOptionsMessageId] = useState(null);
-    const [showKnowledgeHub, setShowKnowledgeHub] = useState(false);
     const [showModelSettings, setShowModelSettings] = useState(false);
+    const [pendingRlhfSelection, setPendingRlhfSelection] = useState(false);
+    // Removed showKnowledgeHub state as Knowledge Hub now navigates directly
+
 
     const roles = ['Engineer', 'Manager', 'Business Development', 'Associate'];
 
@@ -735,22 +737,6 @@ const Chat = () => {
         // Optionally, refresh admin status on token/user change
         // eslint-disable-next-line
     }, []);
-
-    // Close Knowledge Hub dropdown when clicking outside
-    useEffect(() => {
-        const handleClickOutside = (event) => {
-            if (showKnowledgeHub && !event.target.closest('.knowledge-hub-container')) {
-                setShowKnowledgeHub(false);
-            }
-        };
-
-        if (showKnowledgeHub) {
-            document.addEventListener('mousedown', handleClickOutside);
-            return () => {
-                document.removeEventListener('mousedown', handleClickOutside);
-            };
-        }
-    }, [showKnowledgeHub]);
 
     const checkAdminStatus = async () => {
         debugLog("Checking admin status...");
@@ -800,7 +786,9 @@ const Chat = () => {
         try {
             for (const file of files) {
                 const fileExt = file.name.split('.').pop().toLowerCase();
-                if (!['xlsx', 'csv', 'docx', 'pdf'].includes(fileExt)) {
+                const supportedExtensions = ['xlsx', 'csv', 'docx', 'doc', 'pdf', 'txt', 'md', 'ppt', 'pptx', 'html', 'json', 'eml', 'jpg', 'jpeg', 'png', 'gif', 'tif'];
+                
+                if (!supportedExtensions.includes(fileExt)) {
                     showUploadStatus('Unsupported file type', true);
                     continue;
                 }
@@ -819,6 +807,7 @@ const Chat = () => {
                     ? file.webkitRelativePath 
                     : file.name;
                 
+                // Original upload without chunking configuration
                 await api.uploadFileWithProgress(
                     file,
                     isFolder,
@@ -982,6 +971,7 @@ const Chat = () => {
             setShowResponseOptions(false);
             setResponseOptions([]);
             setOptionsMessageId(null);  // Clear the options message ID
+            setPendingRlhfSelection(false); // Allow new messages after selection
             
             // Handle RLHF feedback and save selected response to backend
             if (isRLHF && sessionId) {
@@ -1177,7 +1167,6 @@ const Chat = () => {
               const content = contentMatch[1]
                 .replace(/\\"/g, '"')
                 .replace(/\\n/g, '\n');
-              
               displayContent = content;
             }
           }
@@ -1265,7 +1254,22 @@ const Chat = () => {
     // Improved handleSubmit function with better error handling
 const handleSubmit = async (e) => {
   e.preventDefault();
+  
+  // Debug logging
+  debugLog("handleSubmit called - pendingRlhfSelection:", pendingRlhfSelection);
+  debugLog("handleSubmit called - showResponseOptions:", showResponseOptions);
+  debugLog("handleSubmit called - inputMessage:", inputMessage);
+  
   if (!inputMessage.trim()) return;
+  
+  // Strong prevention for RLHF scenarios
+  if (pendingRlhfSelection || showResponseOptions) {
+    debugLog("BLOCKING: RLHF selection pending");
+    showNotification('Please select one of the response options before sending a new message.', true);
+    // Clear the input to prevent confusion
+    setInputMessage('');
+    return;
+  }
   
   // Add user message immediately 
   const userMsgObj = { 
@@ -1344,6 +1348,7 @@ const handleSubmit = async (e) => {
       setResponseOptions(responseData.response_options);
       setOptionsMessageId(aiMessageId);
       setShowResponseOptions(true);
+      setPendingRlhfSelection(true); // Prevent new messages until selection is made
     } else {
       // Regular response - just use content without think tags
       // The thinking information is typically not shown for regular responses
@@ -1411,108 +1416,25 @@ const handleSubmit = async (e) => {
                             {/* Only show upload button for admin */}
                             {isAdmin && (
                                 <div className="relative">
-                                    {/* Knowledge Hub Button with Dropdown */}
-                                    <div className="relative inline-block knowledge-hub-container">
-                                        <button
-                                            onClick={() => setShowKnowledgeHub(!showKnowledgeHub)}
-                                            className="flex items-center px-4 py-2 bg-purple-50 text-purple-600 rounded-lg cursor-pointer hover:bg-purple-100 transition-colors duration-200"
-                                        >
-                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-                                            </svg>
-                                            Knowledge Hub
-                                            <svg className={`ml-2 h-4 w-4 transition-transform duration-200 ${showKnowledgeHub ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                            </svg>
-                                        </button>
-                                        
-                                        {/* Dropdown Menu */}
-                                        {showKnowledgeHub && (
-                                            <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-50 border border-gray-200">
-                                                <div className="py-1">
-                                                    {/* Upload Files Option */}
-                                                    <label className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">
-                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                                        </svg>
-                                                        Upload Files
-                                                        <input
-                                                            type="file"
-                                                            accept=".xlsx,.csv,.docx,.pdf"
-                                                            multiple
-                                                            onChange={(e) => {
-                                                                handleFileUpload(e, false);
-                                                                setShowKnowledgeHub(false);
-                                                            }}
-                                                            className="hidden"
-                                                        />
-                                                    </label>
-                                                    
-                                                    {/* Upload Folder Option */}
-                                                    <label className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer">
-                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                                                        </svg>
-                                                        Upload Folder
-                                                        <input
-                                                            type="file"
-                                                            webkitdirectory="true"
-                                                            directory="true"
-                                                            multiple
-                                                            onChange={(e) => {
-                                                                handleFileUpload(e, true);
-                                                                setShowKnowledgeHub(false);
-                                                            }}
-                                                            className="hidden"
-                                                        />
-                                                    </label>
-                                                    
-                                                    {/* View Files Option */}
-                                                    <button
-                                                        onClick={() => {
-                                                            setShowFileList(true);
-                                                            setShowKnowledgeHub(false);
-                                                        }}
-                                                        className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 cursor-pointer"
-                                                    >
-                                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                                                        </svg>
-                                                        View Knowledge Base
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        )}
-                                    </div>
-                                    
-                                    {uploadStatus && (
-                                        <div className={`absolute top-full left-0 right-0 mt-1 px-2 py-1 text-sm text-center rounded ${
-                                            uploadStatus.isError ? 'bg-red-500' : 'bg-green-500'
-                                        } text-white z-40`}>
-                                            {uploadStatus.message}
-                                        </div>
-                                    )}
+                                    {/* Knowledge Hub Navigation Button */}
+                                    <button
+                                        onClick={() => navigate('/knowledge-hub')}
+                                        className="flex items-center px-4 py-2 bg-purple-50 text-purple-600 rounded-lg cursor-pointer hover:bg-purple-100 transition-colors duration-200"
+                                    >
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                                        </svg>
+                                        Knowledge Hub
+                                    </button>
                                 </div>
                             )}
                             
                             {/* Add User Management Button for Admin */}
-                            {isAdmin ? (
+                            {isAdmin && (
                                 <>
                                     <button
-                                        onClick={() => setShowActivityDashboard(true)}
+                                        onClick={() => navigate('/manage-users')}
                                         className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100"
-                                    >
-                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                                        </svg>
-                                        All Users
-                                    </button>
-                                    <button
-                                        onClick={() => {
-                                            setShowUserManagement(!showUserManagement);
-                                        }}
-                                        className="flex items-center px-4 py-2 bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition-colors duration-200"
                                     >
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
@@ -1522,7 +1444,7 @@ const handleSubmit = async (e) => {
                                     
                                     {/* Model Settings Button */}
                                     <button
-                                        onClick={() => setShowModelSettings(true)}
+                                        onClick={() => navigate('/model-settings')}
                                         className="flex items-center px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors duration-200"
                                     >
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1532,8 +1454,6 @@ const handleSubmit = async (e) => {
                                         Model Settings
                                     </button>
                                 </>
-                            ) : (
-                                <div className="text-red-500 text-sm font-semibold ml-4">Admin access required for these features.</div>
                             )}
                             
                             <UserMenu />
@@ -1600,22 +1520,51 @@ const handleSubmit = async (e) => {
 
                         {/* Input form */}
                         <div className="bg-white border-t p-4">
+                            {/* RLHF Selection Pending Warning */}
+                            {(pendingRlhfSelection || showResponseOptions) && (
+                                <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                                    <div className="flex items-center">
+                                        <svg className="w-5 h-5 text-amber-600 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                        </svg>
+                                        <span className="text-amber-800 font-medium">
+                                            Please select one of the response options above before continuing the conversation.
+                                        </span>
+                                    </div>
+                                </div>
+                            )}
+                            
                             <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex gap-4">
                                 <input
                                     type="text"
                                     value={inputMessage}
-                                    onChange={(e) => setInputMessage(e.target.value)}
-                                    placeholder="Type your message..."
+                                    onChange={(e) => {
+                                        // Prevent typing when RLHF selection is pending
+                                        if (pendingRlhfSelection || showResponseOptions) {
+                                            showNotification('Please select a response option first.', true);
+                                            return;
+                                        }
+                                        setInputMessage(e.target.value);
+                                    }}
+                                    onKeyDown={(e) => {
+                                        // Also prevent Enter key when RLHF selection is pending
+                                        if ((pendingRlhfSelection || showResponseOptions) && e.key === 'Enter') {
+                                            e.preventDefault();
+                                            showNotification('Please select a response option first.', true);
+                                            return;
+                                        }
+                                    }}
+                                    placeholder={pendingRlhfSelection ? "Please select a response option first..." : "Type your message..."}
                                     className={`flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent ${
-                                        isProcessing ? 'opacity-50' : ''
+                                        isProcessing || pendingRlhfSelection ? 'opacity-50' : ''
                                     }`}
-                                    disabled={isProcessing}
+                                    disabled={isProcessing || pendingRlhfSelection}
                                 />
                                 <button 
                                     type="submit"
-                                    disabled={isProcessing}
+                                    disabled={isProcessing || pendingRlhfSelection}
                                     className={`px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                                        isProcessing ? 'opacity-50 cursor-not-allowed' : ''
+                                        isProcessing || pendingRlhfSelection ? 'opacity-50 cursor-not-allowed' : ''
                                     }`}
                                 >
                                     {isProcessing ? <LoadingSpinner /> : 'Send'}
@@ -1692,31 +1641,9 @@ const handleSubmit = async (e) => {
             </div>
 
             {/* Modals and Dashboards */}
-            {showFileList && (
-                <FileListDashboard onClose={() => setShowFileList(false)} />
-            )}
-            {showActivityDashboard && (
-                <ActivityDashboard onClose={() => setShowActivityDashboard(false)} />
-            )}
             {/* Show UserDashboard as modal only when a user is selected from the list */}
             {selectedUsername && (
                 <UserDashboard username={selectedUsername} onClose={() => setSelectedUsername(null)} />
-            )}
-            {/* Model Settings Modal */}
-            {showModelSettings && (
-                <ModelSettings 
-                    isOpen={showModelSettings}
-                    onClose={() => setShowModelSettings(false)}
-                    onSave={(settings) => {
-                        console.log('Model settings saved:', settings);
-                        // Optionally show a success notification
-                        setNotification({
-                            message: 'Model settings saved successfully!',
-                            type: 'success'
-                        });
-                        setTimeout(() => setNotification(null), 3000);
-                    }}
-                />
             )}
         </div>
     );

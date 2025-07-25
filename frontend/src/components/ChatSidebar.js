@@ -42,7 +42,7 @@ const ChatSidebar = ({ onSelectSession, currentSessionId }) => {
                             }`}
                         >
                             <span className="text-sm font-medium">
-                                {session.topic || 'New Chat'}
+                                {session.topic || session.title || 'New Chat'}
                             </span>
                         </div>
                     ))}

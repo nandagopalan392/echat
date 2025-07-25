@@ -104,6 +104,31 @@ class ChatDB:
                     )
                 ''')
 
+                # Create chunking configurations table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS chunking_configs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT NOT NULL,
+                        method TEXT NOT NULL,
+                        config_data TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, method),
+                        FOREIGN KEY (user_id) REFERENCES users (username)
+                    )
+                ''')
+
+                # Create model settings table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS model_settings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        llm TEXT NOT NULL,
+                        embedding TEXT NOT NULL,
+                        parameters TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
                 conn.commit()
                 logger.info("Database initialized successfully")
 
@@ -235,10 +260,14 @@ class ChatDB:
                 sessions = []
                 for row in cursor.fetchall():
                     topic = row['topic'] if row['topic'] else "New Chat"
+                    # Truncate long topics for better display
+                    if topic and len(topic) > 50:
+                        topic = topic[:50] + "..."
                     sessions.append({
                         "id": row['id'],
                         "date": row['created_at'],
-                        "topic": topic
+                        "topic": topic,
+                        "title": topic  # Add title field for compatibility
                     })
                 return sessions
         except Exception as e:
@@ -374,9 +403,21 @@ class ChatDB:
     def get_all_users(self):
         try:
             with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute('SELECT username, is_admin, role FROM users')
-                return [{"username": row[0], "is_admin": row[1], "role": row[2]} for row in cursor.fetchall()]
+                cursor.execute('''
+                    SELECT username, is_admin, role 
+                    FROM users 
+                    ORDER BY username
+                ''')
+                users = []
+                for row in cursor.fetchall():
+                    users.append({
+                        "username": row["username"], 
+                        "is_admin": row["is_admin"], 
+                        "role": row["role"]
+                    })
+                return users
         except Exception as e:
             logger.error(f"Get users error: {str(e)}")
             return []
@@ -875,3 +916,289 @@ class ChatDB:
                         
         except Exception as e:
             logger.error(f"Error recovering RLHF responses for session {session_id}: {str(e)}")
+
+    def get_user_count(self):
+        """Get total number of users"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM users")
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting user count: {str(e)}")
+            return 0
+    
+    def get_active_user_count(self):
+        """Get number of users who have been active in the last 30 days"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT username) FROM chat_sessions 
+                    WHERE last_updated >= datetime('now', '-30 days')
+                """)
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting active user count: {str(e)}")
+            return 0
+    
+    def get_total_sessions(self):
+        """Get total number of chat sessions"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM chat_sessions")
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting total sessions: {str(e)}")
+            return 0
+
+    # Chunking Configuration Methods
+    def save_chunking_config(self, user_id, method, config_data):
+        """Save or update chunking configuration for a user and method"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                now = datetime.now()
+                
+                # Convert config_data to JSON string if it's a dict
+                config_json = json.dumps(config_data) if isinstance(config_data, dict) else config_data
+                
+                cursor.execute('''
+                    INSERT OR REPLACE INTO chunking_configs (user_id, method, config_data, updated_at)
+                    VALUES (?, ?, ?, ?)
+                ''', (user_id, method, config_json, now))
+                
+                conn.commit()
+                logger.info(f"Saved chunking config for user {user_id}, method {method}")
+                return True
+        except Exception as e:
+            logger.error(f"Error saving chunking config: {str(e)}")
+            return False
+
+    def get_chunking_config(self, user_id, method):
+        """Get chunking configuration for a user and method"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT config_data FROM chunking_configs 
+                    WHERE user_id = ? AND method = ?
+                ''', (user_id, method))
+                
+                result = cursor.fetchone()
+                if result:
+                    return json.loads(result[0])
+                return None
+        except Exception as e:
+            logger.error(f"Error getting chunking config: {str(e)}")
+            return None
+
+    def get_user_chunking_configs(self, user_id):
+        """Get all chunking configurations for a user"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT method, config_data, updated_at FROM chunking_configs 
+                    WHERE user_id = ?
+                    ORDER BY method
+                ''', (user_id,))
+                
+                results = cursor.fetchall()
+                configs = {}
+                for method, config_data, updated_at in results:
+                    configs[method] = {
+                        'config': json.loads(config_data),
+                        'updated_at': updated_at
+                    }
+                return configs
+        except Exception as e:
+            logger.error(f"Error getting user chunking configs: {str(e)}")
+            return {}
+
+    def delete_chunking_config(self, user_id, method):
+        """Delete chunking configuration for a user and method"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    DELETE FROM chunking_configs 
+                    WHERE user_id = ? AND method = ?
+                ''', (user_id, method))
+                
+                conn.commit()
+                logger.info(f"Deleted chunking config for user {user_id}, method {method}")
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Error deleting chunking config: {str(e)}")
+            return False
+    
+    def get_total_messages(self):
+        """Get total number of messages"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM messages")
+                result = cursor.fetchone()
+                return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting total messages: {str(e)}")
+            return 0
+
+    def get_user_by_username(self, username):
+        """Get user details by username"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT username, created_at, is_admin, role, 
+                           last_login, is_active, email
+                    FROM users 
+                    WHERE username = ?
+                """, (username,))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "username": row["username"],
+                        "created_at": row["created_at"],
+                        "role": row["role"] if row["role"] else "user",
+                        "is_admin": bool(row["is_admin"]),
+                        "last_login": row.get("last_login", ""),
+                        "is_active": row.get("is_active", True),
+                        "email": row.get("email", "")
+                    }
+                return None
+        except Exception as e:
+            logger.error(f"Error getting user by username: {str(e)}")
+            return None
+
+    def get_user_sessions(self, username, limit=None):
+        """Get user sessions with optional limit"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                query = """
+                    SELECT cs.id, cs.created_at, cs.last_updated,
+                           COALESCE(cs.topic, 
+                                   (SELECT content FROM messages 
+                                    WHERE session_id = cs.id AND is_user = 1 
+                                    ORDER BY timestamp ASC LIMIT 1)
+                           ) as title,
+                           (SELECT COUNT(*) FROM messages WHERE session_id = cs.id) as message_count
+                    FROM chat_sessions cs
+                    WHERE username = ? 
+                    ORDER BY last_updated DESC
+                """
+                
+                if limit:
+                    query += f" LIMIT {limit}"
+                
+                cursor.execute(query, (username,))
+                sessions = []
+                for row in cursor.fetchall():
+                    sessions.append({
+                        "id": row["id"],
+                        "title": row["title"][:100] if row["title"] else "Untitled Session",
+                        "created_at": row["created_at"],
+                        "last_updated": row["last_updated"],
+                        "message_count": row["message_count"]
+                    })
+                return sessions
+        except Exception as e:
+            logger.error(f"Error getting user sessions: {str(e)}")
+            return []
+
+    def get_user_chat_stats(self, username):
+        """Get user chat statistics"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                # Get total session and message counts
+                cursor.execute("""
+                    SELECT 
+                        COUNT(DISTINCT cs.id) as session_count,
+                        COUNT(m.id) as message_count
+                    FROM chat_sessions cs
+                    LEFT JOIN messages m ON cs.id = m.session_id
+                    WHERE cs.username = ?
+                """, (username,))
+                
+                totals = cursor.fetchone()
+                
+                # Get recent activity (last 7 days)
+                cursor.execute("""
+                    SELECT 
+                        COUNT(DISTINCT cs.id) as recent_sessions,
+                        COUNT(m.id) as recent_messages
+                    FROM chat_sessions cs
+                    LEFT JOIN messages m ON cs.id = m.session_id
+                    WHERE cs.username = ? 
+                    AND cs.created_at >= datetime('now', '-7 days')
+                """, (username,))
+                
+                recent = cursor.fetchone()
+                
+                return {
+                    "session_count": totals["session_count"] if totals else 0,
+                    "message_count": totals["message_count"] if totals else 0,
+                    "recent_sessions": recent["recent_sessions"] if recent else 0,
+                    "recent_messages": recent["recent_messages"] if recent else 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting user chat stats: {str(e)}")
+            return {
+                "session_count": 0,
+                "message_count": 0,
+                "recent_sessions": 0,
+                "recent_messages": 0
+            }
+
+    def save_model_settings(self, llm, embedding, parameters):
+        """Save model settings to the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Insert new settings
+                cursor.execute('''
+                    INSERT INTO model_settings (llm, embedding, parameters, updated_at)
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (llm, embedding, json.dumps(parameters)))
+                conn.commit()
+                logger.info(f"Saved model settings: LLM={llm}, Embedding={embedding}, Parameters={parameters}")
+                return True
+        except Exception as e:
+            logger.error(f"Error saving model settings: {e}")
+            return False
+
+    def get_latest_model_settings(self):
+        """Get the latest model settings from the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT llm, embedding, parameters FROM model_settings
+                    ORDER BY updated_at DESC LIMIT 1
+                ''')
+                row = cursor.fetchone()
+                if row:
+                    llm, embedding, parameters_json = row
+                    parameters = json.loads(parameters_json)
+                    logger.info(f"Loaded model settings: LLM={llm}, Embedding={embedding}")
+                    return {
+                        'llm': llm,
+                        'embedding': embedding,
+                        'parameters': parameters
+                    }
+        except Exception as e:
+            logger.error(f"Error loading model settings: {e}")
+        return None

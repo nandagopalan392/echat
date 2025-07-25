@@ -6,7 +6,7 @@ import { api } from '../services/api';
 // ========================================
 // Set DEBUG_MODE to true to enable console logs for debugging
 // Set to false in production to reduce console noise
-const DEBUG_MODE = false;
+const DEBUG_MODE = true; // Enable for debugging the embedding model issue
 
 // ========================================
 
@@ -78,18 +78,23 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
         
         try {
             const response = await api.get('/api/models/available');
+            debugLog('Models API response:', response);
             
             if (response && response.models) {
+                // Use the new unified models array with proper categories
+                debugLog('Using unified models array:', response.models);
                 setAvailableModels(response.models);
             } else if (response && (response.llm_models || response.embedding_models)) {
-                // Handle legacy response format
+                // Handle legacy response format for backward compatibility
+                debugLog('Using legacy format, combining LLM and embedding models');
                 const allModels = [
                     ...(response.llm_models || []).map(m => ({...m, category: 'llm'})),
                     ...(response.embedding_models || []).map(m => ({...m, category: 'embedding'}))
                 ];
                 setAvailableModels(allModels);
             } else {
-                setError('Failed to load available models');
+                console.error('Unexpected API response format:', response);
+                setError('Failed to load available models - unexpected response format');
             }
         } catch (err) {
             console.error('Error loading models:', err);
@@ -361,17 +366,23 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
     const filterModelsByType = (type) => {
         if (!availableModels || !Array.isArray(availableModels)) return [];
         
-        // Use category-based filtering if available, fallback to name-based
+        debugLog(`Filtering models for type: ${type}`);
+        debugLog(`Available models:`, availableModels);
+        
+        // Use category-based filtering with improved fallback logic
         const categoryFiltered = availableModels.filter(model => {
-            // If model has category, use it strictly
+            // Primary: If model has category, use it strictly
             if (model.category) {
-                return model.category === type;
+                const matches = model.category === type;
+                debugLog(`Model ${model.name} has category ${model.category}, matches ${type}: ${matches}`);
+                return matches;
             }
             
-            // Fallback to name-based filtering for backward compatibility
+            // Fallback: Use name-based filtering for models without explicit category
             const name = model.name.toLowerCase();
+            debugLog(`Model ${model.name} has no category, using name-based filtering`);
             
-            // First, check if it's an embedding model (exclude from LLM)
+            // Enhanced embedding model detection
             const isEmbeddingModel = name.includes('embed') || 
                                    name.includes('bge') ||
                                    name.includes('minilm') ||
@@ -383,18 +394,33 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
                                    name.includes('instructor') ||
                                    name.includes('gte-') ||
                                    name.includes('multilingual-e5') ||
-                                   name.includes('arctic-embed');
+                                   name.includes('arctic-embed') ||
+                                   name.includes('mxbai-embed') ||
+                                   name.includes('snowflake-arctic-embed') ||
+                                   name.includes('paraphrase-') ||
+                                   name.includes('distiluse') ||
+                                   name.includes('granite-embedding') ||
+                                   name.startsWith('bge-') ||
+                                   name.startsWith('all-minilm-') ||
+                                   name.startsWith('e5-') ||
+                                   name.startsWith('gte-') ||
+                                   name.startsWith('nomic-');
             
             switch (type) {
                 case 'llm':
                     // Exclude embedding and reranking models, include everything else
-                    return !isEmbeddingModel && !name.includes('rerank');
+                    const isLLM = !isEmbeddingModel && !name.includes('rerank');
+                    debugLog(`Model ${model.name} is LLM: ${isLLM} (not embedding: ${!isEmbeddingModel}, not rerank: ${!name.includes('rerank')})`);
+                    return isLLM;
                 case 'embedding':
+                    debugLog(`Model ${model.name} is embedding: ${isEmbeddingModel}`);
                     return isEmbeddingModel;
                 default:
                     return true;
             }
         });
+        
+        debugLog(`Filtered ${categoryFiltered.length} models for type ${type}:`, categoryFiltered.map(m => m.name));
         
         // Group models by base name to handle variants
         const groupedModels = {};

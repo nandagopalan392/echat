@@ -1,9 +1,9 @@
 import sys
 import os
 import json
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form, BackgroundTasks, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -13,13 +13,13 @@ from chat_db import ChatDB
 from rag import ChatPDF, get_chatpdf_instance
 from rlhf import RLHF
 import logging
-import os
+from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
+from enhanced_document_processor import get_document_processor
 import pandas as pd
 from docx import Document
 import sqlite3
 from sse_starlette.sse import EventSourceResponse
 import asyncio
-import json
 import time
 from contextlib import contextmanager
 import shutil
@@ -28,6 +28,170 @@ import random
 import requests
 import subprocess
 import re
+
+def get_gpu_memory_info() -> Dict[str, int]:
+    """Get GPU memory information in MB"""
+    try:
+        # Try nvidia-smi first
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            if lines:
+                # Take the first GPU
+                memory_info = lines[0].split(', ')
+                if len(memory_info) >= 3:
+                    total_mb = int(memory_info[0])
+                    used_mb = int(memory_info[1])
+                    free_mb = int(memory_info[2])
+                    return {
+                        'total': total_mb,
+                        'used': used_mb,
+                        'free': free_mb,
+                        'available': free_mb
+                    }
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        pass
+    
+    try:
+        # Fallback: Try to get info from /proc/driver/nvidia/gpus/
+        gpu_dirs = [d for d in os.listdir('/proc/driver/nvidia/gpus/') if os.path.isdir(f'/proc/driver/nvidia/gpus/{d}')]
+        if gpu_dirs:
+            # Read memory info from the first GPU
+            gpu_dir = gpu_dirs[0]
+            with open(f'/proc/driver/nvidia/gpus/{gpu_dir}/information', 'r') as f:
+                content = f.read()
+                # Extract memory info
+                memory_match = re.search(r'Video Memory:\s+(\d+)\s+MB', content)
+                if memory_match:
+                    total_mb = int(memory_match.group(1))
+                    # Estimate available as 80% of total (conservative)
+                    available_mb = int(total_mb * 0.8)
+                    return {
+                        'total': total_mb,
+                        'used': total_mb - available_mb,
+                        'free': available_mb,
+                        'available': available_mb
+                    }
+    except (FileNotFoundError, PermissionError, ValueError):
+        pass
+    
+    # If no GPU info available, return default values
+    logger.warning("Could not determine GPU memory, using default estimates")
+    return {
+        'total': 8192,  # 8GB default
+        'used': 2048,   # 2GB used
+        'free': 6144,   # 6GB free
+        'available': 6144
+    }
+
+def estimate_model_memory_requirement(model_name: str, model_size: str = None) -> int:
+    """Estimate memory requirement for a model in MB"""
+    name_lower = model_name.lower()
+    
+    # If size is provided, try to parse it
+    if model_size and isinstance(model_size, str):
+        size_lower = model_size.lower()
+        # Extract numeric value from size string
+        size_match = re.search(r'(\d+\.?\d*)', size_lower)
+        if size_match:
+            size_value = float(size_match.group(1))
+            
+            # Convert based on unit
+            if 'gb' in size_lower:
+                return int(size_value * 1024)  # Convert GB to MB
+            elif 'mb' in size_lower:
+                return int(size_value)
+            elif 'b' in size_lower and 'gb' not in size_lower and 'mb' not in size_lower:
+                # Assume it's parameters (e.g., "7b", "13b")
+                # Rule of thumb: 1B parameters ≈ 2GB in FP16, ≈ 1GB in Q4
+                return int(size_value * 1500)  # Conservative estimate for Q4 quantization
+    
+    # Fallback: estimate based on model name patterns
+    if any(size in name_lower for size in ['0.5b', '500m']):
+        return 1024   # ~1GB
+    elif any(size in name_lower for size in ['1b', '1.5b']):
+        return 2048   # ~2GB
+    elif any(size in name_lower for size in ['3b', '2.8b']):
+        return 4096   # ~4GB
+    elif any(size in name_lower for size in ['7b', '6.7b', '8b']):
+        return 8192   # ~8GB
+    elif any(size in name_lower for size in ['13b', '14b', '15b']):
+        return 16384  # ~16GB
+    elif any(size in name_lower for size in ['30b', '32b', '34b']):
+        return 32768  # ~32GB
+    elif any(size in name_lower for size in ['70b', '72b']):
+        return 65536  # ~64GB
+    elif any(size in name_lower for size in ['175b', '180b']):
+        return 131072 # ~128GB
+    
+    # Embedding models are typically smaller
+    if any(keyword in name_lower for keyword in ['embed', 'bge', 'minilm', 'e5', 'sentence']):
+        if 'large' in name_lower:
+            return 1024   # ~1GB for large embedding models
+        else:
+            return 512    # ~512MB for smaller embedding models
+    
+    # Default estimate for unknown models
+    return 4096  # ~4GB default
+
+def check_model_compatibility_detailed(model_name: str, model_size: str = None) -> tuple:
+    """Check if a model is compatible with current GPU memory"""
+    gpu_info = get_gpu_memory_info()
+    required_memory = estimate_model_memory_requirement(model_name, model_size)
+    
+    # Leave some buffer for system and other processes (20% of total or min 1GB)
+    buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
+    usable_memory = gpu_info['available'] - buffer_memory
+    
+    is_compatible = required_memory <= usable_memory
+    
+    if is_compatible:
+        message = f"✅ Model {model_name} is compatible (requires ~{required_memory}MB, {usable_memory}MB available)"
+    else:
+        shortage = required_memory - usable_memory
+        message = f"❌ Model {model_name} requires ~{required_memory}MB but only {usable_memory}MB available (shortage: {shortage}MB)"
+    
+    details = {
+        'required_memory_mb': required_memory,
+        'available_memory_mb': usable_memory,
+        'gpu_total_mb': gpu_info['total'],
+        'gpu_used_mb': gpu_info['used'],
+        'gpu_free_mb': gpu_info['free'],
+        'buffer_memory_mb': buffer_memory,
+        'compatible': is_compatible,
+        'shortage_mb': max(0, required_memory - usable_memory)
+    }
+    
+    return is_compatible, message, details
+
+def format_model_size(size):
+    """Format model size from bytes to human readable format"""
+    if isinstance(size, str):
+        # If it's already a string, try to parse it or return as-is
+        if size.lower() in ['unknown', 'n/a', '', 'none']:
+            return 'Unknown'
+        # If it's already formatted (contains B, KB, MB, GB), return as-is
+        if any(unit in size.upper() for unit in ['B', 'KB', 'MB', 'GB', 'TB']):
+            return size
+        # Try to convert string to int
+        try:
+            size = int(size)
+        except (ValueError, TypeError):
+            return 'Unknown'
+    
+    if not isinstance(size, (int, float)) or size <= 0:
+        return 'Unknown'
+    
+    # Convert bytes to human readable format
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size < 1024.0:
+            if unit == 'B':
+                return f"{int(size)} {unit}"
+            else:
+                return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} PB"
 
 app = FastAPI(
     title="Chat API",
@@ -389,6 +553,129 @@ async def get_activity_stats(admin: dict = Depends(check_if_admin)):
         return {"data": stats}  # Wrap stats in data field
     except Exception as e:
         logger.error(f"Error getting activity stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# User endpoints for ManageUserPage
+@app.get("/api/users/profile")
+async def get_user_profile(current_user: dict = Depends(get_current_user)):
+    """Get current user's profile"""
+    try:
+        username = current_user["sub"]
+        # Get user data from database
+        user_data = chat_db.get_user_by_username(username)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Return user profile data
+        return {
+            "user": {
+                "username": user_data.get("username", username),
+                "email": user_data.get("email", ""),
+                "role": user_data.get("role", "user"),
+                "created_at": user_data.get("created_at", ""),
+                "last_login": user_data.get("last_login", ""),
+                "is_active": user_data.get("is_active", True)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting user profile: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/users/activities")
+async def get_user_activities(current_user: dict = Depends(get_current_user)):
+    """Get user activities/recent actions"""
+    try:
+        username = current_user["sub"]
+        
+        # Get recent user activities from chat history and other sources
+        activities = []
+        
+        # Get recent chat sessions
+        try:
+            sessions = chat_db.get_user_sessions(username, limit=10)
+            for session in sessions:
+                activities.append({
+                    "id": f"chat_{session.get('id', '')}",
+                    "type": "chat",
+                    "action": "Started conversation",
+                    "details": session.get("title", "Chat session")[:100],
+                    "timestamp": session.get("created_at", ""),
+                    "metadata": {
+                        "session_id": session.get("id"),
+                        "message_count": session.get("message_count", 0)
+                    }
+                })
+        except Exception as e:
+            logger.warning(f"Error getting chat sessions: {e}")
+        
+        # Add document upload activities if available
+        try:
+            # This would need to be implemented based on your document tracking
+            # For now, we'll add placeholder data
+            activities.append({
+                "id": "doc_recent",
+                "type": "document",
+                "action": "Document processing",
+                "details": "Recent document activities",
+                "timestamp": datetime.datetime.now().isoformat(),
+                "metadata": {"source": "system"}
+            })
+        except Exception as e:
+            logger.warning(f"Error getting document activities: {e}")
+        
+        # Sort by timestamp (newest first)
+        activities.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        
+        return {"activities": activities[:20]}  # Return last 20 activities
+        
+    except Exception as e:
+        logger.error(f"Error getting user activities: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/users/stats")
+async def get_user_stats_general(current_user: dict = Depends(get_current_user)):
+    """Get general system statistics for admin dashboard"""
+    try:
+        # Get overall system statistics
+        stats = {
+            "totalUsers": 0,
+            "activeUsers": 0,
+            "totalSessions": 0,
+            "totalMessages": 0
+        }
+        
+        try:
+            # Get total users count
+            with sqlite3.connect(chat_db.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Total users
+                cursor.execute("SELECT COUNT(*) FROM users")
+                stats["totalUsers"] = cursor.fetchone()[0]
+                
+                # Active users (users with sessions in last 30 days)
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT username) 
+                    FROM chat_sessions 
+                    WHERE created_at >= datetime('now', '-30 days')
+                """)
+                stats["activeUsers"] = cursor.fetchone()[0]
+                
+                # Total sessions
+                cursor.execute("SELECT COUNT(*) FROM chat_sessions")
+                stats["totalSessions"] = cursor.fetchone()[0]
+                
+                # Total messages
+                cursor.execute("SELECT COUNT(*) FROM messages")
+                stats["totalMessages"] = cursor.fetchone()[0]
+                
+        except Exception as e:
+            logger.warning(f"Error getting system stats: {e}")
+        
+        return {"stats": stats}
+        
+    except Exception as e:
+        logger.error(f"Error getting user stats: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Chat endpoints
@@ -844,11 +1131,23 @@ async def upload_file(
     file: UploadFile,
     is_folder: str = Form(default="false"),
     folder_path: str = Form(default=""),
+    chunking_method: str = Form(default="auto"),  # auto, general, qa, resume, table, presentation, picture, email
+    chunk_token_num: int = Form(default=1000),
+    chunk_overlap: int = Form(default=200),
+    delimiter: str = Form(default="\\n\\n|\\n|\\.|\\!|\\?"),
+    max_token: int = Form(default=4096),
+    layout_recognize: str = Form(default="auto"),
+    preserve_formatting: bool = Form(default=True),
+    extract_tables: bool = Form(default=True),
+    extract_images: bool = Form(default=False),
     admin: dict = Depends(check_if_admin)
 ):
     failed_files = []
     processed_files = []
     try:
+        # Import chunking components
+        from chunking_config import ChunkingMethod, ChunkingConfig, FileFormatSupport
+        
         file_id = f"upload_{datetime.datetime.now().timestamp()}"
         upload_progress[file_id] = 0
         
@@ -872,35 +1171,71 @@ async def upload_file(
             temp_path.write_bytes(contents)
             upload_progress[file_id] = 30
 
-            # Process PDF files
-            if file.filename.lower().endswith('.pdf'):
-                logger.info(f"Processing PDF file: {file.filename}")
-                success = get_rag().ingest_with_storage(str(temp_path), file.filename)
+            # Determine file extension and chunking method
+            file_ext = file.filename.split('.')[-1].lower()
+            
+            # Set up chunking configuration
+            if chunking_method == "auto":
+                # Auto-detect optimal method for file type
+                selected_method = FileFormatSupport.get_optimal_method(file_ext)
+            else:
+                try:
+                    selected_method = ChunkingMethod(chunking_method)
+                except ValueError:
+                    logger.warning(f"Invalid chunking method '{chunking_method}', using general")
+                    selected_method = ChunkingMethod.GENERAL
+            
+            # Create chunking configuration
+            chunking_config = ChunkingConfig(
+                method=selected_method,
+                chunk_token_num=chunk_token_num,
+                chunk_overlap=chunk_overlap,
+                delimiter=delimiter,
+                max_token=max_token,
+                layout_recognize=layout_recognize,
+                preserve_formatting=preserve_formatting,
+                extract_tables=extract_tables,
+                extract_images=extract_images
+            )
+            
+            logger.info(f"Processing {file.filename} with method {selected_method.value}")
+
+            # Process files with enhanced chunking - include images now
+            if file.filename.lower().endswith(('.pdf', '.docx', '.doc', '.txt', '.md', '.csv', '.xlsx', '.xls', '.ppt', '.pptx', '.html', '.json', '.eml', '.jpg', '.jpeg', '.png', '.gif', '.tif', '.tiff')):
+                logger.info(f"Processing document file: {file.filename}")
+                success = get_rag().ingest_with_storage_and_chunking(
+                    str(temp_path), 
+                    file.filename,
+                    selected_method,
+                    chunking_config,
+                    admin['sub']  # user_id
+                )
                 if not success:
                     failed_files.append(file.filename)
-                    logger.warning(f"Failed to process PDF: {file.filename}")
+                    logger.warning(f"Failed to process document: {file.filename}")
                 else:
                     processed_files.append(file.filename)
-                    logger.info(f"Successfully processed PDF: {file.filename}")
+                    logger.info(f"Successfully processed document: {file.filename}")
             else:
-                # For non-PDF files, we still want to store them in MinIO even if we can't process them
-                logger.info(f"Storing non-PDF file: {file.filename}")
+                # For other files, store in MinIO only
+                logger.info(f"Storing non-document file: {file.filename}")
                 try:
-                    # Determine content type
-                    content_type = None
-                    if file.filename.lower().endswith('.docx'):
-                        content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                    elif file.filename.lower().endswith('.xlsx'):
-                        content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                    elif file.filename.lower().endswith('.csv'):
-                        content_type = 'text/csv'
-                    elif file.filename.lower().endswith('.txt'):
-                        content_type = 'text/plain'
+                    # Determine content type based on file extension
+                    import mimetypes
+                    content_type, _ = mimetypes.guess_type(file.filename)
+                    if not content_type:
+                        content_type = 'application/octet-stream'
                     
-                    # Store in MinIO using document storage
+                    # Store in MinIO using document storage with chunking info
                     from document_storage import get_document_storage
                     doc_storage = get_document_storage()
-                    doc_info = doc_storage.store_document(str(temp_path), file.filename, content_type)
+                    doc_info = doc_storage.store_document(
+                        str(temp_path), 
+                        file.filename, 
+                        content_type,
+                        selected_method.value,
+                        chunking_config.to_dict()
+                    )
                     
                     if doc_info:
                         processed_files.append(file.filename)
@@ -1011,6 +1346,181 @@ async def reingest_documents(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/documents/reingest-specific")
+async def reingest_specific_documents(
+    request: dict,
+    admin: dict = Depends(check_if_admin)
+):
+    """Re-ingest specific documents with per-document chunking configuration"""
+    try:
+        documents = request.get('documents', [])
+        
+        if not documents:
+            raise HTTPException(status_code=400, detail="No documents provided")
+        
+        # Parse and validate each document configuration
+        parsed_documents = []
+        for doc_config in documents:
+            document_id = doc_config.get('document_id')
+            chunking_method_str = doc_config.get('chunking_method')
+            chunking_config_dict = doc_config.get('chunking_config', {})
+            
+            if not document_id:
+                raise HTTPException(status_code=400, detail="Document ID is required for each document")
+            
+            # Parse chunking method
+            chunking_method = None
+            if chunking_method_str:
+                try:
+                    from chunking_config import ChunkingMethod
+                    chunking_method = ChunkingMethod(chunking_method_str)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail=f"Invalid chunking method: {chunking_method_str}")
+            
+            # Parse chunking config
+            chunking_config = None
+            if chunking_config_dict:
+                try:
+                    from chunking_config import ChunkingConfig
+                    chunking_config = ChunkingConfig.from_dict(chunking_config_dict)
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Invalid chunking config: {str(e)}")
+            
+            parsed_documents.append({
+                'document_id': document_id,
+                'chunking_method': chunking_method,
+                'chunking_config': chunking_config
+            })
+        
+        # Perform reingestion with per-document configuration
+        results = get_rag().reingest_specific_documents_with_config(parsed_documents)
+        
+        return {
+            "message": f"Reingestion completed: {results['successful']}/{results['total']} successful",
+            "results": results
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in specific document reingestion: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/documents/{document_id}/retry")
+async def retry_document_processing(
+    document_id: int,
+    method: str = Form(default="auto"),
+    chunk_token_num: int = Form(default=1000),
+    chunk_overlap: int = Form(default=200),
+    delimiter: str = Form(default="\\n\\n|\\n|\\.|\\!|\\?"),
+    max_token: int = Form(default=4096),
+    layout_recognize: str = Form(default="auto"),
+    preserve_formatting: bool = Form(default=True),
+    extract_tables: bool = Form(default=True),
+    extract_images: bool = Form(default=False),
+    current_user: dict = Depends(get_current_user)
+):
+    """Retry processing a failed document"""
+    try:
+        from document_storage import get_document_storage
+        from chunking_config import ChunkingMethod, ChunkingConfig
+        
+        # Get document info
+        doc_storage = get_document_storage()
+        doc_info = doc_storage.get_document(document_id)
+        
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Check if user owns this document or is admin
+        if doc_info.get('user_id') != current_user['sub'] and not current_user.get('is_admin', False):
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Update document status to pending
+        doc_storage.update_document_status(document_id, 'pending', None)
+        
+        # Get the stored file from MinIO
+        temp_file_path = doc_storage.get_document_file(document_id)
+        if not temp_file_path:
+            raise HTTPException(status_code=404, detail="Document file not found")
+        
+        try:
+            filename = doc_info['filename']
+            
+            # Determine chunking method
+            if method == "auto":
+                from chunking_config import FileFormatSupport
+                file_ext = filename.split('.')[-1].lower()
+                selected_method = FileFormatSupport.get_optimal_method(file_ext)
+            else:
+                try:
+                    selected_method = ChunkingMethod(method)
+                except ValueError:
+                    logger.warning(f"Invalid chunking method '{method}', using general")
+                    selected_method = ChunkingMethod.GENERAL
+            
+            # Create chunking configuration
+            chunking_config = ChunkingConfig(
+                method=selected_method,
+                chunk_token_num=chunk_token_num,
+                chunk_overlap=chunk_overlap,
+                delimiter=delimiter,
+                max_token=max_token,
+                layout_recognize=layout_recognize,
+                preserve_formatting=preserve_formatting,
+                extract_tables=extract_tables,
+                extract_images=extract_images
+            )
+            
+            logger.info(f"Retrying processing for {filename} with method {selected_method.value}")
+            
+            # First, remove any existing chunks for this document
+            try:
+                get_rag().remove_document_from_vectorstore(filename)
+            except Exception as e:
+                logger.warning(f"Could not remove existing chunks: {e}")
+            
+            # Process the document (this will only re-ingest to vector store, not create new document entry)
+            success = get_rag().ingest_with_storage_and_chunking(
+                temp_file_path, 
+                filename,
+                selected_method,
+                chunking_config,
+                current_user['sub']  # user_id
+            )
+            
+            if success:
+                # Update status to completed
+                doc_storage.update_document_status(document_id, 'completed', None)
+                return {
+                    "message": f"Document {filename} processed successfully",
+                    "document_id": document_id,
+                    "method": selected_method.value
+                }
+            else:
+                # Update status to failed
+                doc_storage.update_document_status(document_id, 'failed', "Processing failed during retry")
+                raise HTTPException(status_code=500, detail="Document processing failed")
+                
+        finally:
+            # Clean up temporary file
+            try:
+                import os
+                os.unlink(temp_file_path)
+            except Exception as e:
+                logger.warning(f"Could not delete temp file: {e}")
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrying document processing: {e}")
+        # Update status to failed if we have document_id
+        try:
+            doc_storage.update_document_status(document_id, 'failed', str(e))
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/documents/{document_id}")
 async def delete_document(
     document_id: int,
@@ -1024,6 +1534,308 @@ async def delete_document(
             return {"message": f"Document {document_id} deleted successfully"}
         else:
             raise HTTPException(status_code=404, detail="Document not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/documents/bulk-delete")
+async def bulk_delete_documents(
+    request_data: dict,
+    admin: dict = Depends(check_if_admin)
+):
+    """Bulk delete multiple documents from storage"""
+    try:
+        document_ids = request_data.get('document_ids', [])
+        
+        if not document_ids:
+            raise HTTPException(status_code=400, detail="No document IDs provided")
+        
+        if not isinstance(document_ids, list):
+            raise HTTPException(status_code=400, detail="document_ids must be a list")
+        
+        # Validate that all IDs are integers
+        try:
+            document_ids = [int(doc_id) for doc_id in document_ids]
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="All document IDs must be integers")
+        
+        from document_storage import get_document_storage
+        results = get_document_storage().delete_multiple_documents(document_ids)
+        
+        return {
+            "message": f"Bulk deletion completed: {results['successful']} successful, {results['failed']} failed",
+            "results": results
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/clear-all-documents")
+async def clear_all_documents(
+    admin: dict = Depends(check_if_admin)
+):
+    """Clear all documents from storage - admin only"""
+    try:
+        from document_storage import get_document_storage
+        success = get_document_storage().clear_all_documents()
+        if success:
+            return {"message": "All documents cleared successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to clear documents")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/admin/cleanup-orphaned")
+async def cleanup_orphaned_documents(
+    admin: dict = Depends(check_if_admin)
+):
+    """Cleanup orphaned documents - admin only"""
+    try:
+        from document_storage import get_document_storage
+        count = get_document_storage().cleanup_orphaned_documents()
+        return {"message": f"Cleaned up {count} orphaned documents"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/files/check-duplicate")
+async def check_file_duplicate(
+    request_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check if a file with the same filename and hash already exists"""
+    try:
+        filename = request_data.get('filename')
+        file_hash = request_data.get('hash')
+        
+        if not filename or not file_hash:
+            raise HTTPException(status_code=400, detail="Both filename and hash are required")
+        
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
+        
+        # Check if a file with this hash already exists
+        existing_file = doc_storage.get_document_by_hash(file_hash)
+        
+        if existing_file:
+            return {
+                "exists": True,
+                "existing_file": {
+                    "filename": existing_file.get('filename'),
+                    "upload_date": existing_file.get('upload_date'),
+                    "size": existing_file.get('file_size'),
+                    "content_type": existing_file.get('content_type'),
+                    "hash": existing_file.get('file_hash')
+                }
+            }
+        else:
+            return {"exists": False}
+            
+    except Exception as e:
+        logger.error(f"Error checking file duplicate: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/files/{filename}")
+async def delete_file_by_filename(
+    filename: str,
+    admin: dict = Depends(check_if_admin)
+):
+    """Delete a document by filename"""
+    try:
+        from document_storage import get_document_storage
+        success = get_document_storage().delete_document_by_filename(filename)
+        if success:
+            return {"message": f"File {filename} deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="File not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/files/{filename}/chunks")
+async def get_document_chunks(
+    filename: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all chunks for a document by filename"""
+    try:
+        from rag import get_chatpdf_instance
+        from document_storage import get_document_storage
+        
+        chatpdf = get_chatpdf_instance()
+        doc_storage = get_document_storage()
+        
+        if not chatpdf or not chatpdf.vector_store:
+            raise HTTPException(status_code=503, detail="Vector store not available")
+        
+        # Get document info from storage first
+        doc_info = None
+        try:
+            # Find document by filename
+            all_docs = doc_storage.list_all_documents()
+            for doc in all_docs:
+                if doc['filename'] == filename:
+                    doc_info = doc
+                    break
+        except Exception as e:
+            logger.warning(f"Could not get document info: {e}")
+        
+        # Get ChromaDB client and collection
+        chroma_client = chatpdf.vector_store._client
+        collection_name = chatpdf._get_collection_name()
+        
+        try:
+            collection = chroma_client.get_collection(collection_name)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Collection not found: {e}")
+        
+        # Query for chunks with this filename in source metadata
+        try:
+            logger.info(f"Searching for chunks with filename: {filename}")
+            
+            # Try both 'source' and 'source_file' metadata keys with exact match first
+            results = None
+            for metadata_key in ['source_file', 'source']:
+                try:
+                    results = collection.get(
+                        where={metadata_key: filename},
+                        include=["documents", "metadatas", "embeddings"]
+                    )
+                    if results and results.get('ids'):
+                        logger.info(f"Found {len(results['ids'])} chunks using exact match on metadata key '{metadata_key}'")
+                        break
+                except Exception as e:
+                    logger.debug(f"Exact query with '{metadata_key}' failed: {e}")
+                    continue
+            
+            # If exact match didn't work, try to find files ending with the filename (for folder uploads)
+            if not results or not results.get('ids'):
+                logger.info("No exact match found, trying filename suffix search...")
+                for metadata_key in ['source_file', 'source']:
+                    try:
+                        # Get all documents and filter by filename suffix
+                        all_results = collection.get(
+                            include=["documents", "metadatas", "embeddings"]
+                        )
+                        
+                        if all_results and all_results.get('metadatas'):
+                            matching_indices = []
+                            for i, metadata in enumerate(all_results['metadatas']):
+                                source_value = metadata.get(metadata_key, '')
+                                if source_value and source_value.endswith(filename):
+                                    matching_indices.append(i)
+                            
+                            if matching_indices:
+                                # Build filtered results
+                                results = {
+                                    'ids': [all_results['ids'][i] for i in matching_indices],
+                                    'documents': [all_results['documents'][i] for i in matching_indices],
+                                    'metadatas': [all_results['metadatas'][i] for i in matching_indices],
+                                    'embeddings': [all_results['embeddings'][i] for i in matching_indices] if all_results.get('embeddings') else None
+                                }
+                                logger.info(f"Found {len(results['ids'])} chunks using suffix match on metadata key '{metadata_key}'")
+                                break
+                    except Exception as e:
+                        logger.debug(f"Suffix search with '{metadata_key}' failed: {e}")
+                        continue
+            
+            logger.info(f"ChromaDB query results: found {len(results.get('ids', [])) if results else 0} chunks")
+            if results and results.get('metadatas'):
+                logger.info(f"Sample metadata from results: {results['metadatas'][:2] if len(results['metadatas']) > 0 else 'None'}")
+            
+            if not results or not results.get('ids'):
+                # Let's also try a broader search to see what's actually in the collection
+                logger.info("No chunks found with exact filename match, checking collection contents...")
+                sample_results = collection.get(limit=5, include=["metadatas"])
+                logger.info(f"Sample collection metadata: {sample_results.get('metadatas', [])}")
+                
+                return {
+                    "filename": filename,
+                    "chunks": [],
+                    "document_info": doc_info,
+                    "is_image": doc_info and doc_info.get('content_type', '').startswith('image/') if doc_info else False
+                }
+            
+            logger.info(f"Processing {len(results['ids'])} chunks for response")
+            chunks = []
+            for i, chunk_id in enumerate(results['ids']):
+                try:
+                    chunk_content = results['documents'][i]
+                    chunk_metadata = results['metadatas'][i] if results.get('metadatas') else {}
+                    
+                    # Count tokens/words (approximate)
+                    word_count = len(chunk_content.split()) if chunk_content else 0
+                    
+                    # Calculate embedding size safely
+                    embedding_size = 0
+                    try:
+                        if results.get('embeddings') and i < len(results['embeddings']) and results['embeddings'][i]:
+                            embedding_size = len(results['embeddings'][i])
+                    except Exception as e:
+                        logger.warning(f"Could not calculate embedding size for chunk {i}: {e}")
+                    
+                    chunk_data = {
+                        "id": chunk_id,
+                        "chunk_number": i + 1,
+                        "content": chunk_content,
+                        "word_count": word_count,
+                        "metadata": chunk_metadata,
+                        "embedding_size": embedding_size
+                    }
+                    chunks.append(chunk_data)
+                    logger.debug(f"Processed chunk {i+1}/{len(results['ids'])}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing chunk {i}: {e}")
+                    continue
+            
+            logger.info(f"Successfully processed {len(chunks)} chunks")
+            return {
+                "filename": filename,
+                "total_chunks": len(chunks),
+                "chunks": chunks,
+                "document_info": doc_info,
+                "is_image": doc_info and doc_info.get('content_type', '').startswith('image/') if doc_info else False
+            }
+            
+        except Exception as e:
+            logger.error(f"Error querying chunks: {e}")
+            raise HTTPException(status_code=500, detail=f"Error querying chunks: {e}")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/debug/collection-info")
+async def get_collection_debug_info(current_user: dict = Depends(get_current_user)):
+    """Debug endpoint to inspect collection structure"""
+    try:
+        from rag import get_chatpdf_instance
+        chatpdf = get_chatpdf_instance()
+        
+        if not chatpdf or not chatpdf.vector_store:
+            raise HTTPException(status_code=503, detail="Vector store not available")
+        
+        chroma_client = chatpdf.vector_store._client
+        collection_name = chatpdf._get_collection_name()
+        
+        try:
+            collection = chroma_client.get_collection(collection_name)
+            
+            # Get basic collection info
+            count = collection.count()
+            
+            # Get sample documents
+            sample_results = collection.get(limit=10, include=["metadatas", "documents"])
+            
+            return {
+                "collection_name": collection_name,
+                "total_documents": count,
+                "sample_metadata": sample_results.get('metadatas', []),
+                "sample_document_previews": [doc[:100] + "..." if len(doc) > 100 else doc for doc in sample_results.get('documents', [])]
+            }
+            
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=f"Collection error: {e}")
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1086,6 +1898,22 @@ async def get_vector_store_stats(current_user: dict = Depends(get_current_user))
         logger.error(f"Error getting vector store stats: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get vector store stats: {str(e)}")
 
+@app.delete("/api/vector-store/clear")
+async def clear_vector_store(admin: dict = Depends(check_if_admin)):
+    """Clear the entire vector store - admin only"""
+    try:
+        rag = get_rag()
+        success = rag.clear_vectorstore()
+        
+        if success:
+            return {"success": True, "message": "Vector store cleared successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to clear vector store")
+        
+    except Exception as e:
+        logger.error(f"Error clearing vector store: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to clear vector store: {str(e)}")
+
 @app.get("/api/models/available")
 async def get_available_models(current_user: dict = Depends(get_current_user)):
     """Get list of available models from Ollama (both local and remote)"""
@@ -1143,7 +1971,7 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
                         local_models.append({
                             'name': model_name,
                             'category': category,
-                            'size': model_size,
+                            'size': format_model_size(model_size),
                             'modified_at': model_modified,
                             'source': 'local',
                             'description': f"Locally installed {category} model"
@@ -1210,7 +2038,7 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
                     'name': model_name,
                     'category': model_category,
                     'description': model.get('description', ''),
-                    'size': model.get('size', 'Unknown'),
+                    'size': format_model_size(model.get('size', 'Unknown')),
                     'source': 'library',
                     'tags': model.get('tags', [])
                 }
@@ -1250,17 +2078,142 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
 
 @app.get("/api/models/current")
 async def get_current_models(current_user: dict = Depends(get_current_user)):
-    """Get current model settings"""
+    """Get current model settings including parameters"""
     try:
         rag = get_chatpdf_instance()
+        
+        # Load parameters from database first, then fallback to config file
+        parameters = {
+            'temperature': 0.7,
+            'max_tokens': 2048,
+            'top_p': 0.9,
+            'frequency_penalty': 0.0,
+            'presence_penalty': 0.0
+        }
+        
+        try:
+            # Try database first
+            db_settings = chat_db.get_latest_model_settings()
+            if db_settings and 'parameters' in db_settings:
+                parameters.update(db_settings['parameters'])
+            else:
+                # Fallback to config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        if 'parameters' in settings:
+                            parameters.update(settings['parameters'])
+        except Exception as e:
+            logger.warning(f"Could not load parameters from database or config: {e}")
+        
         return {
             "success": True,
             "llm": rag.llm_model,
-            "embedding": rag.embedding_model
+            "embedding": rag.embedding_model,
+            "parameters": parameters
         }
     except Exception as e:
         logger.error(f"Error getting current models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get current models: {str(e)}")
+
+@app.post("/api/models/check-gpu")
+async def check_gpu_compatibility(request: dict = None):
+    """Check GPU compatibility for models"""
+    try:
+        if not request:
+            return {
+                "success": False,
+                "compatible": False,
+                "message": "No models specified for compatibility check"
+            }
+        
+        llm_model = request.get('llm')
+        embedding_model = request.get('embedding')
+        
+        if not llm_model or not embedding_model:
+            return {
+                "success": False,
+                "compatible": False,
+                "message": "Both LLM and embedding models must be specified"
+            }
+        
+        logger.info(f"Checking GPU compatibility for LLM: {llm_model}, Embedding: {embedding_model}")
+        
+        # Get model information for size estimation
+        available_models = await get_available_models()
+        
+        llm_info = None
+        embedding_info = None
+        
+        # Find model information
+        for model in available_models.get('models', []):
+            if model['name'] == llm_model:
+                llm_info = model
+            elif model['name'] == embedding_model:
+                embedding_info = model
+        
+        # Check individual model compatibility using the new detailed function
+        llm_compatible, llm_message, llm_details = check_model_compatibility_detailed(
+            llm_model, 
+            llm_info.get('size') if llm_info else None
+        )
+        
+        embedding_compatible, embedding_message, embedding_details = check_model_compatibility_detailed(
+            embedding_model, 
+            embedding_info.get('size') if embedding_info else None
+        )
+        
+        logger.info(f"LLM compatibility check: {llm_compatible} - {llm_message}")
+        logger.info(f"Embedding compatibility check: {embedding_compatible} - {embedding_message}")
+        
+        # Combined compatibility check
+        total_required_mb = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
+        gpu_info = get_gpu_memory_info()
+        buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
+        usable_memory = gpu_info['available'] - buffer_memory
+        
+        combined_compatible = total_required_mb <= usable_memory
+        
+        return {
+            "success": True,
+            "compatible": llm_compatible and embedding_compatible and combined_compatible,
+            "llm_check": {
+                "model": llm_model,
+                "compatible": llm_compatible,
+                "estimated_memory_mb": llm_details['required_memory_mb'],
+                "message": llm_message,
+                "details": llm_details
+            },
+            "embedding_check": {
+                "model": embedding_model,
+                "compatible": embedding_compatible,
+                "estimated_memory_mb": embedding_details['required_memory_mb'],
+                "message": embedding_message,
+                "details": embedding_details
+            },
+            "combined_check": {
+                "required_mb": total_required_mb,
+                "available_mb": usable_memory,
+                "compatible": combined_compatible,
+                "message": f"Combined models require {total_required_mb}MB, {usable_memory}MB available after buffer"
+            },
+            "gpu_info": gpu_info,
+            "recommendation": (
+                "Models should fit in available GPU memory" 
+                if combined_compatible 
+                else "Consider using smaller models or upgrading GPU memory"
+            )
+        }
+        
+    except Exception as e:
+        logger.error(f"Error checking GPU compatibility: {str(e)}")
+        return {
+            "success": False,
+            "compatible": True,  # Default to compatible to not block users
+            "message": f"GPU check failed: {str(e)}. Proceeding with model download.",
+            "error": str(e)
+        }
 
 @app.post("/api/models/settings")
 async def update_models_settings(
@@ -1276,9 +2229,57 @@ async def update_models_settings(
         llm_size = request.get('llm_size')
         embedding_size = request.get('embedding_size')
         force_update = request.get('force', False)  # Allow bypassing compatibility check
+        model_parameters = request.get('parameters', {})
         
         if not llm_model or not embedding_model:
             raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Validate model parameters
+        valid_parameters = {}
+        if model_parameters:
+            # Temperature (0.0 to 2.0)
+            temp = model_parameters.get('temperature', 0.7)
+            if isinstance(temp, (int, float)) and 0.0 <= temp <= 2.0:
+                valid_parameters['temperature'] = float(temp)
+            else:
+                valid_parameters['temperature'] = 0.7
+            
+            # Max tokens (1 to 32768)
+            max_tokens = model_parameters.get('max_tokens', 2048)
+            if isinstance(max_tokens, int) and 1 <= max_tokens <= 32768:
+                valid_parameters['max_tokens'] = max_tokens
+            else:
+                valid_parameters['max_tokens'] = 2048
+            
+            # Top-p (0.0 to 1.0)
+            top_p = model_parameters.get('top_p', 0.9)
+            if isinstance(top_p, (int, float)) and 0.0 <= top_p <= 1.0:
+                valid_parameters['top_p'] = float(top_p)
+            else:
+                valid_parameters['top_p'] = 0.9
+            
+            # Frequency penalty (-2.0 to 2.0)
+            freq_penalty = model_parameters.get('frequency_penalty', 0.0)
+            if isinstance(freq_penalty, (int, float)) and -2.0 <= freq_penalty <= 2.0:
+                valid_parameters['frequency_penalty'] = float(freq_penalty)
+            else:
+                valid_parameters['frequency_penalty'] = 0.0
+            
+            # Presence penalty (-2.0 to 2.0)
+            presence_penalty = model_parameters.get('presence_penalty', 0.0)
+            if isinstance(presence_penalty, (int, float)) and -2.0 <= presence_penalty <= 2.0:
+                valid_parameters['presence_penalty'] = float(presence_penalty)
+            else:
+                valid_parameters['presence_penalty'] = 0.0
+        else:
+            # Default parameters
+            valid_parameters = {
+                'temperature': 0.7,
+                'max_tokens': 2048,
+                'top_p': 0.9,
+                'frequency_penalty': 0.0,
+                'presence_penalty': 0.0
+            }
         
         # Check GPU compatibility before proceeding (unless forced)
         if not force_update:
@@ -1334,6 +2335,58 @@ async def update_models_settings(
         
         ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
         
+        # Check if only parameters changed (no model downloads needed)
+        rag = get_chatpdf_instance()
+        current_llm = rag.llm_model
+        current_embedding = rag.embedding_model
+        
+        logger.info(f"[API /api/models/settings] Current models - LLM: '{current_llm}', Embedding: '{current_embedding}'")
+        logger.info(f"[API /api/models/settings] Requested models - LLM: '{llm_model}', Embedding: '{embedding_model}'")
+        
+        models_unchanged = (current_llm == llm_model and current_embedding == embedding_model)
+        logger.info(f"[API /api/models/settings] Models unchanged check: {models_unchanged}")
+        
+        if models_unchanged:
+            logger.info("Models unchanged, only updating parameters - skipping model downloads")
+            
+            # Update the models in the RAG system (this will only update parameters)
+            try:
+                rag.update_models(llm_model, embedding_model)
+            except Exception as e:
+                logger.error(f"Error updating parameters: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to update parameters: {str(e)}"
+                )
+            
+            # Save settings to database and config file
+            config_path = "model_settings.json"
+            settings = {
+                'llm': llm_model,
+                'embedding': embedding_model,
+                'parameters': valid_parameters
+            }
+            
+            # Save to database
+            try:
+                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+            except Exception as e:
+                logger.warning(f"Could not save to database: {e}")
+            
+            # Also save to config file as backup
+            with open(config_path, 'w') as f:
+                json.dump(settings, f, indent=2)
+            
+            return {
+                "success": True,
+                "message": "Model parameters updated successfully (no downloads needed)",
+                "llm": llm_model,
+                "embedding": embedding_model,
+                "embedding_changed": False,
+                "downloaded_models": [],
+                "parameters_only": True
+            }
+        
         # Check which models need to be downloaded
         models_to_download = []
         
@@ -1351,21 +2404,490 @@ async def update_models_settings(
                 installed_models = set()
             
             # Check if LLM model needs downloading
+            llm_model_to_check = llm_model
+            if llm_model not in installed_models:
+                # Check common variants for model matching
+                llm_variants = [
+                    llm_model,
+                    f"{llm_model}:latest", 
+                    llm_model.replace(":latest", "")
+                ]
+                model_found = any(variant in installed_models for variant in llm_variants)
+                if not model_found:
+                    models_to_download.append(llm_model)
+                    logger.info(f"LLM model {llm_model} needs to be downloaded")
+                else:
+                    logger.info(f"LLM model {llm_model} (or variant) already installed")
+                
+            # Check if embedding model needs downloading with special handling for BGE/nomic
+            embedding_model_to_check = embedding_model
+            if embedding_model not in installed_models:
+                # Check common variants and fix common naming issues
+                embedding_variants = [
+                    embedding_model,
+                    f"{embedding_model}:latest",
+                    embedding_model.replace(":latest", "")
+                ]
+                
+                # Special handling for BGE models
+                if "bge" in embedding_model.lower():
+                    if embedding_model == "bge-m3:1.7M":
+                        # Fix incorrect format - should be bge-m3 not bge-m3:1.7M
+                        embedding_model = "bge-m3"
+                        embedding_model_to_check = "bge-m3"
+                        logger.info(f"Fixed BGE model name from bge-m3:1.7M to bge-m3")
+                    elif embedding_model == "bge-large:335m":
+                        embedding_model = "bge-large"
+                        embedding_model_to_check = "bge-large"
+                        logger.info(f"Fixed BGE model name from bge-large:335m to bge-large")
+                    
+                    embedding_variants.extend([
+                        "bge-m3", "bge-large", "bge-m3:567m", "bge-large:335m"
+                    ])
+                
+                # Special handling for nomic models  
+                if "nomic" in embedding_model.lower():
+                    embedding_variants.extend([
+                        "nomic-embed-text", "nomic-embed-text:33.3M", "nomic-embed-text:latest"
+                    ])
+                
+                model_found = any(variant in installed_models for variant in embedding_variants)
+                if not model_found:
+                    models_to_download.append(embedding_model_to_check)
+                    logger.info(f"Embedding model {embedding_model_to_check} needs to be downloaded")
+                else:
+                    logger.info(f"Embedding model {embedding_model} (or variant) already installed")
+            
+            # Download missing models with progress tracking
+            for model_name in models_to_download:
+                logger.info(f"Downloading model: {model_name}")
+                try:
+                    # Use streaming to track download progress
+                    async with httpx.AsyncClient(timeout=600.0) as client:  # 10 minute timeout for downloads
+                        download_response = await client.post(
+                            f"{ollama_host}/api/pull",
+                            json={"name": model_name, "stream": True},
+                            timeout=600.0
+                        )
+                        
+                        if download_response.status_code != 200:
+                            logger.error(f"Failed to download model {model_name}: {download_response.status_code}")
+                            raise HTTPException(
+                                status_code=500, 
+                                detail=f"Failed to download model {model_name}: HTTP {download_response.status_code}"
+                            )
+                        
+                        # Process streaming response to track progress
+                        progress_info = {
+                            "status": "downloading",
+                            "completed": 0,
+                            "total": 0,
+                            "downloading": "",
+                            "pulling_fs_layer": "",
+                            "verifying_checksum": "",
+                            "download_complete": "",
+                            "pulling_manifest": "",
+                            "success": False
+                        }
+                        
+                        async for line in download_response.aiter_lines():
+                            if line:
+                                try:
+                                    data = json.loads(line)
+                                    
+                                    # Update progress based on status
+                                    if "status" in data:
+                                        progress_info["status"] = data["status"]
+                                        
+                                    if "completed" in data and "total" in data:
+                                        progress_info["completed"] = data["completed"]
+                                        progress_info["total"] = data["total"]
+                                        
+                                        # Log progress every 10MB
+                                        if data["total"] > 0 and data["completed"] % (10 * 1024 * 1024) == 0:
+                                            percent = (data["completed"] / data["total"]) * 100
+                                            logger.info(f"Downloading {model_name}: {percent:.1f}% complete ({data['completed']}/{data['total']} bytes)")
+                                    
+                                    # Track different stages
+                                    status = data.get("status", "")
+                                    if "pulling manifest" in status.lower():
+                                        progress_info["pulling_manifest"] = status
+                                        logger.info(f"Model {model_name}: {status}")
+                                    elif "downloading" in status.lower():
+                                        progress_info["downloading"] = status
+                                    elif "verifying checksum" in status.lower():
+                                        progress_info["verifying_checksum"] = status
+                                        logger.info(f"Model {model_name}: {status}")
+                                    elif "success" in status.lower() or "pull complete" in status.lower():
+                                        progress_info["success"] = True
+                                        logger.info(f"Model {model_name}: Download completed successfully")
+                                        break
+                                        
+                                except json.JSONDecodeError:
+                                    # Skip non-JSON lines
+                                    continue
+                        
+                        # Verify download completed successfully
+                        if not progress_info["success"]:
+                            # Check one more time if model is now available
+                            check_response = await client.get(f"{ollama_host}/api/tags")
+                            if check_response.status_code == 200:
+                                models_data = check_response.json()
+                                available_models = {model.get('name', '') for model in models_data.get('models', [])}
+                                logger.info(f"Available models after download attempt: {sorted(list(available_models))}")
+                                
+                                # Check for the exact model name and common variants
+                                model_variants = [
+                                    model_name,
+                                    f"{model_name}:latest",
+                                    model_name.replace(":latest", "")
+                                ]
+                                
+                                model_found = None
+                                for variant in model_variants:
+                                    if variant in available_models:
+                                        model_found = variant
+                                        break
+                                
+                                if model_found:
+                                    progress_info["success"] = True
+                                    logger.info(f"Model {model_name} verified as downloaded (found as: {model_found})")
+                                else:
+                                    logger.error(f"Model {model_name} not found in available models. Variants checked: {model_variants}")
+                                    logger.error(f"Available embedding models: {[m for m in available_models if any(term in m.lower() for term in ['embed', 'bge', 'nomic', 'minilm'])]}")
+                        
+                        if progress_info["success"]:
+                            logger.info(f"Successfully downloaded model: {model_name}")
+                        else:
+                            error_msg = f"Model download verification failed: {model_name}"
+                            logger.error(error_msg)
+                            
+                            # For BGE and nomic models, provide specific guidance
+                            if "bge" in model_name.lower():
+                                error_msg += ". BGE models may require specific naming format. Try 'bge-m3' or 'bge-large' instead."
+                            elif "nomic" in model_name.lower():
+                                error_msg += ". Nomic models may require specific naming format. Try 'nomic-embed-text' instead."
+                                
+                            raise HTTPException(
+                                status_code=500, 
+                                detail=error_msg
+                            )
+                        
+                except httpx.TimeoutException:
+                    logger.error(f"Timeout downloading model {model_name}")
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Timeout downloading model {model_name}. Please try again."
+                    )
+                except Exception as e:
+                    logger.error(f"Error downloading model {model_name}: {e}")
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"Failed to download model {model_name}: {str(e)}"
+                    )
+        
+        # Now update the models in the RAG system
+        rag = get_chatpdf_instance()
+        
+        # Check if embedding model changed - if so, we need to re-ingest
+        embedding_changed = rag.embedding_model != embedding_model
+        
+        try:
+            # Update the models
+            rag.update_models(llm_model, embedding_model)
+        except Exception as e:
+            logger.error(f"Error updating models: {str(e)}")
+            
+            # Return detailed error information to frontend
+            error_detail = {
+                "error": "MODEL_UPDATE_FAILED",
+                "message": f"Failed to update models: {str(e)}",
+                "llm_model": llm_model,
+                "embedding_model": embedding_model,
+                "downloaded_models": models_to_download,
+                "suggestion": "Please check if the models are compatible with your system or try different models."
+            }
+            
+            # If it's a model not found error, suggest alternative
+            if "not found" in str(e).lower():
+                error_detail["suggestion"] = f"Model '{embedding_model}' not found. Please try a different embedding model or check if the model name is correct."
+            
+            raise HTTPException(
+                status_code=500,
+                detail=error_detail
+            )
+        
+        # Save settings to database and config file
+        config_path = "model_settings.json"
+        settings = {
+            'llm': llm_model,
+            'embedding': embedding_model,
+            'parameters': valid_parameters
+        }
+        
+        # Save to database
+        try:
+            chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+        except Exception as e:
+            logger.warning(f"Could not save to database: {e}")
+        
+        # Also save to config file as backup
+        with open(config_path, 'w') as f:
+            json.dump(settings, f, indent=2)
+        
+        response_data = {
+            "success": True,
+            "message": "Models updated successfully",
+            "llm": llm_model,
+            "embedding": embedding_model,
+            "embedding_changed": embedding_changed,
+            "downloaded_models": models_to_download
+        }
+        
+        # Add download info to message
+        if models_to_download:
+            downloaded_list = ", ".join(models_to_download)
+            response_data["message"] += f". Downloaded models: {downloaded_list}"
+        
+        # If embedding model changed, trigger automatic reingestion
+        if embedding_changed:
+            response_data["message"] += ". Embedding model changed - starting automatic reingestion of all documents."
+            response_data["reingestion_started"] = True
+            
+            # Start reingestion in background
+            try:
+                reingestion_result = rag.reingest_all_documents()
+                if reingestion_result:
+                    response_data["message"] += " Reingestion completed successfully."
+                    response_data["reingestion_success"] = True
+                else:
+                    response_data["message"] += " Reingestion failed. Please reingest documents manually."
+                    response_data["reingestion_success"] = False
+            except Exception as reingest_error:
+                logger.warning(f"Automatic reingestion failed: {reingest_error}")
+                response_data["message"] += " Automatic reingestion failed. Please reingest documents manually."
+                response_data["reingestion_success"] = False
+                response_data["reingestion_error"] = str(reingest_error)
+            response_data["reingest_suggested"] = True
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating models: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update models: {str(e)}")
+
+@app.post("/api/models/simple-settings")
+async def update_simple_models_settings(
+    request: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update model settings without complex validation - for basic UI"""
+    try:
+        import httpx
+        import asyncio
+        from rag import check_model_compatibility
+        
+        # Validate and normalize model names
+        llm_model = request.get('llm')
+        embedding_model = request.get('embedding')
+        model_parameters = request.get('parameters', {})
+        
+        if not llm_model or not embedding_model:
+            raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Validate model parameters
+        valid_parameters = {}
+        if model_parameters:
+            # Temperature (0.0 to 2.0)
+            temp = model_parameters.get('temperature', 0.7)
+            if isinstance(temp, (int, float)) and 0.0 <= temp <= 2.0:
+                valid_parameters['temperature'] = float(temp)
+            else:
+                valid_parameters['temperature'] = 0.7
+            
+            # Max tokens (1 to 32768)
+            max_tokens = model_parameters.get('max_tokens', 2048)
+            if isinstance(max_tokens, int) and 1 <= max_tokens <= 32768:
+                valid_parameters['max_tokens'] = max_tokens
+            else:
+                valid_parameters['max_tokens'] = 2048
+            
+            # Top-p (0.0 to 1.0)
+            top_p = model_parameters.get('top_p', 0.9)
+            if isinstance(top_p, (int, float)) and 0.0 <= top_p <= 1.0:
+                valid_parameters['top_p'] = float(top_p)
+            else:
+                valid_parameters['top_p'] = 0.9
+            
+            # Frequency penalty (-2.0 to 2.0)
+            freq_penalty = model_parameters.get('frequency_penalty', 0.0)
+            if isinstance(freq_penalty, (int, float)) and -2.0 <= freq_penalty <= 2.0:
+                valid_parameters['frequency_penalty'] = float(freq_penalty)
+            else:
+                valid_parameters['frequency_penalty'] = 0.0
+            
+            # Presence penalty (-2.0 to 2.0)
+            presence_penalty = model_parameters.get('presence_penalty', 0.0)
+            if isinstance(presence_penalty, (int, float)) and -2.0 <= presence_penalty <= 2.0:
+                valid_parameters['presence_penalty'] = float(presence_penalty)
+            else:
+                valid_parameters['presence_penalty'] = 0.0
+        else:
+            # Default parameters
+            valid_parameters = {
+                'temperature': 0.7,
+                'max_tokens': 2048,
+                'top_p': 0.9,
+                'frequency_penalty': 0.0,
+                'presence_penalty': 0.0
+            }
+        
+        # Normalize model names - fix common issues
+        if embedding_model == "bge-m3:1.7M":
+            embedding_model = "bge-m3"
+            logger.info("Normalized bge-m3:1.7M to bge-m3")
+        elif embedding_model == "bge-large:335m":
+            embedding_model = "bge-large"
+            logger.info("Normalized bge-large:335m to bge-large")
+        elif embedding_model == "nomic-embed-text:33.3M":
+            embedding_model = "nomic-embed-text"
+            logger.info("Normalized nomic-embed-text:33.3M to nomic-embed-text")
+        
+        # Check GPU compatibility before downloading
+        try:
+            logger.info(f"Checking GPU compatibility for LLM: {llm_model}, Embedding: {embedding_model}")
+            
+            # Check LLM model compatibility
+            llm_compatible, llm_message, llm_details = check_model_compatibility(llm_model)
+            logger.info(f"LLM compatibility check: {llm_compatible} - {llm_message}")
+            
+            # Check embedding model compatibility  
+            embedding_compatible, embedding_message, embedding_details = check_model_compatibility(embedding_model)
+            logger.info(f"Embedding compatibility check: {embedding_compatible} - {embedding_message}")
+            
+            # Calculate combined memory requirement
+            combined_memory = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
+            available_memory = llm_details['available_memory_mb']
+            combined_compatible = combined_memory <= available_memory
+            
+            logger.info(f"Combined memory check: {combined_memory}MB required, {available_memory}MB available, compatible: {combined_compatible}")
+            
+            # Only warn about compatibility issues, don't block downloads
+            compatibility_warnings = []
+            
+            if not llm_compatible:
+                compatibility_warnings.append(f"LLM model '{llm_model}' may not fit in GPU memory: {llm_message}")
+            
+            if not embedding_compatible:
+                compatibility_warnings.append(f"Embedding model '{embedding_model}' may not fit in GPU memory: {embedding_message}")
+            
+            if not combined_compatible:
+                shortage = combined_memory - available_memory
+                compatibility_warnings.append(f"Combined models may require ~{combined_memory}MB but only {available_memory}MB available (potential shortage: {shortage}MB)")
+            
+            if compatibility_warnings:
+                logger.warning("GPU compatibility warnings (proceeding with download): " + "; ".join(compatibility_warnings))
+            else:
+                logger.info("GPU compatibility check passed - all models should fit in memory")
+            
+        except Exception as e:
+            # Log GPU check errors but don't block the process
+            logger.warning(f"Could not check GPU compatibility: {str(e)}, proceeding anyway")
+            compatibility_warnings = [f"Could not verify GPU compatibility: {str(e)}"]
+        
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        # Check if only parameters changed (no model downloads needed)
+        rag = get_chatpdf_instance()
+        current_llm = rag.llm_model
+        current_embedding = rag.embedding_model
+        
+        logger.info(f"[API /api/models/simple-settings] Current models - LLM: '{current_llm}', Embedding: '{current_embedding}'")
+        logger.info(f"[API /api/models/simple-settings] Requested models - LLM: '{llm_model}', Embedding: '{embedding_model}'")
+        
+        models_unchanged = (current_llm == llm_model and current_embedding == embedding_model)
+        logger.info(f"[API /api/models/simple-settings] Models unchanged check: {models_unchanged}")
+        
+        if models_unchanged:
+            logger.info("Models unchanged, only updating parameters - skipping model downloads")
+            
+            # Update the models in the RAG system (this will only update parameters)
+            try:
+                rag.update_models(llm_model, embedding_model)
+            except Exception as e:
+                logger.error(f"Error updating parameters: {str(e)}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to update parameters: {str(e)}"
+                )
+            
+            # Save settings to database and config file
+            config_path = "model_settings.json"
+            settings = {
+                'llm': llm_model,
+                'embedding': embedding_model,
+                'parameters': valid_parameters
+            }
+            
+            # Save to database
+            try:
+                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+            except Exception as e:
+                logger.warning(f"Could not save to database: {e}")
+            
+            # Also save to config file as backup
+            with open(config_path, 'w') as f:
+                json.dump(settings, f, indent=2)
+            
+            response_data = {
+                "success": True,
+                "message": "Model parameters updated successfully (no downloads needed)",
+                "llm": llm_model,
+                "embedding": embedding_model,
+                "embedding_changed": False,
+                "downloaded_models": [],
+                "parameters_only": True
+            }
+            
+            # Add GPU compatibility warnings if any
+            if 'compatibility_warnings' in locals() and compatibility_warnings:
+                response_data["gpu_warnings"] = compatibility_warnings
+            
+            return response_data
+        
+        # Check which models need to be downloaded
+        models_to_download = []
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Get currently installed models
+            try:
+                response = await client.get(f"{ollama_host}/api/tags")
+                if response.status_code == 200:
+                    data = response.json()
+                    installed_models = {model.get('name', '') for model in data.get('models', [])}
+                else:
+                    installed_models = set()
+            except Exception as e:
+                logger.warning(f"Could not fetch installed models: {e}")
+                installed_models = set()
+            
+            # Check if models need downloading
             if llm_model not in installed_models:
                 models_to_download.append(llm_model)
                 
-            # Check if embedding model needs downloading
             if embedding_model not in installed_models:
                 models_to_download.append(embedding_model)
             
-            # Download missing models
+            # Download missing models with progress tracking
             for model_name in models_to_download:
                 logger.info(f"Downloading model: {model_name}")
                 try:
                     download_response = await client.post(
                         f"{ollama_host}/api/pull",
                         json={"name": model_name},
-                        timeout=300.0  # 5 minutes timeout for model download
+                        timeout=600.0  # 10 minutes timeout for model download
                     )
                     
                     if download_response.status_code != 200:
@@ -1390,7 +2912,7 @@ async def update_models_settings(
                         detail=f"Failed to download model {model_name}: {str(e)}"
                     )
         
-        # Now update the models in the RAG system
+        # Get RAG instance
         rag = get_chatpdf_instance()
         
         # Check if embedding model changed - if so, we need to re-ingest
@@ -1399,13 +2921,21 @@ async def update_models_settings(
         # Update the models
         rag.update_models(llm_model, embedding_model)
         
-        # Save settings to config file
+        # Save settings to database and config file
         config_path = "model_settings.json"
         settings = {
             'llm': llm_model,
-            'embedding': embedding_model
+            'embedding': embedding_model,
+            'parameters': valid_parameters
         }
         
+        # Save to database
+        try:
+            chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+        except Exception as e:
+            logger.warning(f"Could not save to database: {e}")
+        
+        # Also save to config file as backup
         with open(config_path, 'w') as f:
             json.dump(settings, f, indent=2)
         
@@ -1417,6 +2947,11 @@ async def update_models_settings(
             "embedding_changed": embedding_changed,
             "downloaded_models": models_to_download
         }
+        
+        # Add GPU compatibility warnings if any
+        if 'compatibility_warnings' in locals() and compatibility_warnings:
+            response_data["gpu_warnings"] = compatibility_warnings
+            response_data["message"] += f". GPU compatibility warnings: {'; '.join(compatibility_warnings)}"
         
         # Add download info to message
         if models_to_download:
@@ -1436,323 +2971,616 @@ async def update_models_settings(
         logger.error(f"Error updating models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update models: {str(e)}")
 
-@app.get("/api/admin/files")
-async def list_admin_files():
-    """Get list of all files with statistics for admin dashboard"""
+# Chunking configuration endpoints
+@app.get("/api/chunking/methods")
+async def get_chunking_methods(token: str = Depends(oauth2_scheme)):
+    """Get available chunking methods and their supported file formats"""
     try:
-        rag = get_chatpdf_instance()
-        doc_storage = rag.doc_storage
+        from chunking_config import ChunkingMethod, FileFormatSupport
         
-        # Get all documents
-        all_documents = doc_storage.list_all_documents()
-        
-        # Calculate statistics
-        total_files = len(all_documents)
-        total_size = sum(doc.get('file_size', 0) for doc in all_documents)
-        
-        # Calculate format statistics
-        format_stats = {}
-        for doc in all_documents:
-            # Get proper format extension
-            content_type = doc.get('content_type', 'unknown')
-            filename = doc.get('filename', '')
-            
-            if content_type == 'unknown' or not content_type:
-                # Try to get extension from filename
-                if '.' in filename:
-                    format_ext = filename.split('.')[-1].lower()
-                else:
-                    format_ext = 'unknown'
-            else:
-                # Map content type to format
-                format_mapping = {
-                    'application/pdf': 'pdf',
-                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-                    'text/csv': 'csv',
-                    'text/plain': 'txt'
-                }
-                format_ext = format_mapping.get(content_type, content_type.split('/')[-1] if '/' in content_type else content_type)
-            
-            if format_ext not in format_stats:
-                format_stats[format_ext] = {'count': 0, 'size': 0}
-            format_stats[format_ext]['count'] += 1
-            format_stats[format_ext]['size'] += doc.get('file_size', 0)
-        
-        # Convert format stats to list
-        format_stats_list = [
-            {
-                'format': format_name,
-                'count': stats['count'],
-                'size': stats['size']
+        methods = {}
+        for method in ChunkingMethod:
+            methods[method.value] = {
+                'name': method.value,
+                'description': _get_method_description(method),
+                'supported_formats': FileFormatSupport.get_supported_formats(method)
             }
-            for format_name, stats in format_stats.items()
-        ]
         
-        # Prepare file list with additional metadata
-        files_list = []
-        for doc in all_documents:
-            # Get ingestion status for current model
-            ingestion_status = doc.get('model_status', {})
-            current_model = rag.embedding_model
-            is_ingested = current_model in ingestion_status
-            
-            # Extract file format from content type or filename
-            content_type = doc.get('content_type', 'unknown')
-            if content_type == 'unknown' or not content_type:
-                # Try to get extension from filename
-                filename = doc.get('filename', '')
-                if '.' in filename:
-                    format_ext = filename.split('.')[-1].lower()
-                else:
-                    format_ext = 'unknown'
-            else:
-                # Map content type to format
-                format_mapping = {
-                    'application/pdf': 'pdf',
-                    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-                    'text/csv': 'csv',
-                    'text/plain': 'txt'
-                }
-                format_ext = format_mapping.get(content_type, content_type.split('/')[-1] if '/' in content_type else content_type)
-            
-            files_list.append({
-                'id': doc['id'],
-                'filename': doc['filename'],
-                'format': format_ext,  # Match frontend expectation
-                'size': doc.get('file_size', 0),
-                'upload_date': doc.get('uploaded_at', doc.get('upload_timestamp', '')),  # Match frontend expectation
-                'uploadDate': doc.get('uploaded_at', doc.get('upload_timestamp', '')),  # Keep for backward compatibility
-                'contentType': doc.get('content_type', 'unknown'),
-                'isIngested': is_ingested,
-                'ingestedModels': list(ingestion_status.keys()) if ingestion_status else [],
-                'status': 'ingested' if is_ingested else 'uploaded'
-            })
-        logger.info(f"Admin files listed: {len(files_list)} files")
-        return {
-            "files": files_list,
-            "stats": {
-                "totalFiles": total_files,
-                "totalSize": total_size,
-                "formatStats": format_stats_list
-            }
-        }
-        
+        return {"methods": methods}
     except Exception as e:
-        logger.error(f"Error listing admin files: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        logger.error(f"Error getting chunking methods: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/admin/ingestion-status")
-async def get_ingestion_status(current_user: dict = Depends(get_current_user)):
-    """Get ingestion status for current embedding model"""
-    try:
-        rag = get_chatpdf_instance()
-        doc_storage = rag.doc_storage
-        
-        # Get all documents
-        all_documents = doc_storage.list_all_documents()
-        current_model = rag.embedding_model
-        
-        # Categorize documents by ingestion status
-        ingested_docs = []
-        pending_docs = []
-        
-        for doc in all_documents:
-            ingestion_status = doc.get('model_status', {})
-            is_ingested = current_model in ingestion_status
-            
-            doc_info = {
-                'id': doc['id'],
-                'filename': doc['filename'],
-                'size': doc.get('file_size', 0),
-                'uploaded_at': doc.get('uploaded_at', ''),
-                'content_type': doc.get('content_type', 'unknown'),
-                'status': ingestion_status.get(current_model, 'pending')
-            }
-            
-            if is_ingested:
-                ingested_docs.append(doc_info)
-            else:
-                pending_docs.append(doc_info)
-        
-        # Get vector store stats
-        vector_stats = rag.get_vector_store_stats()
-        
-        return {
-            "success": True,
-            "current_embedding_model": current_model,
-            "total_documents": len(all_documents),
-            "ingested_documents": {
-                "count": len(ingested_docs),
-                "files": ingested_docs
-            },
-            "pending_documents": {
-                "count": len(pending_docs),
-                "files": pending_docs
-            },
-            "vector_store_stats": vector_stats
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting ingestion status: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get ingestion status: {str(e)}")
-
-@app.post("/api/admin/reingest-all")
-async def reingest_all_documents(current_user: dict = Depends(get_current_user)):
-    """Re-ingest all documents for current embedding model"""
-    try:
-        rag = get_chatpdf_instance()
-        
-        # Trigger re-ingestion
-        success = rag.reingest_all_documents_for_current_model()
-        
-        if success:
-            return {
-                "success": True,
-                "message": f"Documents re-ingestion started for embedding model: {rag.embedding_model}"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Re-ingestion failed")
-            
-    except Exception as e:
-        logger.error(f"Error during re-ingestion: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to re-ingest documents: {str(e)}")
-
-
-@app.post("/api/admin/cleanup-orphaned-documents")
-async def cleanup_orphaned_documents(current_user: dict = Depends(get_current_user)):
-    """Clean up orphaned documents (in database but not in MinIO)"""
-    try:
-        doc_storage = get_document_storage()
-        
-        # Clean up orphaned documents
-        orphaned_count = doc_storage.cleanup_orphaned_documents()
-        
-        return {
-            "success": True,
-            "message": f"Cleaned up {orphaned_count} orphaned documents",
-            "orphaned_count": orphaned_count
-        }
-        
-    except Exception as e:
-        logger.error(f"Error during orphaned document cleanup: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to cleanup orphaned documents: {str(e)}")
-
-@app.get("/api/gpu/memory-info")
-async def get_gpu_memory_info_endpoint(current_user: dict = Depends(get_current_user)):
-    """Get current GPU memory information"""
-    try:
-        from rag import get_gpu_memory_info
-        gpu_info = get_gpu_memory_info()
-        
-        return {
-            "success": True,
-            "gpu_memory": gpu_info,
-            "message": f"GPU Memory - Total: {gpu_info['total']}MB, Used: {gpu_info['used']}MB, Available: {gpu_info['available']}MB"
-        }
-    except Exception as e:
-        logger.error(f"Error getting GPU memory info: {str(e)}")
-        return {
-            "success": False,
-            "error": str(e),
-            "gpu_memory": {
-                "total": 8192,
-                "used": 2048,
-                "free": 6144,
-                "available": 6144
-            },
-            "message": "Could not determine GPU memory, using default estimates"
-        }
-
-@app.post("/api/models/check-compatibility")
-async def check_model_compatibility_endpoint(
-    request: dict,
+@app.get("/api/chunking/config/{method}")
+async def get_chunking_config(
+    method: str, 
     current_user: dict = Depends(get_current_user)
 ):
-    """Check if selected models are compatible with current GPU memory"""
+    """Get chunking configuration for a specific method"""
     try:
-        from rag import check_model_compatibility, get_gpu_memory_info
+        from chunking_config import ChunkingMethod, get_chunking_config_manager
         
-        llm_model = request.get('llm')
-        embedding_model = request.get('embedding')
-        llm_size = request.get('llm_size')
-        embedding_size = request.get('embedding_size')
+        try:
+            chunking_method = ChunkingMethod(method)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid chunking method: {method}")
         
-        if not llm_model or not embedding_model:
-            raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        config_manager = get_chunking_config_manager()
         
-        # Check LLM model compatibility
-        llm_compatible, llm_message, llm_details = check_model_compatibility(llm_model, llm_size)
+        # Get user-specific config if user is available
+        user_id = current_user.get('sub', 'default') if current_user else None
+        config = config_manager.get_config(chunking_method, user_id)
         
-        # Check embedding model compatibility
-        embedding_compatible, embedding_message, embedding_details = check_model_compatibility(embedding_model, embedding_size)
+        return {"config": config.to_dict()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting chunking config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/chunking/config/{method}")
+async def update_chunking_config(
+    method: str,
+    config_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update chunking configuration for a specific method"""
+    try:
+        from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
         
-        # Calculate combined memory requirement
-        combined_memory = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
-        available_memory = llm_details['available_memory_mb']
+        try:
+            chunking_method = ChunkingMethod(method)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid chunking method: {method}")
         
-        combined_compatible = combined_memory <= available_memory
+        # Create config from provided data
+        config = ChunkingConfig.from_dict(config_data)
         
-        if combined_compatible:
-            combined_message = f"✅ Both models compatible together (combined ~{combined_memory}MB, {available_memory}MB available)"
-        else:
-            shortage = combined_memory - available_memory
-            combined_message = f"❌ Combined models require ~{combined_memory}MB but only {available_memory}MB available (shortage: {shortage}MB)"
+        # Validate configuration
+        config_manager = get_chunking_config_manager()
+        warnings = config_manager.validate_config(config)
         
-        # Get current GPU info
-        gpu_info = get_gpu_memory_info()
+        # Save configuration (user-specific based on token)
+        user_id = current_user.get('sub', 'default')
+        config_manager.save_config(chunking_method, config, user_id)
         
         return {
-            "success": True,
-            "compatible": llm_compatible and embedding_compatible and combined_compatible,
-            "llm_check": {
-                "compatible": llm_compatible,
-                "message": llm_message,
-                "details": llm_details
-            },
-            "embedding_check": {
-                "compatible": embedding_compatible,
-                "message": embedding_message,
-                "details": embedding_details
-            },
-            "combined_check": {
-                "compatible": combined_compatible,
-                "message": combined_message,
-                "required_memory_mb": combined_memory,
-                "available_memory_mb": available_memory,
-                "shortage_mb": max(0, combined_memory - available_memory)
-            },
-            "gpu_info": gpu_info,
-            "recommendations": generate_compatibility_recommendations(llm_details, embedding_details, combined_compatible)
+            "message": "Configuration updated successfully",
+            "warnings": warnings,
+            "config": config.to_dict()
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating chunking config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chunking/optimal/{file_extension}")
+async def get_optimal_chunking_method(file_extension: str, token: str = Depends(oauth2_scheme)):
+    """Get optimal chunking method for a file extension"""
+    try:
+        from chunking_config import FileFormatSupport
+        
+        # Remove dot if present
+        ext = file_extension.lstrip('.')
+        
+        optimal_method = FileFormatSupport.get_optimal_method(ext)
+        available_methods = FileFormatSupport.get_available_methods(ext)
+        
+        return {
+            "file_extension": ext,
+            "optimal_method": optimal_method.value,
+            "available_methods": [method.value for method in available_methods]
+        }
+    except Exception as e:
+        logger.error(f"Error getting optimal chunking method: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _get_method_description(method: ChunkingMethod) -> str:
+    """Get description for chunking method"""
+    descriptions = {
+        ChunkingMethod.GENERAL: "General document chunking for PDF, DOCX, MD, TXT files",
+        ChunkingMethod.QA: "For question-answer formatted documents",
+        ChunkingMethod.RESUME: "Enterprise edition for resume documents", 
+        ChunkingMethod.TABLE: "For spreadsheet/tabular data",
+        ChunkingMethod.PRESENTATION: "For PPT/presentation files",
+        ChunkingMethod.PICTURE: "Image/visual content processing",
+        ChunkingMethod.EMAIL: "Email content chunking"
+    }
+    return descriptions.get(method, "Custom chunking method")
+
+async def flexible_oauth2_scheme(
+    request: Request,
+    authorization: str = Header(None),
+    token: str = Query(None)
+):
+    """OAuth2 scheme that accepts token from either Authorization header or query parameter"""
+    auth_token = None
+    
+    # Try to get token from Authorization header first
+    if authorization:
+        try:
+            scheme, _, param = authorization.partition(" ")
+            if scheme.lower() == "bearer":
+                auth_token = param
+        except Exception:
+            pass
+    
+    # If no header token, try query parameter
+    if not auth_token and token:
+        auth_token = token
+        
+    if not auth_token:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return auth_token
+
+
+@app.get("/api/documents/{document_id}/image")
+async def get_document_image(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(flexible_oauth2_scheme)):
+    """Serve document image if it's an image file"""
+    try:
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
+        
+        # Get document info first
+        doc_info = doc_storage._get_document_by_id(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Check if it's an image file by content type or extension
+        is_image_by_content_type = doc_info['content_type'].startswith('image/')
+        is_image_by_extension = doc_info['filename'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'))
+        
+        if not (is_image_by_content_type or is_image_by_extension):
+            raise HTTPException(status_code=400, detail="Document is not an image")
+        
+        # Get the document content from MinIO
+        temp_file_path = doc_storage.get_document_file(document_id)
+        
+        # Schedule cleanup
+        background_tasks.add_task(os.remove, temp_file_path)
+        
+        # Determine correct content type if stored incorrectly
+        response_content_type = doc_info['content_type']
+        if not response_content_type.startswith('image/'):
+            import mimetypes
+            guessed_type, _ = mimetypes.guess_type(doc_info['filename'])
+            if guessed_type and guessed_type.startswith('image/'):
+                response_content_type = guessed_type
+        
+        # Return the image file
+        return FileResponse(
+            temp_file_path,
+            media_type=response_content_type,
+            filename=doc_info['filename']
+        )
         
     except Exception as e:
-        logger.error(f"Error checking model compatibility: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to check model compatibility: {str(e)}")
+        logger.error(f"Error serving document image {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-def generate_compatibility_recommendations(llm_details: dict, embedding_details: dict, combined_compatible: bool) -> List[str]:
-    """Generate recommendations based on compatibility check"""
-    recommendations = []
-    
-    if not combined_compatible:
-        # If models don't fit together, suggest alternatives
-        if llm_details['required_memory_mb'] > embedding_details['required_memory_mb']:
-            recommendations.append("Consider using a smaller LLM model (e.g., 3B or 7B parameter version)")
+@app.get("/api/documents/{document_id}/preview")
+async def get_document_preview(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(oauth2_scheme)):
+    """Get document preview content for side-by-side viewing"""
+    try:
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
         
-        recommendations.append("Consider using a smaller embedding model")
-        recommendations.append("Close other GPU-intensive applications to free up memory")
+        # Get document info first
+        doc_info = doc_storage._get_document_by_id(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
         
-        shortage = llm_details['required_memory_mb'] + embedding_details['required_memory_mb'] - llm_details['available_memory_mb']
-        if shortage > 0:
-            recommendations.append(f"You need approximately {shortage}MB more GPU memory")
-    
-    elif llm_details['available_memory_mb'] - (llm_details['required_memory_mb'] + embedding_details['required_memory_mb']) < 1024:
-        # If barely fitting, warn about potential issues
-        recommendations.append("Models will fit but with minimal memory margin - consider monitoring GPU memory usage")
-        recommendations.append("Close unnecessary applications to ensure stable operation")
-    
-    else:
-        recommendations.append("✅ Sufficient GPU memory available for stable operation")
-    
-    return recommendations
+        # For images, return image metadata
+        is_image_by_content_type = doc_info['content_type'].startswith('image/')
+        is_image_by_extension = doc_info['filename'].lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'))
+        
+        if is_image_by_content_type or is_image_by_extension:
+            return {
+                "type": "image",
+                "content_type": doc_info['content_type'],
+                "filename": doc_info['filename'],
+                "image_url": f"/api/documents/{document_id}/image"
+            }
+        
+        # Get the document content from MinIO
+        temp_file_path = doc_storage.get_document_file(document_id)
+        
+        try:
+            # Extract text content based on file type
+            content = ""
+            content_type = doc_info['content_type'].lower()
+            
+            if content_type == 'text/plain' or doc_info['filename'].endswith('.txt'):
+                with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            
+            elif content_type == 'application/pdf' or doc_info['filename'].endswith('.pdf'):
+                import PyPDF2
+                pages_info = []
+                with open(temp_file_path, 'rb') as f:
+                    pdf_reader = PyPDF2.PdfReader(f)
+                    content = ""
+                    for page_num in range(min(20, len(pdf_reader.pages))):  # Limit to first 20 pages
+                        page = pdf_reader.pages[page_num]
+                        page_text = page.extract_text()
+                        content += f"--- Page {page_num + 1} ---\n"
+                        content += page_text + "\n\n"
+                        
+                        # Store page info for PDF viewer
+                        pages_info.append({
+                            "page_number": page_num + 1,
+                            "text": page_text,
+                            "text_length": len(page_text)
+                        })
+                
+                # For PDFs, return special structure with page info
+                return {
+                    "type": "pdf",
+                    "content_type": doc_info['content_type'],
+                    "filename": doc_info['filename'],
+                    "content": content,
+                    "pdf_url": f"/api/documents/{document_id}/raw",
+                    "pages_info": pages_info,
+                    "total_pages": len(pdf_reader.pages),
+                    "truncated": len(content) >= 50000
+                }
+            
+            elif content_type in ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword'] or doc_info['filename'].endswith(('.docx', '.doc')):
+                from docx import Document
+                doc = Document(temp_file_path)
+                content = ""
+                for paragraph in doc.paragraphs[:50]:  # Limit to first 50 paragraphs
+                    content += paragraph.text + "\n"
+            
+            elif content_type in ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'] or doc_info['filename'].endswith(('.pptx', '.ppt')):
+                # Handle PowerPoint files - Convert to HTML
+                logger.info(f"DEBUG: Processing PPTX file: {doc_info['filename']}")
+                logger.info(f"DEBUG: Content type: {content_type}")
+                logger.info(f"DEBUG: File path: {temp_file_path}")
+                try:
+                    from pptx_html_converter import convert_pptx_to_html_slides
+                    logger.info("DEBUG: Successfully imported pptx_html_converter")
+                    
+                    # Convert PPTX to HTML slides
+                    logger.info("DEBUG: Starting PPTX to HTML conversion...")
+                    result = convert_pptx_to_html_slides(temp_file_path)
+                    logger.info(f"DEBUG: HTML conversion result: {result.get('has_html', False)}, slides count: {len(result.get('slides', []))}")
+                    
+                    # Also extract text content for backward compatibility
+                    from pptx import Presentation
+                    logger.info("DEBUG: Starting text extraction from PPTX...")
+                    prs = Presentation(temp_file_path)
+                    slides_content = []
+                    logger.info(f"DEBUG: Found {len(prs.slides)} slides in presentation")
+                    
+                    for slide_num, slide in enumerate(prs.slides, 1):
+                        slide_text = []
+                        
+                        # Extract text from shapes
+                        for shape in slide.shapes:
+                            if hasattr(shape, 'text') and shape.text.strip():
+                                slide_text.append(shape.text.strip())
+                            
+                            # Handle tables safely
+                            if hasattr(shape, 'table') and shape.has_table:
+                                try:
+                                    table_text = []
+                                    for row in shape.table.rows:
+                                        row_text = []
+                                        for cell in row.cells:
+                                            if cell.text.strip():
+                                                row_text.append(cell.text.strip())
+                                        if row_text:
+                                            table_text.append(' | '.join(row_text))
+                                    if table_text:
+                                        slide_text.append('\n'.join(table_text))
+                                except Exception as e:
+                                    logger.warning(f"Could not process table in slide {slide_num}: {e}")
+                        
+                        slide_content = '\n\n'.join(slide_text) if slide_text else f"[Slide {slide_num} - No text content]"
+                        slides_content.append({
+                            "slide_number": slide_num,
+                            "content": slide_content,
+                            "text_length": len(slide_content)
+                        })
+                    
+                    logger.info(f"DEBUG: Extracted text from {len(slides_content)} slides")
+                    
+                    # Merge HTML data with text content for backward compatibility
+                    merged_slides = []
+                    
+                    # If we have HTML slides, use them as primary data
+                    if result.get('has_html', False) and result.get('slides'):
+                        logger.info("DEBUG: Using HTML slides as primary data")
+                        for i, html_slide in enumerate(result['slides']):
+                            slide_data = html_slide.copy()
+                            
+                            # Add text content for search/indexing if available
+                            if i < len(slides_content):
+                                slide_data['content'] = slides_content[i]['content']
+                                slide_data['text_length'] = slides_content[i]['text_length']
+                            
+                            merged_slides.append(slide_data)
+                        logger.info(f"DEBUG: Created {len(merged_slides)} merged HTML slides")
+                    else:
+                        # Fallback to text-only slides
+                        logger.info("DEBUG: Falling back to text-only slides")
+                        merged_slides = slides_content
+                    
+                    content = '\n\n=== SLIDE SEPARATOR ===\n\n'.join([slide['content'] for slide in slides_content])
+                    
+                    final_response = {
+                        "type": "presentation",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content,
+                        "slides": merged_slides,
+                        "total_slides": len(prs.slides),
+                        "has_html": result.get('has_html', False),
+                        "has_images": False,  # Using HTML instead of images
+                        "conversion_method": result.get('conversion_method', 'unknown'),
+                        "truncated": len(content) >= 50000
+                    }
+                    
+                    logger.info(f"DEBUG: Final response structure:")
+                    logger.info(f"DEBUG: - Type: {final_response['type']}")
+                    logger.info(f"DEBUG: - Has HTML: {final_response['has_html']}")
+                    logger.info(f"DEBUG: - Total slides: {final_response['total_slides']}")
+                    logger.info(f"DEBUG: - Merged slides count: {len(final_response['slides'])}")
+                    logger.info(f"DEBUG: - Conversion method: {final_response['conversion_method']}")
+                    
+                    if final_response['slides'] and len(final_response['slides']) > 0:
+                        first_slide = final_response['slides'][0]
+                        logger.info(f"DEBUG: First slide structure: {list(first_slide.keys())}")
+                        if 'html_content' in first_slide:
+                            logger.info(f"DEBUG: First slide has HTML content (length: {len(first_slide['html_content'])})")
+                        if 'format' in first_slide:
+                            logger.info(f"DEBUG: First slide format: {first_slide['format']}")
+                    
+                    return final_response
+                    
+                except ImportError as ie:
+                    logger.error(f"Missing dependencies for PPTX processing: {ie}")
+                    # Fallback to text-only processing
+                    try:
+                        from pptx import Presentation
+                        prs = Presentation(temp_file_path)
+                        slides_content = []
+                        
+                        for slide_num, slide in enumerate(prs.slides, 1):
+                            slide_text = []
+                            for shape in slide.shapes:
+                                if hasattr(shape, 'text') and shape.text.strip():
+                                    slide_text.append(shape.text.strip())
+                            
+                            slide_content = '\n\n'.join(slide_text) if slide_text else f"[Slide {slide_num} - No text content]"
+                            slides_content.append({
+                                "slide_number": slide_num,
+                                "content": slide_content
+                            })
+                        
+                        content = '\n\n=== SLIDE SEPARATOR ===\n\n'.join([slide['content'] for slide in slides_content])
+                        
+                        return {
+                            "type": "presentation",
+                            "content_type": doc_info['content_type'],
+                            "filename": doc_info['filename'],
+                            "content": content,
+                            "slides": slides_content,
+                            "total_slides": len(prs.slides),
+                            "has_images": False,
+                            "error": "Image conversion not available - text only"
+                        }
+                    except Exception as e:
+                        content = f"Error processing PowerPoint file: {str(e)}"
+                except Exception as e:
+                    logger.error(f"Error converting PPTX to images: {e}")
+                    content = f"Error processing PowerPoint file: {str(e)}"
+            
+            elif content_type in ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel'] or doc_info['filename'].endswith(('.xlsx', '.xls')):
+                # Handle Excel files
+                try:
+                    import pandas as pd
+                    
+                    # Read first few sheets
+                    sheets_content = []
+                    excel_file = pd.ExcelFile(temp_file_path)
+                    
+                    for sheet_name in excel_file.sheet_names[:5]:  # Limit to first 5 sheets
+                        try:
+                            df = pd.read_excel(temp_file_path, sheet_name=sheet_name, nrows=100)  # Limit rows
+                            sheet_content = f"=== Sheet: {sheet_name} ===\n"
+                            sheet_content += df.to_string(max_rows=50, max_cols=10, index=False)
+                            sheets_content.append({
+                                "sheet_name": sheet_name,
+                                "content": sheet_content,
+                                "rows": len(df),
+                                "columns": len(df.columns)
+                            })
+                        except Exception as e:
+                            sheets_content.append({
+                                "sheet_name": sheet_name,
+                                "content": f"Error reading sheet: {str(e)}",
+                                "rows": 0,
+                                "columns": 0
+                            })
+                    
+                    content = '\n\n'.join([sheet['content'] for sheet in sheets_content])
+                    
+                    return {
+                        "type": "spreadsheet",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content,
+                        "sheets": sheets_content,
+                        "total_sheets": len(excel_file.sheet_names),
+                        "truncated": len(content) >= 50000
+                    }
+                    
+                except ImportError:
+                    content = "Excel preview requires pandas library"
+                except Exception as e:
+                    content = f"Error processing Excel file: {str(e)}"
+            
+            elif content_type == 'text/csv' or doc_info['filename'].endswith('.csv'):
+                # Handle CSV files
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(temp_file_path, nrows=100)  # Limit to first 100 rows
+                    content = df.to_string(max_rows=50, max_cols=20, index=False)
+                    
+                    return {
+                        "type": "csv",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content,
+                        "rows": len(df),
+                        "columns": len(df.columns),
+                        "column_names": list(df.columns),
+                        "truncated": len(df) >= 100
+                    }
+                    
+                except ImportError:
+                    content = "CSV preview requires pandas library"
+                except Exception as e:
+                    content = f"Error processing CSV file: {str(e)}"
+            
+            elif content_type == 'text/html' or doc_info['filename'].endswith(('.html', '.htm')):
+                # Handle HTML files
+                try:
+                    from bs4 import BeautifulSoup
+                    with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        html_content = f.read()
+                    
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    # Extract text content
+                    text_content = soup.get_text(separator='\n', strip=True)
+                    
+                    return {
+                        "type": "html",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": text_content[:50000],  # Limit content
+                        "html_content": html_content[:10000],  # Limited HTML for preview
+                        "truncated": len(text_content) >= 50000
+                    }
+                    
+                except ImportError:
+                    # Fallback to plain text
+                    with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()[:10000]
+                except Exception as e:
+                    content = f"Error processing HTML file: {str(e)}"
+            
+            elif content_type == 'message/rfc822' or doc_info['filename'].endswith('.eml'):
+                # Handle email files
+                try:
+                    import email
+                    with open(temp_file_path, 'rb') as f:
+                        msg = email.message_from_binary_file(f)
+                    
+                    email_content = []
+                    email_content.append(f"From: {msg.get('From', 'Unknown')}")
+                    email_content.append(f"To: {msg.get('To', 'Unknown')}")
+                    email_content.append(f"Subject: {msg.get('Subject', 'No Subject')}")
+                    email_content.append(f"Date: {msg.get('Date', 'Unknown')}")
+                    email_content.append("\n" + "="*50 + "\n")
+                    
+                    # Get email body
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                email_content.append(part.get_payload(decode=True).decode('utf-8', errors='ignore'))
+                                break
+                    else:
+                        email_content.append(msg.get_payload(decode=True).decode('utf-8', errors='ignore'))
+                    
+                    content = '\n'.join(email_content)
+                    
+                    return {
+                        "type": "email",
+                        "content_type": doc_info['content_type'],
+                        "filename": doc_info['filename'],
+                        "content": content[:50000],
+                        "from": msg.get('From', 'Unknown'),
+                        "to": msg.get('To', 'Unknown'),
+                        "subject": msg.get('Subject', 'No Subject'),
+                        "date": msg.get('Date', 'Unknown'),
+                        "truncated": len(content) >= 50000
+                    }
+                    
+                except Exception as e:
+                    content = f"Error processing email file: {str(e)}"
+            
+            elif content_type == 'text/markdown' or doc_info['filename'].endswith('.md'):
+                with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            
+            elif content_type in ['application/json', 'text/json'] or doc_info['filename'].endswith('.json'):
+                import json
+                with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    json_data = json.load(f)
+                    content = json.dumps(json_data, indent=2)
+            
+            else:
+                # Try to read as text for other formats
+                try:
+                    with open(temp_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()[:10000]  # Limit to first 10KB
+                except:
+                    content = f"Preview not available for {content_type}"
+            
+            # Limit content length for frontend display
+            if len(content) > 50000:  # 50KB limit
+                content = content[:50000] + "\n\n... (Content truncated for preview)"
+            
+            return {
+                "type": "text",
+                "content_type": doc_info['content_type'],
+                "filename": doc_info['filename'],
+                "content": content,
+                "truncated": len(content) >= 50000
+            }
+            
+        finally:
+            # Schedule cleanup
+            background_tasks.add_task(os.remove, temp_file_path)
+        
+    except Exception as e:
+        logger.error(f"Error getting document preview: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving document preview: {str(e)}")
+
+@app.get("/api/documents/{document_id}/raw")
+async def get_document_raw(document_id: int, background_tasks: BackgroundTasks, token: str = Depends(oauth2_scheme)):
+    """Serve raw document file for viewers (e.g., PDF viewer)"""
+    try:
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
+        
+        # Get document info first
+        doc_info = doc_storage._get_document_by_id(document_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Get the document content from MinIO
+        temp_file_path = doc_storage.get_document_file(document_id)
+        
+        # Schedule cleanup
+        background_tasks.add_task(os.remove, temp_file_path)
+        
+        # Return the document file
+        return FileResponse(
+            temp_file_path,
+            media_type=doc_info['content_type'],
+            filename=doc_info['filename']
+        )
+        
+    except Exception as e:
+        logger.error(f"Error serving raw document {document_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
