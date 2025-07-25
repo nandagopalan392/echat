@@ -1131,7 +1131,7 @@ async def upload_file(
     file: UploadFile,
     is_folder: str = Form(default="false"),
     folder_path: str = Form(default=""),
-    chunking_method: str = Form(default="auto"),  # auto, naive, qa, resume, manual, table, laws, presentation, picture, one, email
+    chunking_method: str = Form(default="auto"),  # auto, general, qa, resume, table, presentation, picture, email
     chunk_token_num: int = Form(default=1000),
     chunk_overlap: int = Form(default=200),
     delimiter: str = Form(default="\\n\\n|\\n|\\.|\\!|\\?"),
@@ -1182,8 +1182,8 @@ async def upload_file(
                 try:
                     selected_method = ChunkingMethod(chunking_method)
                 except ValueError:
-                    logger.warning(f"Invalid chunking method '{chunking_method}', using naive")
-                    selected_method = ChunkingMethod.NAIVE
+                    logger.warning(f"Invalid chunking method '{chunking_method}', using general")
+                    selected_method = ChunkingMethod.GENERAL
             
             # Create chunking configuration
             chunking_config = ChunkingConfig(
@@ -1456,8 +1456,8 @@ async def retry_document_processing(
                 try:
                     selected_method = ChunkingMethod(method)
                 except ValueError:
-                    logger.warning(f"Invalid chunking method '{method}', using naive")
-                    selected_method = ChunkingMethod.NAIVE
+                    logger.warning(f"Invalid chunking method '{method}', using general")
+                    selected_method = ChunkingMethod.GENERAL
             
             # Create chunking configuration
             chunking_config = ChunkingConfig(

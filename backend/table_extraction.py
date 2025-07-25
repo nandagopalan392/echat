@@ -203,6 +203,15 @@ class TableExtractor:
 
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Clean DataFrame by removing mostly empty columns and fixing headers"""
+        # Ensure we have a valid pandas DataFrame
+        if not isinstance(df, pd.DataFrame):
+            logger.warning(f"Expected pandas DataFrame, got {type(df)}. Attempting to convert.")
+            try:
+                df = pd.DataFrame(df)
+            except Exception as e:
+                logger.error(f"Failed to convert to DataFrame: {e}")
+                return pd.DataFrame()  # Return empty DataFrame
+        
         if df.empty:
             return df
         
@@ -217,15 +226,37 @@ class TableExtractor:
         
         # Remove columns that are mostly empty
         threshold = 0.7  # Keep columns that have at least 30% non-empty values
+        columns_to_drop = []
         for col in df.columns:
-            non_empty_ratio = df[col].astype(str).str.strip().str.len().gt(0).sum() / len(df)
-            if non_empty_ratio < (1 - threshold):
-                df = df.drop(columns=[col])
+            try:
+                # Ensure we have a pandas Series before calling .str methods
+                series = df[col]
+                if hasattr(series, 'astype') and hasattr(series, 'str'):
+                    non_empty_ratio = series.astype(str).str.strip().str.len().gt(0).sum() / len(df)
+                    if non_empty_ratio < (1 - threshold):
+                        columns_to_drop.append(col)
+                else:
+                    logger.warning(f"Column {col} doesn't support string operations, skipping threshold check")
+            except AttributeError as e:
+                logger.warning(f"Column {col} doesn't support string operations: {e}")
+                continue
+        
+        # Drop columns that are mostly empty
+        if columns_to_drop:
+            df = df.drop(columns=columns_to_drop)
         
         # Clean cell values
         for col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-            df[col] = df[col].replace(['None', 'nan', ''], pd.NA)
+            try:
+                series = df[col]
+                if hasattr(series, 'astype') and hasattr(series, 'str'):
+                    df[col] = series.astype(str).str.strip()
+                    df[col] = df[col].replace(['None', 'nan', ''], pd.NA)
+                else:
+                    logger.warning(f"Column {col} doesn't support string operations, leaving as-is")
+            except AttributeError as e:
+                logger.warning(f"Column {col} doesn't support string operations: {e}")
+                continue
         
         return df
     
@@ -764,7 +795,18 @@ def create_row_based_chunks(table_data: pd.DataFrame, table_info: Dict[str, Any]
     
     # Convert all columns to string and clean them
     for col in cleaned_df.columns:
-        cleaned_df[col] = cleaned_df[col].astype(str).str.strip()
+        try:
+            # Ensure we have a proper pandas Series before applying .str operations
+            series = cleaned_df[col]
+            if hasattr(series, 'astype') and hasattr(series, 'str'):
+                cleaned_df[col] = series.astype(str).str.strip()
+            else:
+                # Fallback for non-pandas series
+                cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
+        except AttributeError as e:
+            logger.warning(f"Column {col} doesn't support string operations: {e}")
+            # Try basic string conversion
+            cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
     
     # Get table title/identifier
     table_identifier = f"Table {table_info.get('table_number', 1)}"
@@ -838,7 +880,17 @@ def create_semantic_table_chunks(table_data: pd.DataFrame, table_info: Dict[str,
     
     # Convert all columns to string and clean them
     for col in cleaned_df.columns:
-        cleaned_df[col] = cleaned_df[col].astype(str).str.strip()
+        try:
+            series = cleaned_df[col]
+            if hasattr(series, 'astype') and hasattr(series, 'str'):
+                cleaned_df[col] = series.astype(str).str.strip()
+            else:
+                # Fallback for non-pandas series
+                cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
+        except AttributeError as e:
+            logger.warning(f"Column {col} doesn't support string operations: {e}")
+            # Try basic string conversion
+            cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
     
     # Get table title/identifier
     table_identifier = f"Table {table_info.get('table_number', 1)}"

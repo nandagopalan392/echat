@@ -140,6 +140,11 @@ const KnowledgeHubPage = () => {
     });
     const [showAdvancedReingestionConfig, setShowAdvancedReingestionConfig] = useState(false);
 
+    // Status polling states
+    const [statusPolling, setStatusPolling] = useState(false);
+    const [pendingDocuments, setPendingDocuments] = useState(new Set());
+    const [pollingInterval, setPollingInterval] = useState(null);
+
     // Utility function to extract just the filename from a path
     const extractFilename = (filepath) => {
         if (!filepath) return '';
@@ -251,15 +256,145 @@ const KnowledgeHubPage = () => {
         loadChunkingMethods();
     }, []);
 
-    const loadFiles = async () => {
+    // Status polling effect - monitors documents with pending status
+    useEffect(() => {
+        const checkPendingDocuments = () => {
+            const pending = new Set();
+            files.forEach(file => {
+                const status = getDocumentStatus(file);
+                // Only poll for truly pending documents (not failed, completed, or partial)
+                if (status.status === 'pending') {
+                    pending.add(file.id);
+                }
+                // Also include documents that are manually marked as processing
+                if (processingDocuments.has(file.id) && status.status === 'pending') {
+                    pending.add(file.id);
+                }
+            });
+            setPendingDocuments(pending);
+            return pending.size > 0;
+        };
+
+        // Start polling if there are pending documents
+        if (files.length > 0) {
+            const hasPending = checkPendingDocuments();
+            
+            if (hasPending && !statusPolling) {
+                setStatusPolling(true);
+                const interval = setInterval(async () => {
+                    try {
+                        await loadFiles(true); // Silent refresh during polling
+                        const stillHasPending = checkPendingDocuments();
+                        if (!stillHasPending) {
+                            setStatusPolling(false);
+                            clearInterval(interval);
+                            setPollingInterval(null);
+                        }
+                    } catch (error) {
+                        console.error('Error during status polling:', error);
+                    }
+                }, 3000); // Poll every 3 seconds
+                
+                setPollingInterval(interval);
+            } else if (!hasPending && statusPolling) {
+                setStatusPolling(false);
+                if (pollingInterval) {
+                    clearInterval(pollingInterval);
+                    setPollingInterval(null);
+                }
+            }
+        }
+
+        return () => {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                setPollingInterval(null);
+            }
+        };
+    }, [files, processingDocuments, statusPolling]);
+
+    // Cleanup polling on component unmount
+    useEffect(() => {
+        return () => {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+            }
+        };
+    }, []);
+
+    const loadFiles = async (silent = false) => {
         try {
-            setLoading(true);
+            if (!silent) {
+                setLoading(true);
+            }
             const response = await api.listFiles();
-            setFiles(response.files || []);
+            const newFiles = response.files || [];
+            
+            // Track status changes for notifications and cleanup processing state
+            if (files.length > 0) {
+                const oldFileMap = new Map(files.map(f => [f.id, f]));
+                const completedOrFailedDocuments = new Set();
+                
+                newFiles.forEach(newFile => {
+                    const oldFile = oldFileMap.get(newFile.id);
+                    if (oldFile) {
+                        const oldStatus = getDocumentStatus(oldFile);
+                        const newStatus = getDocumentStatus(newFile);
+                        
+                        // Check if document is no longer pending
+                        if (newStatus.status !== 'pending') {
+                            completedOrFailedDocuments.add(newFile.id);
+                        }
+                        
+                        // Notify on status change from pending to completed
+                        if (oldStatus.status === 'pending' && newStatus.status === 'completed') {
+                            if (!silent) {
+                                showValidationToast(
+                                    `✅ Document "${extractFilename(newFile.filename)}" has been successfully indexed!`,
+                                    'success',
+                                    4000
+                                );
+                            }
+                        } else if (oldStatus.status === 'pending' && newStatus.status === 'failed') {
+                            if (!silent) {
+                                showValidationToast(
+                                    `❌ Document "${extractFilename(newFile.filename)}" indexing failed.`,
+                                    'error',
+                                    5000
+                                );
+                            }
+                        } else if (oldStatus.status === 'pending' && newStatus.status === 'partial') {
+                            if (!silent) {
+                                showValidationToast(
+                                    `⚠️ Document "${extractFilename(newFile.filename)}" partially indexed (some models failed).`,
+                                    'warning',
+                                    5000
+                                );
+                            }
+                        }
+                    }
+                });
+                
+                // Clear completed/failed documents from processing state
+                if (completedOrFailedDocuments.size > 0) {
+                    setProcessingDocuments(prev => {
+                        const newSet = new Set(prev);
+                        completedOrFailedDocuments.forEach(id => newSet.delete(id));
+                        return newSet;
+                    });
+                }
+            }
+            
+            setFiles(newFiles);
         } catch (error) {
             console.error('Error loading files:', error);
+            if (!silent) {
+                showValidationToast('❌ Error refreshing document list', 'error');
+            }
         } finally {
-            setLoading(false);
+            if (!silent) {
+                setLoading(false);
+            }
         }
     };
 
@@ -534,31 +669,84 @@ const KnowledgeHubPage = () => {
 
     // Helper function to get document status
     const getDocumentStatus = (file) => {
+        // If no model_status field, check if file is indexed (backward compatibility)
         if (!file.model_status) {
+            // Check if file has indexed field or if it was successfully processed
+            if (file.indexed === true) {
+                return { status: 'completed', label: 'Indexed', color: 'bg-green-100 text-green-800' };
+            }
             return { status: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' };
         }
         
-        // Check if any model has failed status
-        const statuses = Object.values(file.model_status);
-        const hasFailed = statuses.includes('failed');
-        const hasCompleted = statuses.includes('completed');
-        const hasPending = statuses.includes('pending');
+        // Handle empty model_status object
+        if (typeof file.model_status === 'object' && Object.keys(file.model_status).length === 0) {
+            // If model_status is empty but file.indexed is true, consider it completed
+            if (file.indexed === true) {
+                return { status: 'completed', label: 'Indexed', color: 'bg-green-100 text-green-800' };
+            }
+            return { status: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' };
+        }
         
-        if (hasFailed && !hasCompleted) {
-            return { status: 'failed', label: 'Failed', color: 'bg-red-100 text-red-800' };
+        // Check statuses across all embedding models
+        const statuses = Object.values(file.model_status);
+        const hasFailed = statuses.some(status => status === 'failed');
+        const hasCompleted = statuses.some(status => status === 'completed');
+        const hasPending = statuses.some(status => status === 'pending');
+        
+        // Priority order: failed > completed > pending > unknown
+        if (hasFailed) {
+            // If any model failed and none completed, show failed
+            if (!hasCompleted) {
+                return { status: 'failed', label: 'Failed', color: 'bg-red-100 text-red-800' };
+            }
+            // If some failed but some completed, show partial success
+            return { status: 'partial', label: 'Partial', color: 'bg-orange-100 text-orange-800' };
         } else if (hasCompleted) {
             return { status: 'completed', label: 'Indexed', color: 'bg-green-100 text-green-800' };
         } else if (hasPending) {
             return { status: 'pending', label: 'Pending', color: 'bg-yellow-100 text-yellow-800' };
         } else {
+            // Final fallback - check if file.indexed is true
+            if (file.indexed === true) {
+                return { status: 'completed', label: 'Indexed', color: 'bg-green-100 text-green-800' };
+            }
             return { status: 'unknown', label: 'Unknown', color: 'bg-gray-100 text-gray-800' };
         }
     };
 
     // Helper function to get error message for failed documents
     const getErrorMessage = (file) => {
-        // This would need to be added to the backend response - for now return a generic message
-        return 'Document processing failed. Please check the file format and try re-uploading.';
+        // Check if we have error details in the model_status or other fields
+        if (file.error_message) {
+            return file.error_message;
+        }
+        
+        // Check for specific error patterns based on file type
+        const fileExtension = extractFilename(file.filename || '').split('.').pop()?.toLowerCase();
+        
+        switch (fileExtension) {
+            case 'pdf':
+                return 'PDF processing failed. The file may be corrupted, password-protected, or contain unsupported content.';
+            case 'docx':
+            case 'doc':
+                return 'Word document processing failed. Please ensure the file is not corrupted or password-protected.';
+            case 'xlsx':
+            case 'xls':
+            case 'csv':
+                return 'Spreadsheet processing failed. Check for table formatting issues or data corruption.';
+            case 'pptx':
+            case 'ppt':
+                return 'PowerPoint processing failed. The file may contain unsupported content or be corrupted.';
+            case 'jpg':
+            case 'jpeg':
+            case 'png':
+            case 'gif':
+            case 'tif':
+            case 'tiff':
+                return 'Image processing failed. OCR extraction may have encountered issues with image quality.';
+            default:
+                return 'Document processing failed. Please check the file format, ensure it\'s not corrupted, and try uploading again.';
+        }
     };
 
     const handleFileUpload = async (event) => {
@@ -609,9 +797,12 @@ const KnowledgeHubPage = () => {
             // Refresh the files list
             await loadFiles();
             
+            // Start status polling for newly uploaded files
+            setStatusPolling(true);
+            
             // Show success message
             showValidationToast(
-                `✅ Folder "${folderName}" uploaded successfully with ${files.length} files!`,
+                `✅ Folder "${folderName}" uploaded successfully with ${files.length} files! Processing will begin shortly.`,
                 'success',
                 5000
             );
@@ -661,8 +852,12 @@ const KnowledgeHubPage = () => {
             setUploadProgress({}); // Clear upload progress after completion
             setShowFileUploadReview(false);
             await loadFiles();
+            
+            // Start status polling for newly uploaded files
+            setStatusPolling(true);
+            
             showValidationToast(
-                `✅ Uploaded ${files.length} file${files.length !== 1 ? 's' : ''} successfully!`,
+                `✅ Uploaded ${files.length} file${files.length !== 1 ? 's' : ''} successfully! Processing will begin shortly.`,
                 'success',
                 5000
             );
@@ -868,6 +1063,9 @@ const KnowledgeHubPage = () => {
                 
                 // Refresh the documents list
                 await loadFiles();
+                
+                // Start status polling for reingested documents
+                setStatusPolling(true);
             } else {
                 showValidationToast(`⚠️ No documents were successfully reingested. Check the logs for details.`, 'warning');
             }
@@ -925,24 +1123,24 @@ const KnowledgeHubPage = () => {
 
     const getChunkingMethodStyle = (method) => {
         const styleMap = {
-            'naive': 'bg-blue-100 text-blue-700',
             'qa': 'bg-green-100 text-green-700',
             'resume': 'bg-purple-100 text-purple-700',
-            'manual': 'bg-orange-100 text-orange-700',
+            'general': 'bg-orange-100 text-orange-700',
             'table': 'bg-yellow-100 text-yellow-700',
-            'laws': 'bg-red-100 text-red-700',
             'presentation': 'bg-pink-100 text-pink-700',
             'picture': 'bg-indigo-100 text-indigo-700',
-            'one': 'bg-gray-100 text-gray-700',
             'email': 'bg-teal-100 text-teal-700'
         };
         return styleMap[method] || 'bg-blue-100 text-blue-700';
     };
 
     const refreshData = async () => {
-        setLoading(true);
         try {
+            setLoading(true);
             await loadFiles();
+            showValidationToast('✅ Document list refreshed', 'success', 2000);
+        } catch (error) {
+            showValidationToast('❌ Error refreshing document list', 'error');
         } finally {
             setLoading(false);
         }
@@ -1170,11 +1368,26 @@ const KnowledgeHubPage = () => {
                                 </p>
                             </div>
                             <div className="flex items-center space-x-4">
+                                {/* Status Polling Indicator */}
+                                {statusPolling && pendingDocuments.size > 0 && (
+                                    <div className="flex items-center px-3 py-2 text-sm bg-blue-50 text-blue-700 rounded-lg">
+                                        <svg className="w-4 h-4 mr-2 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                        </svg>
+                                        Processing {pendingDocuments.size} document{pendingDocuments.size !== 1 ? 's' : ''}
+                                    </div>
+                                )}
+                                
                                 <button
                                     onClick={refreshData}
-                                    className="flex items-center px-3 py-2 text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors"
+                                    disabled={loading}
+                                    className={`flex items-center px-3 py-2 text-sm rounded-lg transition-colors ${
+                                        loading 
+                                            ? 'bg-gray-50 text-gray-400 cursor-not-allowed' 
+                                            : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
+                                    }`}
                                 >
-                                    <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <svg className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                                     </svg>
                                     Refresh
@@ -1582,10 +1795,10 @@ const KnowledgeHubPage = () => {
                                             <div className="mt-2 text-xs text-gray-500">
                                                 <div className="grid grid-cols-2 gap-2">
                                                     <div>
-                                                        <span className="font-medium">📄 PDF:</span> Manual, Naive, Q&A
+                                                        <span className="font-medium">📄 PDF:</span> General, Q&A
                                                     </div>
                                                     <div>
-                                                        <span className="font-medium">📝 Word:</span> Naive, Resume, Q&A
+                                                        <span className="font-medium">📝 Word:</span> General, Resume, Q&A
                                                     </div>
                                                     <div>
                                                         <span className="font-medium">📊 PowerPoint:</span> Presentation
@@ -1691,7 +1904,7 @@ const KnowledgeHubPage = () => {
                                                 </div>
                                             )}
 
-                                            {/* Separators (for naive method) */}
+                                            {/* Text separators for chunking */}
                                             {activeConfig.separators !== undefined && (
                                                 <div>
                                                     <label htmlFor="separators" className="block text-sm font-medium text-gray-700 mb-2">
@@ -1815,9 +2028,9 @@ const KnowledgeHubPage = () => {
                                 </div>
                                 <div className="p-6">
                                     <div className="text-sm text-gray-600">
-                                        {selectedMethod === 'naive' && (
+                                        {selectedMethod === 'general' && (
                                             <div>
-                                                <p><strong>Naive Chunking:</strong> Simple text splitting based on separators and character count.</p>
+                                                <p><strong>General Chunking:</strong> Smart text splitting based on document structure and content.</p>
                                                 <p className="mt-2">Best for: General documents, articles, and plain text files.</p>
                                             </div>
                                         )}
@@ -1833,7 +2046,7 @@ const KnowledgeHubPage = () => {
                                                 <p className="mt-2">Best for: Resume databases, CV collections, and professional profiles.</p>
                                             </div>
                                         )}
-                                        {!['naive', 'qa', 'resume'].includes(selectedMethod) && (
+                                        {!['general', 'qa', 'resume'].includes(selectedMethod) && (
                                             <div>
                                                 <p><strong>{selectedMethod.charAt(0).toUpperCase() + selectedMethod.slice(1)} Chunking:</strong> Specialized chunking method.</p>
                                                 <p className="mt-2">Configure the parameters above to optimize for your specific use case.</p>
@@ -1922,7 +2135,7 @@ const KnowledgeHubPage = () => {
                             )}
                             
                             <p className="text-sm text-gray-600">
-                                Or continue uploading with the 'Naive' chunking method (fallback option).
+                                Or continue uploading with the 'General' chunking method (fallback option).
                             </p>
                         </div>
                         
@@ -1937,7 +2150,7 @@ const KnowledgeHubPage = () => {
                                 onClick={warningDialog.onConfirm}
                                 className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
                             >
-                                Use Naive Method
+                                Use General Method
                             </button>
                         </div>
                     </div>

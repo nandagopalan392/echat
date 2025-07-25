@@ -21,19 +21,6 @@ from table_extraction import (
     create_row_based_chunks, create_semantic_table_chunks, create_table_chunk_metadata
 )
 
-import os
-import logging
-from typing import List, Dict, Any, Optional, Tuple
-from pathlib import Path
-import json
-import re
-from dataclasses import dataclass
-
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
-
 logger = logging.getLogger(__name__)
 
 # Try to import additional libraries for enhanced document processing
@@ -67,7 +54,7 @@ class ChunkingResult:
     metadata: Dict[str, Any]
     method_used: ChunkingMethod
     config_used: ChunkingConfig
-    warnings: List[str] = None
+    warnings: Optional[List[str]] = None
     
     def __post_init__(self):
         if self.warnings is None:
@@ -196,24 +183,32 @@ class EnhancedDocumentProcessor:
             for table_info in extracted_tables:
                 table_data = table_info['data']
                 
-                if hasattr(table_data, 'shape') and not table_data.empty:
-                    # Use proper row-based chunking for tables
-                    if len(table_data) <= 20:  # Small tables: one chunk per row
-                        table_chunks = create_row_based_chunks(table_data, table_info)
-                    else:  # Large tables: semantic grouping
-                        table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
-                    
-                    # Convert to Document objects
-                    for chunk_data in table_chunks:
-                        chunk_metadata = chunk_data['metadata']
-                        chunk_metadata['chunking_method'] = f"{method.value}_table_aware"
-                        chunk_metadata.update(doc.metadata)  # Include original document metadata
+                # Ensure table_data is a pandas DataFrame and not empty
+                try:
+                    if (PANDAS_AVAILABLE and 
+                        isinstance(table_data, pd.DataFrame) and 
+                        not table_data.empty):
                         
-                        chunk = Document(
-                            page_content=chunk_data['content'],
-                            metadata=chunk_metadata
-                        )
-                        doc_chunks.append(chunk)
+                        # Use proper row-based chunking for tables
+                        if len(table_data) <= 20:  # Small tables: one chunk per row
+                            table_chunks = create_row_based_chunks(table_data, table_info)
+                        else:  # Large tables: semantic grouping
+                            table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                        
+                        # Convert to Document objects
+                        for chunk_data in table_chunks:
+                            chunk_metadata = chunk_data['metadata']
+                            chunk_metadata['chunking_method'] = f"{method.value}_table_aware"
+                            chunk_metadata.update(doc.metadata)  # Include original document metadata
+                            
+                            chunk = Document(
+                                page_content=chunk_data['content'],
+                                metadata=chunk_metadata
+                            )
+                            doc_chunks.append(chunk)
+                except Exception as e:
+                    logger.warning(f"Failed to process table data: {e}")
+                    # Skip this table and continue with others
             
             # Now process the document content based on the selected method
             # but make it table-aware for text content too
@@ -345,23 +340,29 @@ class EnhancedDocumentProcessor:
                         for table_info in extracted_tables:
                             table_data = table_info['data']
                             
-                            if hasattr(table_data, 'shape') and not table_data.empty:  # pandas DataFrame
-                                # Use proper row-based chunking for tables
-                                if len(table_data) <= 20:  # Small tables: one chunk per row
-                                    table_chunks = create_row_based_chunks(table_data, table_info)
-                                else:  # Large tables: semantic grouping
-                                    table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
-                                
-                                # Convert to Document objects
-                                for chunk_data in table_chunks:
-                                    chunk_metadata = chunk_data['metadata']
-                                    chunk_metadata.update(doc.metadata)  # Include original document metadata
+                            try:
+                                if (PANDAS_AVAILABLE and 
+                                    isinstance(table_data, pd.DataFrame) and 
+                                    not table_data.empty):  # pandas DataFrame
+                                    # Use proper row-based chunking for tables
+                                    if len(table_data) <= 20:  # Small tables: one chunk per row
+                                        table_chunks = create_row_based_chunks(table_data, table_info)
+                                    else:  # Large tables: semantic grouping
+                                        table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
                                     
-                                    chunk = Document(
-                                        page_content=chunk_data['content'],
-                                        metadata=chunk_metadata
-                                    )
-                                    chunks.append(chunk)
+                                    # Convert to Document objects
+                                    for chunk_data in table_chunks:
+                                        chunk_metadata = chunk_data['metadata']
+                                        chunk_metadata.update(doc.metadata)  # Include original document metadata
+                                        
+                                        chunk = Document(
+                                            page_content=chunk_data['content'],
+                                            metadata=chunk_metadata
+                                        )
+                                        chunks.append(chunk)
+                            except Exception as e:
+                                logger.warning(f"Failed to process table data: {e}")
+                                # Skip this table and continue with others
                         
                         # If we successfully extracted tables, return them
                         if chunks:
@@ -782,27 +783,33 @@ class EnhancedDocumentProcessor:
                             for table_info in tables:
                                 table_data = table_info['data']
                                 
-                                if hasattr(table_data, 'shape') and not table_data.empty:
-                                    # Use proper row-based chunking for tables
-                                    if len(table_data) <= 20:  # Small tables: one chunk per row
-                                        table_chunks = create_row_based_chunks(table_data, table_info)
-                                    else:  # Large tables: semantic grouping
-                                        table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
-                                    
-                                    # Convert to Document objects
-                                    for chunk_data in table_chunks:
-                                        chunk_metadata = chunk_data['metadata']
-                                        chunk_metadata.update({
-                                            'slide_chunk': True,
-                                            'content_type': 'table'
-                                        })
-                                        chunk_metadata.update(doc.metadata)  # Include original document metadata
+                                try:
+                                    if (PANDAS_AVAILABLE and 
+                                        isinstance(table_data, pd.DataFrame) and 
+                                        not table_data.empty):
+                                        # Use proper row-based chunking for tables
+                                        if len(table_data) <= 20:  # Small tables: one chunk per row
+                                            table_chunks = create_row_based_chunks(table_data, table_info)
+                                        else:  # Large tables: semantic grouping
+                                            table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
                                         
-                                        chunk = Document(
-                                            page_content=chunk_data['content'],
-                                            metadata=chunk_metadata
-                                        )
-                                        chunks.append(chunk)
+                                        # Convert to Document objects
+                                        for chunk_data in table_chunks:
+                                            chunk_metadata = chunk_data['metadata']
+                                            chunk_metadata.update({
+                                                'slide_chunk': True,
+                                                'content_type': 'table'
+                                            })
+                                            chunk_metadata.update(doc.metadata)  # Include original document metadata
+                                            
+                                            chunk = Document(
+                                                page_content=chunk_data['content'],
+                                                metadata=chunk_metadata
+                                            )
+                                            chunks.append(chunk)
+                                except Exception as e:
+                                    logger.warning(f"Failed to process table data: {e}")
+                                    # Skip this table and continue with others
                         
                         # If we successfully extracted tables, continue with regular slide processing for non-table content
                         # This allows both table and text content to be processed from presentations
@@ -1075,28 +1082,31 @@ class EnhancedDocumentProcessor:
                     for table_info in extracted_tables:
                         table_data = table_info['data']
                         
-                        if hasattr(table_data, 'shape') and not table_data.empty:
-                            # Use proper row-based chunking for tables
-                            if len(table_data) <= 20:  # Small tables: one chunk per row
-                                table_chunks = create_row_based_chunks(table_data, table_info)
-                            else:  # Large tables: semantic grouping
-                                table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                        try:
+                            if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
+                                # Use proper row-based chunking for tables
+                                if len(table_data) <= 20:  # Small tables: one chunk per row
+                                    table_chunks = create_row_based_chunks(table_data, table_info)
+                                else:  # Large tables: semantic grouping
+                                    table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
                             
-                            # Convert to Document objects
-                            for chunk_data in table_chunks:
-                                chunk_metadata = chunk_data['metadata']
-                                chunk_metadata.update({
-                                    'source': Path(file_path).name,
-                                    'content_type': 'table',
-                                    'extracted_from': 'pdf'
-                                })
-                                
-                                table_doc = Document(
-                                    page_content=chunk_data['content'],
-                                    metadata=chunk_metadata
-                                )
-                                documents.append(table_doc)
-                
+                                # Convert to Document objects
+                                for chunk_data in table_chunks:
+                                    chunk_metadata = chunk_data['metadata']
+                                    chunk_metadata.update({
+                                        'source': Path(file_path).name,
+                                        'content_type': 'table',
+                                        'extracted_from': 'pdf'
+                                    })
+                                    
+                                    table_doc = Document(
+                                        page_content=chunk_data['content'],
+                                        metadata=chunk_metadata
+                                    )
+                                    documents.append(table_doc)
+                        except Exception as e:
+                            logger.warning(f"Failed to process table data: {e}")
+                            
             except Exception as e:
                 logger.warning(f"Table extraction failed for PDF {file_path}: {e}")
             
@@ -1164,27 +1174,31 @@ class EnhancedDocumentProcessor:
                 for table_info in extracted_tables:
                     table_data = table_info['data']
                     
-                    if hasattr(table_data, 'shape') and not table_data.empty:
-                        # Use proper row-based chunking for CSV tables
-                        if len(table_data) <= 20:  # Small tables: one chunk per row
-                            table_chunks = create_row_based_chunks(table_data, table_info)
-                        else:  # Large tables: semantic grouping
-                            table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
-                        
-                        # Convert to Document objects
-                        for chunk_data in table_chunks:
-                            chunk_metadata = chunk_data['metadata']
-                            chunk_metadata.update({
-                                'source': Path(file_path).name,
-                                'type': 'csv',
-                                'content_type': 'table',
-                                'extracted_from': 'csv'
-                            })
+                    try:
+                        if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
+                            # Use proper row-based chunking for CSV tables
+                            if len(table_data) <= 20:  # Small tables: one chunk per row
+                                table_chunks = create_row_based_chunks(table_data, table_info)
+                            else:  # Large tables: semantic grouping
+                                table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
                             
-                            documents.append(Document(
-                                page_content=chunk_data['content'],
-                                metadata=table_metadata
-                            ))
+                            # Convert to Document objects
+                            for chunk_data in table_chunks:
+                                chunk_metadata = chunk_data['metadata']
+                                chunk_metadata.update({
+                                    'source': Path(file_path).name,
+                                    'type': 'csv',
+                                    'content_type': 'table',
+                                    'extracted_from': 'csv'
+                                })
+                                
+                                documents.append(Document(
+                                    page_content=chunk_data['content'],
+                                    metadata=chunk_metadata
+                                ))
+                    except Exception as e:
+                        logger.warning(f"Failed to process CSV table data: {e}")
+                        
             else:
                 # Fallback to LangChain CSV loader
                 if ADVANCED_LOADERS_AVAILABLE:
@@ -1207,6 +1221,11 @@ class EnhancedDocumentProcessor:
                                 'content_type': 'table',
                                 'extraction_method': 'text_fallback'
                             })
+                            
+        except Exception as e:
+            logger.error(f"CSV processing failed for {file_path}: {e}")
+            # Final fallback to text processing
+            documents = self._process_text(file_path)
         
         except Exception as e:
             logger.error(f"Failed to process CSV file {file_path}: {e}")
@@ -1233,27 +1252,31 @@ class EnhancedDocumentProcessor:
                 for table_info in extracted_tables:
                     table_data = table_info['data']
                     
-                    if hasattr(table_data, 'shape') and not table_data.empty:
-                        # Use proper row-based chunking for Excel tables
-                        if len(table_data) <= 20:  # Small tables: one chunk per row
-                            table_chunks = create_row_based_chunks(table_data, table_info)
-                        else:  # Large tables: semantic grouping
-                            table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
-                        
-                        # Convert to Document objects
-                        for chunk_data in table_chunks:
-                            chunk_metadata = chunk_data['metadata']
-                            chunk_metadata.update({
-                                'source': Path(file_path).name,
-                                'type': 'excel',
-                                'content_type': 'table',
-                                'extracted_from': 'excel'
-                            })
+                    try:
+                        if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
+                            # Use proper row-based chunking for Excel tables
+                            if len(table_data) <= 20:  # Small tables: one chunk per row
+                                table_chunks = create_row_based_chunks(table_data, table_info)
+                            else:  # Large tables: semantic grouping
+                                table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
                             
-                            documents.append(Document(
-                                page_content=chunk_data['content'],
-                                metadata=chunk_metadata
-                            ))
+                            # Convert to Document objects
+                            for chunk_data in table_chunks:
+                                chunk_metadata = chunk_data['metadata']
+                                chunk_metadata.update({
+                                    'source': Path(file_path).name,
+                                    'type': 'excel',
+                                    'content_type': 'table',
+                                    'extracted_from': 'excel'
+                                })
+                                
+                                documents.append(Document(
+                                    page_content=chunk_data['content'],
+                                    metadata=chunk_metadata
+                                ))
+                    except Exception as e:
+                        logger.warning(f"Failed to process Excel table data: {e}")
+                        
             else:
                 # Fallback to pandas if table extractor doesn't work
                 if PANDAS_AVAILABLE:
@@ -1372,28 +1395,31 @@ class EnhancedDocumentProcessor:
                     for table_info in extracted_tables[slide_num]:
                         table_data = table_info['data']
                         
-                        if hasattr(table_data, 'shape') and not table_data.empty:
-                            # Use proper row-based chunking for presentation tables
-                            if len(table_data) <= 20:  # Small tables: one chunk per row
-                                table_chunks = create_row_based_chunks(table_data, table_info)
-                            else:  # Large tables: semantic grouping
-                                table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
-                            
-                            # Convert to Document objects
-                            for chunk_data in table_chunks:
-                                chunk_metadata = chunk_data['metadata']
-                                chunk_metadata.update({
-                                    'source': Path(file_path).name,
-                                    'type': 'presentation',
-                                    'content_type': 'table',
-                                    'extracted_from': 'presentation',
-                                    'total_slides': len(prs.slides)
-                                })
+                        try:
+                            if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
+                                # Use proper row-based chunking for presentation tables
+                                if len(table_data) <= 20:  # Small tables: one chunk per row
+                                    table_chunks = create_row_based_chunks(table_data, table_info)
+                                else:  # Large tables: semantic grouping
+                                    table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                                
+                                # Convert to Document objects
+                                for chunk_data in table_chunks:
+                                    chunk_metadata = chunk_data['metadata']
+                                    chunk_metadata.update({
+                                        'source': Path(file_path).name,
+                                        'type': 'presentation',
+                                        'content_type': 'table',
+                                        'extracted_from': 'presentation',
+                                        'total_slides': len(prs.slides)
+                                    })
                                 
                                 documents.append(Document(
                                     page_content=chunk_data['content'],
                                     metadata=chunk_metadata
                                 ))
+                        except Exception as e:
+                            logger.warning(f"Failed to process presentation table data: {e}")
                 
                 # Also add simple table documents for inline tables
                 for table_content in slide_tables:
@@ -1490,6 +1516,22 @@ class EnhancedDocumentProcessor:
                 
                 for i in range(len(ocr_data['text'])):
                     confidence = int(ocr_data['conf'][i])
+                    if confidence > 10:  # Lower confidence threshold to capture more text
+                        word_text = ocr_data['text'][i].strip()
+                        if word_text and len(word_text) > 0:  # Only include non-empty text
+                            bbox = {
+                                'text': word_text,
+                                'left': int(ocr_data['left'][i]),
+                                'top': int(ocr_data['top'][i]),
+                                'width': int(ocr_data['width'][i]),
+                                'height': int(ocr_data['height'][i]),
+                                'confidence': confidence,
+                                'block_num': int(ocr_data['block_num'][i]),
+                                'par_num': int(ocr_data['par_num'][i]),
+                                'line_num': int(ocr_data['line_num'][i]),
+                                'word_num': int(ocr_data['word_num'][i])
+                            }
+                            bounding_boxes.append(bbox)
                     if confidence > 10:  # Lower confidence threshold to capture more text
                         word_text = ocr_data['text'][i].strip()
                         if word_text and len(word_text) > 0:  # Only include non-empty text

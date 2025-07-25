@@ -893,13 +893,59 @@ class ChatPDF:
             else:
                 cleanup_temp_file = False
             
-            # Extract text from PDF
-            text_content = self._extract_text_from_pdf(file_path)
-            if not text_content:
+            # Get document info to determine file type
+            doc_info = self.doc_storage._get_document_by_id(document_id)
+            if not doc_info:
+                logger.error(f"Document {document_id} not found in database")
+                return False
+                
+            filename = doc_info['filename']
+            file_extension = Path(filename).suffix.lower()
+            
+            # Extract text using the appropriate method based on file type
+            text_content = None
+            
+            if file_extension == '.pdf':
+                # Use PDF extraction
+                text_content = self._extract_text_from_pdf(file_path)
+            elif file_extension in ['.docx', '.doc']:
+                # Use enhanced document processor for Word documents
+                try:
+                    from enhanced_document_processor import get_document_processor
+                    processor = get_document_processor()
+                    # Process as Word document
+                    chunking_result = processor.process_document(file_path, original_filename=filename)
+                    if chunking_result and chunking_result.chunks:
+                        # Combine all document chunks into single text
+                        text_content = '\n\n'.join([doc.page_content for doc in chunking_result.chunks])
+                    else:
+                        logger.warning(f"No content extracted from Word document: {filename}")
+                except Exception as e:
+                    logger.warning(f"Enhanced processor failed for {filename}, trying fallback: {e}")
+                    # Fallback to basic PDF extraction (might work for some formats)
+                    text_content = self._extract_text_from_pdf(file_path)
+            else:
+                # Try enhanced processor for other file types
+                try:
+                    from enhanced_document_processor import get_document_processor
+                    processor = get_document_processor()
+                    chunking_result = processor.process_document(file_path, original_filename=filename)
+                    if chunking_result and chunking_result.chunks:
+                        text_content = '\n\n'.join([doc.page_content for doc in chunking_result.chunks])
+                    else:
+                        # Fallback to PDF extraction
+                        text_content = self._extract_text_from_pdf(file_path)
+                except Exception as e:
+                    logger.warning(f"Enhanced processor failed for {filename}, trying PDF extraction: {e}")
+                    text_content = self._extract_text_from_pdf(file_path)
+            
+            if not text_content or not text_content.strip():
+                error_msg = f"No text content extracted from {filename} (type: {file_extension})"
+                logger.error(error_msg)
                 self.doc_storage.mark_ingestion_failed(
                     document_id, 
                     self.embedding_model, 
-                    "No text content extracted from PDF"
+                    error_msg
                 )
                 return False
              # Create document and split into chunks
@@ -915,7 +961,6 @@ class ChatPDF:
                 return False
 
             # Get document info to add filename to chunk metadata
-            doc_info = self.doc_storage._get_document_by_id(document_id)
             filename = doc_info['filename'] if doc_info else f"document_{document_id}"
             
             # Add filename to chunk metadata
@@ -1351,21 +1396,27 @@ class ChatPDF:
                             logger.info(f"Successfully re-ingested: {doc['filename']} ({success_count}/{total_docs})")
                         else:
                             logger.warning(f"Failed to re-ingest: {doc['filename']}")
-                            self.doc_storage.mark_ingestion_failed(
-                                doc['id'], 
-                                self.embedding_model, 
-                                "Ingestion failed - see logs for details"
-                            )
+                            # Don't mark as failed here since _ingest_for_current_model already handles it
                     except ValueError as ve:
-                        # Handle PDF extraction and validation errors more gracefully
+                        # Handle document processing and validation errors more gracefully
                         error_msg = str(ve)
+                        file_ext = Path(doc['filename']).suffix.lower()
+                        
                         if "PDF" in error_msg or "extract text" in error_msg:
-                            logger.warning(f"PDF processing failed for {doc['filename']}: {error_msg}")
-                            self.doc_storage.mark_ingestion_failed(
-                                doc['id'], 
-                                self.embedding_model, 
-                                f"PDF processing error: {error_msg}"
-                            )
+                            if file_ext == '.pdf':
+                                logger.warning(f"PDF processing failed for {doc['filename']}: {error_msg}")
+                                self.doc_storage.mark_ingestion_failed(
+                                    doc['id'], 
+                                    self.embedding_model, 
+                                    f"PDF processing error: {error_msg}"
+                                )
+                            else:
+                                logger.warning(f"File {doc['filename']} (ext: {file_ext}) incorrectly processed as PDF: {error_msg}")
+                                self.doc_storage.mark_ingestion_failed(
+                                    doc['id'], 
+                                    self.embedding_model, 
+                                    f"File type mismatch - {file_ext} file processed as PDF: {error_msg}"
+                                )
                         else:
                             logger.error(f"Document validation failed for {doc['filename']}: {error_msg}")
                             self.doc_storage.mark_ingestion_failed(
@@ -1373,14 +1424,41 @@ class ChatPDF:
                                 self.embedding_model, 
                                 f"Document validation error: {error_msg}"
                             )
-                    except Exception as ie:
-                        # Handle other ingestion errors
-                        logger.error(f"Unexpected error re-ingesting {doc['filename']}: {str(ie)}")
+                    except ImportError as ie:
+                        # Handle missing dependencies for document processing
+                        logger.error(f"Missing dependency for processing {doc['filename']}: {str(ie)}")
                         self.doc_storage.mark_ingestion_failed(
                             doc['id'], 
                             self.embedding_model, 
-                            f"Ingestion error: {str(ie)}"
+                            f"Missing dependency: {str(ie)}"
                         )
+                    except Exception as ie:
+                        # Handle other ingestion errors
+                        error_msg = str(ie)
+                        file_ext = Path(doc['filename']).suffix.lower()
+                        
+                        # Provide more specific error messages based on file type
+                        if file_ext in ['.docx', '.doc'] and ('permission' in error_msg.lower() or 'access' in error_msg.lower()):
+                            logger.error(f"Permission error accessing Word document {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Word document access error: {error_msg}"
+                            )
+                        elif 'corrupt' in error_msg.lower() or 'damaged' in error_msg.lower():
+                            logger.error(f"Corrupted document {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Corrupted document: {error_msg}"
+                            )
+                        else:
+                            logger.error(f"Unexpected error re-ingesting {doc['filename']}: {error_msg}")
+                            self.doc_storage.mark_ingestion_failed(
+                                doc['id'], 
+                                self.embedding_model, 
+                                f"Ingestion error: {error_msg}"
+                            )
                         
                 except Exception as e:
                     logger.error(f"Error processing document {doc.get('filename', 'unknown')}: {str(e)}")
@@ -2247,7 +2325,7 @@ class ChatPDF:
                             chunking_method,
                             chunking_config,
                             None,  # user_id not needed for reingestion
-                            doc_info['filename']
+                            original_filename=doc_info['filename']
                         )
                         
                         if not chunking_result.chunks:
@@ -2440,7 +2518,7 @@ class ChatPDF:
                             chunking_method,
                             chunking_config,
                             None,  # user_id not needed for reingestion
-                            doc_info['filename']
+                            original_filename=doc_info['filename']
                         )
                         
                         if not chunking_result.chunks:
@@ -2578,8 +2656,8 @@ class ChatPDF:
             
             # Validate that the method supports this file type
             if not FileFormatSupport.is_supported(chunking_method, file_ext):
-                logger.warning(f"Method {chunking_method.value} not supported for {file_ext}, using naive")
-                chunking_method = ChunkingMethod.NAIVE
+                logger.warning(f"Method {chunking_method.value} not supported for {file_ext}, using general")
+                chunking_method = ChunkingMethod.GENERAL
                 chunking_config = config_manager.get_config(chunking_method, user_id)
             
             # Determine content type

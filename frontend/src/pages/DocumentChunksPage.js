@@ -16,7 +16,7 @@ const DocumentChunksPage = () => {
     const [previewLoading, setPreviewLoading] = useState(false);
     const [error, setError] = useState(null);
     const [currentChunkingConfig, setCurrentChunkingConfig] = useState({
-        method: 'naive',
+        method: 'general',
         chunk_token_num: 512,
         overlap: 50
     });
@@ -68,16 +68,16 @@ const DocumentChunksPage = () => {
 
     const loadChunkingConfig = async () => {
         try {
-            // Use default 'naive' chunking method for all documents
+            // Use default 'general' chunking method for all documents
             // This can be enhanced later to map file types to appropriate methods
-            const response = await api.call(`/api/chunking/config/naive`);
+            const response = await api.call(`/api/chunking/config/general`);
             setCurrentChunkingConfig(response);
         } catch (error) {
             console.error('Error loading chunking config:', error);
             // Set a default config if the API call fails
             setCurrentChunkingConfig({
                 config: {
-                    method: 'naive',
+                    method: 'general',
                     chunk_token_num: 1000,
                     chunk_overlap: 200,
                     max_token: 8192
