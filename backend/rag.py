@@ -884,7 +884,7 @@ class ChatPDF:
             return False
     
     def _ingest_for_current_model(self, document_id: int, file_path: str = None) -> bool:
-        """Ingest a specific document for the current embedding model"""
+        """Ingest a specific document for the current embedding model using stored chunking configuration"""
         try:
             # Get file path if not provided
             if file_path is None:
@@ -893,54 +893,68 @@ class ChatPDF:
             else:
                 cleanup_temp_file = False
             
-            # Get document info to determine file type
-            doc_info = self.doc_storage._get_document_by_id(document_id)
+            # Get document info with chunking configuration
+            doc_info = self.doc_storage.get_document_with_config(document_id)
             if not doc_info:
                 logger.error(f"Document {document_id} not found in database")
                 return False
-                
+            
             filename = doc_info['filename']
-            file_extension = Path(filename).suffix.lower()
             
-            # Extract text using the appropriate method based on file type
-            text_content = None
+            # Get stored chunking configuration
+            stored_method = doc_info.get('chunking_method', 'general')
+            stored_config = doc_info.get('chunking_config')
             
-            if file_extension == '.pdf':
-                # Use PDF extraction
-                text_content = self._extract_text_from_pdf(file_path)
-            elif file_extension in ['.docx', '.doc']:
-                # Use enhanced document processor for Word documents
+            # Convert stored method to ChunkingMethod enum
+            try:
+                from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
+                chunking_method = ChunkingMethod(stored_method)
+            except ValueError:
+                logger.warning(f"Unknown stored chunking method '{stored_method}', using general")
+                chunking_method = ChunkingMethod.GENERAL
+            
+            # Get chunking configuration
+            config_manager = get_chunking_config_manager()
+            if stored_config:
                 try:
-                    from enhanced_document_processor import get_document_processor
-                    processor = get_document_processor()
-                    # Process as Word document
-                    chunking_result = processor.process_document(file_path, original_filename=filename)
-                    if chunking_result and chunking_result.chunks:
-                        # Combine all document chunks into single text
-                        text_content = '\n\n'.join([doc.page_content for doc in chunking_result.chunks])
-                    else:
-                        logger.warning(f"No content extracted from Word document: {filename}")
+                    chunking_config = ChunkingConfig.from_dict(stored_config)
+                    logger.info(f"Using stored chunking config for document {document_id}: {chunking_method.value}")
                 except Exception as e:
-                    logger.warning(f"Enhanced processor failed for {filename}, trying fallback: {e}")
-                    # Fallback to basic PDF extraction (might work for some formats)
-                    text_content = self._extract_text_from_pdf(file_path)
+                    logger.warning(f"Failed to load stored chunking config for document {document_id}: {e}")
+                    chunking_config = config_manager.get_config(chunking_method)
             else:
-                # Try enhanced processor for other file types
-                try:
-                    from enhanced_document_processor import get_document_processor
-                    processor = get_document_processor()
-                    chunking_result = processor.process_document(file_path, original_filename=filename)
-                    if chunking_result and chunking_result.chunks:
-                        text_content = '\n\n'.join([doc.page_content for doc in chunking_result.chunks])
-                    else:
-                        # Fallback to PDF extraction
-                        text_content = self._extract_text_from_pdf(file_path)
-                except Exception as e:
-                    logger.warning(f"Enhanced processor failed for {filename}, trying PDF extraction: {e}")
-                    text_content = self._extract_text_from_pdf(file_path)
+                # Get default config for the method
+                chunking_config = config_manager.get_config(chunking_method)
+                logger.info(f"Using default chunking config for document {document_id}: {chunking_method.value}")
             
-            if not text_content or not text_content.strip():
-                error_msg = f"No text content extracted from {filename} (type: {file_extension})"
+            # Use enhanced document processor with stored configuration
+            try:
+                from enhanced_document_processor import get_document_processor
+                doc_processor = get_document_processor()
+                
+                chunking_result = doc_processor.process_document(
+                    file_path,
+                    chunking_method,
+                    chunking_config,
+                    None,  # user_id not needed for reingestion
+                    original_filename=filename
+                )
+                
+                if not chunking_result or not chunking_result.chunks:
+                    error_msg = f"No chunks created from document {filename} using {chunking_method.value} method"
+                    logger.error(error_msg)
+                    self.doc_storage.mark_ingestion_failed(
+                        document_id, 
+                        self.embedding_model, 
+                        error_msg
+                    )
+                    return False
+                
+                chunks = chunking_result.chunks
+                logger.info(f"Document {document_id} reprocessed: {len(chunks)} chunks created using stored {chunking_result.method_used.value} method")
+                
+            except Exception as e:
+                error_msg = f"Enhanced processor failed for {filename}: {e}"
                 logger.error(error_msg)
                 self.doc_storage.mark_ingestion_failed(
                     document_id, 
@@ -948,31 +962,7 @@ class ChatPDF:
                     error_msg
                 )
                 return False
-             # Create document and split into chunks
-            docs = [Document(page_content=text_content)]
-            chunks = self.text_splitter.split_documents(docs)
             
-            if not chunks:
-                self.doc_storage.mark_ingestion_failed(
-                    document_id, 
-                    self.embedding_model, 
-                    "No chunks created from text splitting"
-                )
-                return False
-
-            # Get document info to add filename to chunk metadata
-            filename = doc_info['filename'] if doc_info else f"document_{document_id}"
-            
-            # Add filename to chunk metadata
-            for chunk in chunks:
-                if not chunk.metadata:
-                    chunk.metadata = {}
-                chunk.metadata['source'] = filename
-                chunk.metadata['document_id'] = document_id
-
-            # Debug: Log metadata before filtering
-            logger.info(f"Before filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
-
             # Use our custom metadata filtering instead of langchain's filter_complex_metadata
             chunks = self._filter_metadata_for_chromadb(chunks)
             
@@ -987,19 +977,29 @@ class ChatPDF:
             success = self._add_chunks_to_vector_store(chunks, collection_name)
             
             if success:
-                # Track successful ingestion
+                # Track successful ingestion with enhanced metadata
+                simple_metadata = {
+                    'method_used': chunking_result.method_used.value,
+                    'chunk_count': len(chunks),
+                    'file_format': chunking_result.metadata.get('file_format', 'unknown') if chunking_result.metadata else 'unknown',
+                    'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
+                    'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
+                    'warnings_count': len(chunking_result.warnings) if chunking_result.warnings else 0
+                }
+                
+                if chunking_result.warnings:
+                    simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])
+                
                 self.doc_storage.track_ingestion(
                     document_id=document_id,
                     embedding_model=self.embedding_model,
                     vector_store_collection=collection_name,
                     chunk_count=len(chunks),
-                    metadata={
-                        'text_length': len(text_content),
-                        'chunk_size': self.text_splitter._chunk_size,
-                        'chunk_overlap': self.text_splitter._chunk_overlap
-                    }
+                    metadata=simple_metadata,
+                    chunking_method=chunking_result.method_used.value,
+                    chunking_config=chunking_result.config_used.to_dict()
                 )
-                logger.info(f"Successfully ingested document {document_id} for model {self.embedding_model}")
+                logger.info(f"Successfully reingested document {document_id} for model {self.embedding_model} using {chunking_result.method_used.value} method")
             else:
                 self.doc_storage.mark_ingestion_failed(
                     document_id, 

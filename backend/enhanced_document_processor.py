@@ -1532,22 +1532,6 @@ class EnhancedDocumentProcessor:
                                 'word_num': int(ocr_data['word_num'][i])
                             }
                             bounding_boxes.append(bbox)
-                    if confidence > 10:  # Lower confidence threshold to capture more text
-                        word_text = ocr_data['text'][i].strip()
-                        if word_text and len(word_text) > 0:  # Only include non-empty text
-                            bbox = {
-                                'text': word_text,
-                                'left': int(ocr_data['left'][i]),
-                                'top': int(ocr_data['top'][i]),
-                                'width': int(ocr_data['width'][i]),
-                                'height': int(ocr_data['height'][i]),
-                                'confidence': confidence,
-                                'block_num': int(ocr_data['block_num'][i]),
-                                'par_num': int(ocr_data['par_num'][i]),
-                                'line_num': int(ocr_data['line_num'][i]),
-                                'word_num': int(ocr_data['word_num'][i])
-                            }
-                            bounding_boxes.append(bbox)
                 
                 # Log OCR output
                 logger.info(f"OCR extracted text from {Path(file_path).name}:")
