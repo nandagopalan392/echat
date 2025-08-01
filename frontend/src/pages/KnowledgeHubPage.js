@@ -138,6 +138,22 @@ const KnowledgeHubPage = () => {
         chunkSize: 1000,
         chunkOverlap: 200
     });
+
+    // Retrieval settings states
+    const [retrievalConfig, setRetrievalConfig] = useState({
+        similarity_threshold: 0.2,
+        keyword_similarity_weight: 0.7,
+        reranker_enabled: false,
+        reranker_model: '',
+        max_chunks: 5,
+        search_type: 'similarity',
+        auto_merging_enabled: false,
+        auto_merging_similarity_threshold: 0.8
+    });
+    const [rerankerModels, setRerankerModels] = useState([]);
+    const [loadingRetrievalConfig, setLoadingRetrievalConfig] = useState(false);
+    const [savingRetrievalConfig, setSavingRetrievalConfig] = useState(false);
+    const [retrievalConfigMessage, setRetrievalConfigMessage] = useState(null);
     const [showAdvancedReingestionConfig, setShowAdvancedReingestionConfig] = useState(false);
 
     // Status polling states
@@ -254,7 +270,17 @@ const KnowledgeHubPage = () => {
     useEffect(() => {
         loadFiles();
         loadChunkingMethods();
+        loadRetrievalConfig();
+        loadRerankerModels();
     }, []);
+
+    // Load retrieval config when switching to retrieval tab
+    useEffect(() => {
+        if (activeTab === 'retrieval') {
+            loadRetrievalConfig();
+            loadRerankerModels();
+        }
+    }, [activeTab]);
 
     // Status polling effect - monitors documents with pending status
     useEffect(() => {
@@ -529,6 +555,90 @@ const KnowledgeHubPage = () => {
         
         // Clear message after 4 seconds
         setTimeout(() => setSaveMessage(null), 4000);
+    };
+
+    // Retrieval Configuration Functions
+    const loadRetrievalConfig = async () => {
+        setLoadingRetrievalConfig(true);
+        try {
+            const response = await api.getRetrievalConfig();
+            setRetrievalConfig(response.config || {
+                similarity_threshold: 0.2,
+                keyword_similarity_weight: 0.7,
+                reranker_enabled: false,
+                reranker_model: '',
+                max_chunks: 5,
+                search_type: 'similarity',
+                auto_merging_enabled: false,
+                auto_merging_similarity_threshold: 0.8
+            });
+        } catch (error) {
+            console.error('Error loading retrieval config:', error);
+            setRetrievalConfigMessage({ type: 'error', text: 'Failed to load retrieval configuration' });
+        } finally {
+            setLoadingRetrievalConfig(false);
+        }
+    };
+
+    const loadRerankerModels = async () => {
+        try {
+            const response = await api.getRerankerModels();
+            setRerankerModels(response.models || []);
+        } catch (error) {
+            console.error('Error loading reranker models:', error);
+        }
+    };
+
+    const saveRetrievalConfig = async () => {
+        setSavingRetrievalConfig(true);
+        setRetrievalConfigMessage(null);
+        try {
+            const response = await api.updateRetrievalConfig(retrievalConfig);
+            
+            if (response.warnings && response.warnings.length > 0) {
+                setRetrievalConfigMessage({ 
+                    type: 'warning', 
+                    text: `Configuration saved with warnings: ${response.warnings.join(', ')}` 
+                });
+            } else {
+                setRetrievalConfigMessage({ type: 'success', text: 'Retrieval configuration saved successfully!' });
+            }
+            
+            // Clear message after 3 seconds
+            setTimeout(() => setRetrievalConfigMessage(null), 3000);
+        } catch (error) {
+            console.error('Error saving retrieval config:', error);
+            setRetrievalConfigMessage({ type: 'error', text: 'Failed to save retrieval configuration' });
+        } finally {
+            setSavingRetrievalConfig(false);
+        }
+    };
+
+    const handleRetrievalConfigChange = (field, value) => {
+        setRetrievalConfig(prev => ({
+            ...prev,
+            [field]: value
+        }));
+    };
+
+    const resetRetrievalConfig = () => {
+        if (!window.confirm('Are you sure you want to reset all retrieval settings to default values?')) {
+            return;
+        }
+        
+        setRetrievalConfig({
+            similarity_threshold: 0.2,
+            keyword_similarity_weight: 0.7,
+            reranker_enabled: false,
+            reranker_model: '',
+            max_chunks: 5,
+            search_type: 'similarity',
+            auto_merging_enabled: false,
+            auto_merging_similarity_threshold: 0.8
+        });
+        
+        setRetrievalConfigMessage({ type: 'success', text: 'Settings reset to default values. Remember to save if you want to keep these changes.' });
+        setTimeout(() => setRetrievalConfigMessage(null), 4000);
     };
 
     // File extension validation for chunking methods
@@ -1281,6 +1391,20 @@ const KnowledgeHubPage = () => {
                             </svg>
                             Chunking Settings
                         </button>
+
+                        <button
+                            onClick={() => setActiveTab('retrieval')}
+                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
+                                activeTab === 'retrieval' 
+                                    ? 'bg-green-50 text-green-700' 
+                                    : 'text-gray-700 hover:bg-gray-100'
+                            }`}
+                        >
+                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                            </svg>
+                            Retrieval Settings
+                        </button>
                         
                         {activeTab === 'documents' && (
                             <div className="mt-4 space-y-2 pl-2 border-l border-gray-200">
@@ -1361,10 +1485,12 @@ const KnowledgeHubPage = () => {
                                 <h2 className="text-2xl font-bold text-gray-900">
                                     {activeTab === 'documents' && 'Your Documents'}
                                     {activeTab === 'chunking' && 'Chunking Settings'}
+                                    {activeTab === 'retrieval' && 'Retrieval Settings'}
                                 </h2>
                                 <p className="mt-1 text-sm text-gray-500">
                                     {activeTab === 'documents' && 'Manage your uploaded documents for AI conversations'}
                                     {activeTab === 'chunking' && 'Configure how documents are split into chunks for processing'}
+                                    {activeTab === 'retrieval' && 'Configure document retrieval and search parameters'}
                                 </p>
                             </div>
                             <div className="flex items-center space-x-4">
@@ -1395,6 +1521,7 @@ const KnowledgeHubPage = () => {
                                 <div className="text-sm text-gray-500">
                                     {activeTab === 'documents' && `${files.length} document${files.length !== 1 ? 's' : ''}`}
                                     {activeTab === 'chunking' && `${(chunkingMethods || []).length} method${(chunkingMethods || []).length !== 1 ? 's' : ''} available`}
+                                    {activeTab === 'retrieval' && `${rerankerModels.length} reranker model${rerankerModels.length !== 1 ? 's' : ''} available`}
                                 </div>
                             </div>
                         </div>
@@ -2066,6 +2193,236 @@ const KnowledgeHubPage = () => {
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                         </svg>
                                         <p>No chunking methods available</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Retrieval Settings Tab */}
+                    {activeTab === 'retrieval' && (
+                        <div className="space-y-6">
+                            {/* Loading State */}
+                            {loadingRetrievalConfig && (
+                                <div className="bg-white rounded-lg shadow p-6">
+                                    <div className="flex items-center justify-center">
+                                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-600"></div>
+                                        <span className="ml-2 text-gray-600">Loading retrieval configuration...</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Retrieval Settings Form */}
+                            {!loadingRetrievalConfig && (
+                                <div className="bg-white rounded-lg shadow">
+                                    <div className="p-6">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <h3 className="text-lg font-medium text-gray-900">Retrieval Configuration</h3>
+                                            <div className="flex space-x-3">
+                                                <button
+                                                    onClick={resetRetrievalConfig}
+                                                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
+                                                >
+                                                    Reset to Defaults
+                                                </button>
+                                                <button
+                                                    onClick={saveRetrievalConfig}
+                                                    disabled={savingRetrievalConfig}
+                                                    className={`px-4 py-2 text-sm font-medium text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                                                        savingRetrievalConfig
+                                                            ? 'bg-gray-400 cursor-not-allowed'
+                                                            : 'bg-green-600 hover:bg-green-700 focus:ring-green-500'
+                                                    }`}
+                                                >
+                                                    {savingRetrievalConfig ? 'Saving...' : 'Save Configuration'}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Save Message */}
+                                        {retrievalConfigMessage && (
+                                            <div className={`mb-4 p-3 rounded-lg ${
+                                                retrievalConfigMessage.type === 'success' 
+                                                    ? 'bg-green-50 text-green-700 border border-green-200' 
+                                                    : retrievalConfigMessage.type === 'warning'
+                                                    ? 'bg-yellow-50 text-yellow-700 border border-yellow-200'
+                                                    : 'bg-red-50 text-red-700 border border-red-200'
+                                            }`}>
+                                                {retrievalConfigMessage.text}
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                                            {/* Similarity Threshold */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Similarity Threshold
+                                                    <span className="text-xs text-gray-500 ml-1">(0.0 - 1.0)</span>
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="1"
+                                                    step="0.1"
+                                                    value={retrievalConfig.similarity_threshold}
+                                                    onChange={(e) => handleRetrievalConfigChange('similarity_threshold', parseFloat(e.target.value) || 0)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                />
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Minimum similarity score for retrieving chunks. Higher values are more selective.
+                                                </p>
+                                            </div>
+
+                                            {/* Keyword Similarity Weight */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Keyword Similarity Weight
+                                                    <span className="text-xs text-gray-500 ml-1">(0.0 - 1.0)</span>
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="1"
+                                                    step="0.1"
+                                                    value={retrievalConfig.keyword_similarity_weight}
+                                                    onChange={(e) => handleRetrievalConfigChange('keyword_similarity_weight', parseFloat(e.target.value) || 0)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                />
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Weight of keyword similarity in the combined score. Vector similarity gets (1 - weight).
+                                                </p>
+                                            </div>
+
+                                            {/* Max Chunks */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Maximum Chunks
+                                                    <span className="text-xs text-gray-500 ml-1">(1 - 20)</span>
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    min="1"
+                                                    max="20"
+                                                    value={retrievalConfig.max_chunks}
+                                                    onChange={(e) => handleRetrievalConfigChange('max_chunks', parseInt(e.target.value) || 1)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                />
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Maximum number of document chunks to retrieve for answering questions.
+                                                </p>
+                                            </div>
+
+                                            {/* Search Type */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Search Type
+                                                </label>
+                                                <select
+                                                    value={retrievalConfig.search_type}
+                                                    onChange={(e) => handleRetrievalConfigChange('search_type', e.target.value)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                >
+                                                    <option value="similarity">Similarity Search</option>
+                                                    <option value="mmr">Maximum Marginal Relevance (MMR)</option>
+                                                    <option value="similarity_score_threshold">Similarity with Score Threshold</option>
+                                                </select>
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Search algorithm to use for document retrieval.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {/* Reranker Settings */}
+                                        <div className="mt-8 pt-6 border-t border-gray-200">
+                                            <h4 className="text-md font-medium text-gray-900 mb-4">Reranker Configuration</h4>
+                                            
+                                            <div className="space-y-4">
+                                                {/* Enable Reranker */}
+                                                <div className="flex items-center">
+                                                    <input
+                                                        id="reranker-enabled"
+                                                        type="checkbox"
+                                                        checked={retrievalConfig.reranker_enabled}
+                                                        onChange={(e) => handleRetrievalConfigChange('reranker_enabled', e.target.checked)}
+                                                        className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
+                                                    />
+                                                    <label htmlFor="reranker-enabled" className="ml-2 block text-sm text-gray-900">
+                                                        Enable Reranker Model
+                                                    </label>
+                                                </div>
+
+                                                {/* Reranker Model Selection */}
+                                                {retrievalConfig.reranker_enabled && (
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                            Reranker Model
+                                                        </label>
+                                                        <select
+                                                            value={retrievalConfig.reranker_model}
+                                                            onChange={(e) => handleRetrievalConfigChange('reranker_model', e.target.value)}
+                                                            className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                        >
+                                                            {rerankerModels.map((model) => (
+                                                                <option key={model.name} value={model.name}>
+                                                                    {model.display_name}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                        <p className="mt-1 text-xs text-gray-500">
+                                                            {rerankerModels.find(m => m.name === retrievalConfig.reranker_model)?.description || 
+                                                             'Select a reranker model to improve retrieval relevance'}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* Auto Merging Settings */}
+                                        <div className="mt-8 pt-6 border-t border-gray-200">
+                                            <h4 className="text-md font-medium text-gray-900 mb-4">Auto Merging Retrieval</h4>
+                                            
+                                            <div className="space-y-4">
+                                                {/* Enable Auto Merging */}
+                                                <div className="flex items-center">
+                                                    <input
+                                                        id="auto-merging-enabled"
+                                                        type="checkbox"
+                                                        checked={retrievalConfig.auto_merging_enabled}
+                                                        onChange={(e) => handleRetrievalConfigChange('auto_merging_enabled', e.target.checked)}
+                                                        className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
+                                                    />
+                                                    <label htmlFor="auto-merging-enabled" className="ml-2 block text-sm text-gray-900">
+                                                        Enable Auto Merging
+                                                    </label>
+                                                </div>
+                                                
+                                                <p className="text-xs text-gray-500">
+                                                    Auto merging combines similar document chunks to provide more comprehensive context. 
+                                                    Applied after reranking when both are enabled.
+                                                </p>
+
+                                                {/* Auto Merging Similarity Threshold */}
+                                                {retrievalConfig.auto_merging_enabled && (
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                            Merging Similarity Threshold: {retrievalConfig.auto_merging_similarity_threshold}
+                                                        </label>
+                                                        <input
+                                                            type="range"
+                                                            min="0.5"
+                                                            max="1.0"
+                                                            step="0.05"
+                                                            value={retrievalConfig.auto_merging_similarity_threshold}
+                                                            onChange={(e) => handleRetrievalConfigChange('auto_merging_similarity_threshold', parseFloat(e.target.value))}
+                                                            className="mt-1 block w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
+                                                        />
+                                                        <p className="mt-1 text-xs text-gray-500">
+                                                            Higher values (0.8-1.0) merge only very similar chunks. Lower values (0.5-0.7) merge more broadly related content.
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             )}

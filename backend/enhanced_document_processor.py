@@ -18,7 +18,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
 from table_extraction import (
     get_table_extractor, detect_table_in_text, 
-    create_row_based_chunks, create_semantic_table_chunks, create_table_chunk_metadata
+    create_table_chunk_metadata, create_adaptive_table_chunks, 
+    create_contextual_table_chunks
 )
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,7 @@ class EnhancedDocumentProcessor:
         }
     
     def process_document(self, file_path: str, method: ChunkingMethod = None, 
-                        config: ChunkingConfig = None, user_id: str = None, original_filename: str = None) -> ChunkingResult:
+                        config: ChunkingConfig = None, user_id: str = None, original_filename: str = None, document_id: int = None) -> ChunkingResult:
         """
         Process document with specified chunking method and configuration
         """
@@ -134,6 +135,10 @@ class EnhancedDocumentProcessor:
                 'chunking_method': method.value,
                 'total_chunks': len(chunks)
             }
+            
+            # Add document_id if provided (needed for deletion functionality)
+            if document_id is not None:
+                chunk.metadata['document_id'] = str(document_id)
         
         # Debug: Log metadata after setting
         if chunks:
@@ -165,9 +170,26 @@ class EnhancedDocumentProcessor:
         all_chunks = []
         table_extractor = get_table_extractor()
         
+        # Track which source files already had tables extracted during document loading
+        sources_with_tables = set()
+        for doc in documents:
+            if (doc.metadata.get('content_type') == 'table' and 
+                doc.metadata.get('extracted_from')):
+                sources_with_tables.add(doc.metadata.get('source', ''))
+        
         for doc in documents:
             doc_chunks = []
             source_file = doc.metadata.get('source', '')
+            
+            # Skip table extraction if:
+            # 1. Document already contains processed table content, OR
+            # 2. This source file already had tables extracted during document loading
+            if ((doc.metadata.get('content_type') == 'table' and doc.metadata.get('extracted_from')) or
+                (source_file in sources_with_tables)):
+                logger.info(f"Skipping table extraction for {source_file} - already processed during document loading")
+                # Document already contains table content, just process it normally
+                all_chunks.append(doc)
+                continue
             
             # Try to extract tables if we have a file path
             extracted_tables = []
@@ -179,7 +201,8 @@ class EnhancedDocumentProcessor:
                 except Exception as e:
                     logger.warning(f"Table extraction failed for {source_file}: {e}")
             
-            # Process extracted tables as separate chunks using proper row-based chunking
+            # Process extracted tables using enhanced table-aware chunking
+            table_chunks_created = False
             for table_info in extracted_tables:
                 table_data = table_info['data']
                 
@@ -189,11 +212,19 @@ class EnhancedDocumentProcessor:
                         isinstance(table_data, pd.DataFrame) and 
                         not table_data.empty):
                         
-                        # Use proper row-based chunking for tables
-                        if len(table_data) <= 20:  # Small tables: one chunk per row
-                            table_chunks = create_row_based_chunks(table_data, table_info)
-                        else:  # Large tables: semantic grouping
-                            table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                        # Use enhanced adaptive table chunking
+                        max_chunk_size = config.chunk_token_num if config.chunk_token_num else 1000
+                        
+                        # Get surrounding text context for better understanding
+                        surrounding_text = doc.page_content[:500] + doc.page_content[-500:]
+                        
+                        # Create contextual table chunks (includes adaptive chunking internally)
+                        table_chunks = create_contextual_table_chunks(
+                            table_data, 
+                            table_info, 
+                            surrounding_text=surrounding_text,
+                            max_chunk_size=max_chunk_size
+                        )
                         
                         # Convert to Document objects
                         for chunk_data in table_chunks:
@@ -206,20 +237,30 @@ class EnhancedDocumentProcessor:
                                 metadata=chunk_metadata
                             )
                             doc_chunks.append(chunk)
+                        
+                        table_chunks_created = True
                 except Exception as e:
                     logger.warning(f"Failed to process table data: {e}")
                     # Skip this table and continue with others
             
+            # If tables were successfully extracted, return only table chunks (no text processing)
+            if table_chunks_created:
+                logger.info(f"Detected table content in document, using table chunks only")
+                all_chunks.extend(doc_chunks)
+                continue  # Skip text processing for this document
+            
             # Now process the document content based on the selected method
-            # but make it table-aware for text content too
+            # Only use table-aware processing if no tables were extracted via table extractor
             if method == ChunkingMethod.GENERAL:
+                # Use table-aware chunking for text-based table detection
                 method_chunks = self._chunk_general_table_aware([doc], config)
             elif method == ChunkingMethod.QA:
                 method_chunks = self._chunk_qa_table_aware([doc], config)
             elif method == ChunkingMethod.RESUME:
                 method_chunks = self._chunk_resume_table_aware([doc], config)
             elif method == ChunkingMethod.TABLE:
-                method_chunks = self._chunk_table([doc], config)
+                # Pass extracted_tables to avoid re-extraction
+                method_chunks = self._chunk_table([doc], config, extracted_tables)
             elif method == ChunkingMethod.PRESENTATION:
                 method_chunks = self._chunk_presentation([doc], config)
             elif method == ChunkingMethod.PICTURE:
@@ -228,7 +269,10 @@ class EnhancedDocumentProcessor:
                 method_chunks = self._chunk_email([doc], config)
             else:
                 # Default to general chunking
-                method_chunks = self._chunk_general_table_aware([doc], config)
+                if table_chunks_created:
+                    method_chunks = self._chunk_general([doc], config)
+                else:
+                    method_chunks = self._chunk_general_table_aware([doc], config)
             
             doc_chunks.extend(method_chunks)
             all_chunks.extend(doc_chunks)
@@ -321,7 +365,8 @@ class EnhancedDocumentProcessor:
     
 
     
-    def _chunk_table(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
+    def _chunk_table(self, documents: List[Document], config: ChunkingConfig, 
+                     pre_extracted_tables: List[Dict] = None) -> List[Document]:
         """Table-aware chunking for structured data"""
         chunks = []
         table_extractor = get_table_extractor()
@@ -330,46 +375,59 @@ class EnhancedDocumentProcessor:
             content = doc.page_content
             source_file = doc.metadata.get('source', '')
             
-            # First, try to extract tables using the table extractor if we have a file path
-            if source_file and Path(source_file).exists():
+            # Use pre-extracted tables if available to avoid duplicate extraction
+            extracted_tables = pre_extracted_tables if pre_extracted_tables else []
+            
+            # Only extract tables if not already provided
+            if not extracted_tables and source_file and Path(source_file).exists():
                 try:
                     extracted_tables = table_extractor.extract_tables(str(source_file))
                     
                     if extracted_tables:
-                        # Process extracted tables using proper row-based chunking
-                        for table_info in extracted_tables:
-                            table_data = table_info['data']
-                            
-                            try:
-                                if (PANDAS_AVAILABLE and 
-                                    isinstance(table_data, pd.DataFrame) and 
-                                    not table_data.empty):  # pandas DataFrame
-                                    # Use proper row-based chunking for tables
-                                    if len(table_data) <= 20:  # Small tables: one chunk per row
-                                        table_chunks = create_row_based_chunks(table_data, table_info)
-                                    else:  # Large tables: semantic grouping
-                                        table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
-                                    
-                                    # Convert to Document objects
-                                    for chunk_data in table_chunks:
-                                        chunk_metadata = chunk_data['metadata']
-                                        chunk_metadata.update(doc.metadata)  # Include original document metadata
-                                        
-                                        chunk = Document(
-                                            page_content=chunk_data['content'],
-                                            metadata=chunk_metadata
-                                        )
-                                        chunks.append(chunk)
-                            except Exception as e:
-                                logger.warning(f"Failed to process table data: {e}")
-                                # Skip this table and continue with others
-                        
-                        # If we successfully extracted tables, return them
-                        if chunks:
-                            return chunks
-                            
+                        logger.info(f"Extracted {len(extracted_tables)} tables from {source_file} in _chunk_table")
                 except Exception as e:
                     logger.warning(f"Table extraction failed for {source_file}: {e}")
+            
+            # Process extracted tables 
+            if extracted_tables:
+                for table_info in extracted_tables:
+                    table_data = table_info['data']
+                    
+                    try:
+                        if (PANDAS_AVAILABLE and 
+                            isinstance(table_data, pd.DataFrame) and 
+                            not table_data.empty):  # pandas DataFrame
+                            # Use enhanced adaptive table chunking
+                            max_chunk_size = config.chunk_token_num if config.chunk_token_num else 1000
+                            
+                            # Get surrounding text context
+                            surrounding_text = doc.page_content[:500] + doc.page_content[-500:]
+                            
+                            # Create contextual table chunks (includes adaptive chunking internally)
+                            table_chunks = create_contextual_table_chunks(
+                                table_data, 
+                                table_info, 
+                                surrounding_text=surrounding_text,
+                                max_chunk_size=max_chunk_size
+                            )
+                            
+                            # Convert to Document objects
+                            for chunk_data in table_chunks:
+                                chunk_metadata = chunk_data['metadata']
+                                chunk_metadata.update(doc.metadata)  # Include original document metadata
+                                
+                                chunk = Document(
+                                    page_content=chunk_data['content'],
+                                    metadata=chunk_metadata
+                                )
+                                chunks.append(chunk)
+                    except Exception as e:
+                        logger.warning(f"Failed to process table data: {e}")
+                        # Skip this table and continue with others
+                
+                # If we successfully extracted tables, return them
+                if chunks:
+                    return chunks
             
             # Fallback: detect table structure in text content
             if detect_table_in_text(content):
@@ -787,11 +845,19 @@ class EnhancedDocumentProcessor:
                                     if (PANDAS_AVAILABLE and 
                                         isinstance(table_data, pd.DataFrame) and 
                                         not table_data.empty):
-                                        # Use proper row-based chunking for tables
-                                        if len(table_data) <= 20:  # Small tables: one chunk per row
-                                            table_chunks = create_row_based_chunks(table_data, table_info)
-                                        else:  # Large tables: semantic grouping
-                                            table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                                        # Use enhanced adaptive table chunking
+                                        max_chunk_size = config.chunk_token_num if config.chunk_token_num else 1000
+                                        
+                                        # Get surrounding text context from doc
+                                        surrounding_text = doc.page_content[:500] + doc.page_content[-500:]
+                                        
+                                        # Create contextual table chunks (includes adaptive chunking internally)
+                                        table_chunks = create_contextual_table_chunks(
+                                            table_data, 
+                                            table_info, 
+                                            surrounding_text=surrounding_text,
+                                            max_chunk_size=max_chunk_size
+                                        )
                                         
                                         # Convert to Document objects
                                         for chunk_data in table_chunks:
@@ -1074,6 +1140,7 @@ class EnhancedDocumentProcessor:
             text_documents = loader.load()
             
             # Extract tables from the PDF
+            table_documents_created = False
             try:
                 extracted_tables = table_extractor.extract_tables(file_path)
                 
@@ -1084,50 +1151,75 @@ class EnhancedDocumentProcessor:
                         
                         try:
                             if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
-                                # Use proper row-based chunking for tables
-                                if len(table_data) <= 20:  # Small tables: one chunk per row
-                                    table_chunks = create_row_based_chunks(table_data, table_info)
-                                else:  # Large tables: semantic grouping
-                                    table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                                # Use enhanced adaptive table chunking with default chunk size
+                                max_chunk_size = 1000  # Default chunk size for document loading
+                                
+                                # Get surrounding text context for better understanding
+                                surrounding_text = ""
+                                if text_documents:
+                                    # Get context from nearest text document
+                                    for text_doc in text_documents:
+                                        if text_doc.page_content:
+                                            surrounding_text = text_doc.page_content[:500] + text_doc.page_content[-500:]
+                                            break
+                                
+                                # Create contextual table chunks (includes adaptive chunking internally)
+                                table_chunks = create_contextual_table_chunks(
+                                    table_data, 
+                                    table_info, 
+                                    surrounding_text=surrounding_text,
+                                    max_chunk_size=max_chunk_size
+                                )
                             
                                 # Convert to Document objects
                                 for chunk_data in table_chunks:
-                                    chunk_metadata = chunk_data['metadata']
-                                    chunk_metadata.update({
+                                    chunk_metadata = {
                                         'source': Path(file_path).name,
                                         'content_type': 'table',
-                                        'extracted_from': 'pdf'
-                                    })
+                                        'extracted_from': 'pdf',
+                                        'chunk_type': chunk_data.get('chunk_type', 'adaptive'),
+                                        'chunk_index': chunk_data.get('chunk_index', 0),
+                                        'original_table_rows': chunk_data.get('original_table_rows', len(table_data)),
+                                        'original_table_cols': chunk_data.get('original_table_cols', len(table_data.columns)),
+                                        'context_info': chunk_data.get('context_info', ''),
+                                        'key_columns': chunk_data.get('key_columns', []),
+                                        'row_range': chunk_data.get('row_range', ''),
+                                        'confidence_score': chunk_data.get('confidence_score', 0.0)
+                                    }
                                     
                                     table_doc = Document(
                                         page_content=chunk_data['content'],
                                         metadata=chunk_metadata
                                     )
                                     documents.append(table_doc)
+                                    table_documents_created = True
                         except Exception as e:
                             logger.warning(f"Failed to process table data: {e}")
                             
             except Exception as e:
                 logger.warning(f"Table extraction failed for PDF {file_path}: {e}")
             
-            # Process text documents and check for table-like content
-            for doc in text_documents:
-                content = doc.page_content
-                
-                # Check if this page contains table-like structures
-                if detect_table_in_text(content):
-                    # Mark as containing tables
-                    doc.metadata.update({
-                        'content_type': 'mixed',
-                        'contains_tables': True
-                    })
-                else:
-                    doc.metadata.update({
-                        'content_type': 'text',
-                        'contains_tables': False
-                    })
-                
-                documents.append(doc)
+            # Only add text documents if no tables were extracted
+            # This prevents duplicate table processing
+            if not table_documents_created:
+                # Process text documents and check for table-like content
+                for doc in text_documents:
+                    content = doc.page_content
+                    
+                    # Check if this page contains table-like structures
+                    if detect_table_in_text(content):
+                        # Mark as containing tables
+                        doc.metadata.update({
+                            'content_type': 'mixed',
+                            'contains_tables': True
+                        })
+                    else:
+                        doc.metadata.update({
+                            'content_type': 'text',
+                            'contains_tables': False
+                        })
+                    
+                    documents.append(doc)
             
             return documents
             
@@ -1176,11 +1268,19 @@ class EnhancedDocumentProcessor:
                     
                     try:
                         if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
-                            # Use proper row-based chunking for CSV tables
-                            if len(table_data) <= 20:  # Small tables: one chunk per row
-                                table_chunks = create_row_based_chunks(table_data, table_info)
-                            else:  # Large tables: semantic grouping
-                                table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                            # Use enhanced adaptive table chunking for CSV tables
+                            max_chunk_size = 1000  # Default for CSV files
+                            
+                            # CSV files typically don't have surrounding text context
+                            surrounding_text = f"CSV file: {Path(file_path).name}"
+                            
+                            # Create contextual table chunks (includes adaptive chunking internally)
+                            table_chunks = create_contextual_table_chunks(
+                                table_data, 
+                                table_info, 
+                                surrounding_text=surrounding_text,
+                                max_chunk_size=max_chunk_size
+                            )
                             
                             # Convert to Document objects
                             for chunk_data in table_chunks:
@@ -1254,11 +1354,20 @@ class EnhancedDocumentProcessor:
                     
                     try:
                         if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
-                            # Use proper row-based chunking for Excel tables
-                            if len(table_data) <= 20:  # Small tables: one chunk per row
-                                table_chunks = create_row_based_chunks(table_data, table_info)
-                            else:  # Large tables: semantic grouping
-                                table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                            # Use enhanced adaptive table chunking for Excel tables
+                            max_chunk_size = 1000  # Default for Excel files
+                            
+                            # Excel files may have sheet context
+                            sheet_name = table_info.get('sheet_name', 'Unknown Sheet')
+                            surrounding_text = f"Excel file: {Path(file_path).name}, Sheet: {sheet_name}"
+                            
+                            # Create contextual table chunks (includes adaptive chunking internally)
+                            table_chunks = create_contextual_table_chunks(
+                                table_data, 
+                                table_info, 
+                                surrounding_text=surrounding_text,
+                                max_chunk_size=max_chunk_size
+                            )
                             
                             # Convert to Document objects
                             for chunk_data in table_chunks:
@@ -1397,11 +1506,20 @@ class EnhancedDocumentProcessor:
                         
                         try:
                             if (PANDAS_AVAILABLE and isinstance(table_data, pd.DataFrame) and not table_data.empty):
-                                # Use proper row-based chunking for presentation tables
-                                if len(table_data) <= 20:  # Small tables: one chunk per row
-                                    table_chunks = create_row_based_chunks(table_data, table_info)
-                                else:  # Large tables: semantic grouping
-                                    table_chunks = create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk=10)
+                                # Use enhanced adaptive table chunking for presentation tables
+                                max_chunk_size = 1000  # Default for presentation files
+                                
+                                # Get slide context for better understanding
+                                slide_content = '\n\n'.join(slide_text) if slide_text else ""
+                                surrounding_text = f"Presentation slide {slide_num}: {slide_content[:300]}"
+                                
+                                # Create contextual table chunks (includes adaptive chunking internally)
+                                table_chunks = create_contextual_table_chunks(
+                                    table_data, 
+                                    table_info, 
+                                    surrounding_text=surrounding_text,
+                                    max_chunk_size=max_chunk_size
+                                )
                                 
                                 # Convert to Document objects
                                 for chunk_data in table_chunks:

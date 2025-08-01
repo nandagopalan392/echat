@@ -1260,6 +1260,71 @@ export const api = {
             throw error;
         }
     },
+
+    // Retrieval Configuration API methods
+    getRetrievalConfig: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/retrieval/config`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get retrieval config');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting retrieval config:', error);
+            throw error;
+        }
+    },
+
+    // Update retrieval configuration
+    updateRetrievalConfig: async (config) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/retrieval/config`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader(),
+                },
+                body: JSON.stringify(config),
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to update retrieval config');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error updating retrieval config:', error);
+            throw error;
+        }
+    },
+
+    // Get available reranker models
+    getRerankerModels: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/retrieval/reranker-models`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get reranker models');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting reranker models:', error);
+            throw error;
+        }
+    },
 };
 
 export default api;

@@ -94,146 +94,87 @@ class CrossEncoderReranker:
             List of relevance scores
         """
         try:
-            # Use sentence-transformers cross-encoder API
+            # Use the configured reranker model
+            print(f"[RERANKER] Using reranker model: {self.model_name}")
+            
+            # For reranker models, we need to compute similarity scores between query-document pairs
+            # First, get embeddings for queries and documents separately
+            queries = [pair[0] for pair in pairs]
+            documents = [pair[1] for pair in pairs]
+            
             async with aiohttp.ClientSession() as session:
+                # Get embeddings for queries
                 async with session.post(
                     f"{self.ollama_base_url}/api/embed",
                     json={
-                        "model": "mxbai-embed-large",
-                        "input": json.dumps(pairs)
+                        "model": self.model_name,
+                        "input": queries
                     },
                     timeout=30
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        logger.error(f"Error from embedding API: {error_text}")
-                        return [0.5] * len(pairs)  # Default scores on error
-                        
-                    result = await response.json()
-                    
-                    # Debug the result to see its structure
-                    print(f"[RERANKER] Embedding result type: {type(result)}")
-                    print(f"[RERANKER] Embedding result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
-                    
-                    embeddings = result.get("embedding", [])
-                    
-                    # Check if embeddings array is valid
-                    if not embeddings:
-                        logger.error(f"No embeddings received from API")
+                        logger.error(f"Error from query embedding API: {error_text}")
                         return [0.5] * len(pairs)
+                        
+                    query_result = await response.json()
+                    print(f"[RERANKER] Query embedding result keys: {query_result.keys() if isinstance(query_result, dict) else 'Not a dict'}")
                     
-                    # Special handling for MXBAI embeddings - they come as a single array
-                    # rather than an array of arrays
-                    if isinstance(embeddings, list) and isinstance(embeddings[0], (int, float)):
-                        print(f"[RERANKER] Detected flattened embedding array with {len(embeddings)} elements")
-                        
-                        # Check if this is a single embedding
-                        if len(pairs) == 1:
-                            # For a single pair, the API might return a flat vector
-                            midpoint = len(embeddings) // 2
-                            query_embedding = np.array(embeddings[:midpoint])
-                            doc_embedding = np.array(embeddings[midpoint:])
-                            similarity = self._cosine_similarity(query_embedding, doc_embedding)
-                            return [similarity]
-                        
-                        # For MXBai embedding model - its embedding dimension is 1024
-                        embedding_dimension = 1024
-                        
-                        # Calculate the expected size for all embeddings
-                        expected_total_elements = embedding_dimension * len(pairs) * 2  # 2 elements per pair
-                        
-                        if len(embeddings) == expected_total_elements:
-                            # Perfect case: we got exactly the right number of elements
-                            print(f"[RERANKER] Reshaping {len(embeddings)} elements into {len(pairs)*2} embeddings of dimension {embedding_dimension}")
-                            reshaped_embeddings = []
-                            for i in range(0, len(embeddings), embedding_dimension):
-                                if i + embedding_dimension <= len(embeddings):
-                                    reshaped_embeddings.append(embeddings[i:i+embedding_dimension])
-                        else:
-                            # Imperfect case: try to deduce the embedding dimension
-                            # This might happen if the API returns embeddings of different dimensions
-                            total_elements = len(embeddings)
-                            total_vectors = len(pairs) * 2  # Each pair has a query and doc vector
-                            
-                            # Try to find the closest divisor
-                            if total_elements % total_vectors == 0:
-                                embedding_dimension = total_elements // total_vectors
-                                print(f"[RERANKER] Deduced embedding dimension: {embedding_dimension}")
-                                reshaped_embeddings = []
-                                for i in range(0, len(embeddings), embedding_dimension):
-                                    if i + embedding_dimension <= len(embeddings):
-                                        reshaped_embeddings.append(embeddings[i+i+embedding_dimension])
-                            else:
-                                # If we can't deduce the dimension, log the error and return default scores
-                                logger.error(f"Can't reshape embeddings: {len(embeddings)} elements isn't divisible by {total_vectors} vectors")
-                                return [0.5] * len(pairs)
-                        
-                        # Now compute scores using the reshaped embeddings
-                        scores = []
-                        for i in range(0, len(reshaped_embeddings), 2):
-                            if i+1 < len(reshaped_embeddings):
-                                query_embedding = np.array(reshaped_embeddings[i])
-                                doc_embedding = np.array(reshaped_embeddings[i+1])
-                                similarity = self._cosine_similarity(query_embedding, doc_embedding)
-                                scores.append(similarity)
-                            else:
-                                # Handle odd number of embeddings (shouldn't happen, but just in case)
-                                logger.warning(f"Odd number of embeddings after reshaping: {len(reshaped_embeddings)}")
-                                scores.append(0.5)
-                        
-                        # Ensure we have the right number of scores
-                        while len(scores) < len(pairs):
-                            scores.append(0.5)
-                        
-                        return scores
+                    # Fix: Use 'embeddings' (plural) instead of 'embedding' (singular)
+                    query_embeddings = query_result.get("embeddings", [])
                     
-                    # Default handling for normal embedding arrays (array of arrays)
-                    elif isinstance(embeddings, list):
-                        print(f"[RERANKER] Number of embeddings: {len(embeddings)}")
-                        
-                        if len(embeddings) % 2 != 0:
-                            logger.error(f"Odd number of embeddings received: {len(embeddings)}")
-                            return [0.5] * len(pairs)
-                        
-                        # Process the embeddings to calculate similarity scores
-                        scores = []
-                        try:
-                            for i in range(0, len(embeddings), 2):
-                                # Ensure we don't go out of bounds
-                                if i+1 >= len(embeddings):
-                                    logger.error(f"Index error: Trying to access index {i+1} in embeddings of length {len(embeddings)}")
-                                    scores.append(0.5)
-                                    continue
-                                    
-                                query_embedding = np.array(embeddings[i], dtype=np.float32)
-                                doc_embedding = np.array(embeddings[i+1], dtype=np.float32)
-                                
-                                # Verify embeddings are not empty
-                                if len(query_embedding) == 0 or len(doc_embedding) == 0:
-                                    logger.warning(f"Empty embedding detected at index {i}, using default score")
-                                    scores.append(0.5)
-                                    continue
-                                
-                                # Calculate cosine similarity
-                                similarity = self._cosine_similarity(query_embedding, doc_embedding)
-                                scores.append(similarity)
-                        except Exception as inner_e:
-                            logger.error(f"Error processing embeddings: {str(inner_e)}", exc_info=True)
-                            remaining = len(pairs) - len(scores)
-                            scores.extend([0.5] * remaining)
-                        
-                        if len(scores) != len(pairs):
-                            logger.warning(f"Score count mismatch: {len(scores)} scores for {len(pairs)} pairs")
-                            # Ensure we return the right number of scores
-                            if len(scores) < len(pairs):
-                                scores.extend([0.5] * (len(pairs) - len(scores)))
-                            else:
-                                scores = scores[:len(pairs)]
-                        
-                        return scores
-                    else:
-                        logger.error(f"Embeddings is not a list: {type(embeddings)}")
+                    if not query_embeddings:
+                        logger.error(f"No query embeddings received from API")
                         return [0.5] * len(pairs)
+                
+                # Get embeddings for documents
+                async with session.post(
+                    f"{self.ollama_base_url}/api/embed",
+                    json={
+                        "model": self.model_name,
+                        "input": documents
+                    },
+                    timeout=30
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"Error from document embedding API: {error_text}")
+                        return [0.5] * len(pairs)
+                        
+                    doc_result = await response.json()
+                    print(f"[RERANKER] Document embedding result keys: {doc_result.keys() if isinstance(doc_result, dict) else 'Not a dict'}")
+                    
+                    # Fix: Use 'embeddings' (plural) instead of 'embedding' (singular)
+                    doc_embeddings = doc_result.get("embeddings", [])
+                    
+                    if not doc_embeddings:
+                        logger.error(f"No document embeddings received from API")
+                        return [0.5] * len(pairs)
+                
+                # Verify we have the right number of embeddings
+                if len(query_embeddings) != len(pairs) or len(doc_embeddings) != len(pairs):
+                    logger.error(f"Embedding count mismatch: {len(query_embeddings)} queries, {len(doc_embeddings)} docs, {len(pairs)} pairs")
+                    return [0.5] * len(pairs)
+                
+                print(f"[RERANKER] Successfully got embeddings: {len(query_embeddings)} queries, {len(doc_embeddings)} documents")
+                
+                # Calculate similarity scores between corresponding query-document pairs
+                scores = []
+                for i, (query_emb, doc_emb) in enumerate(zip(query_embeddings, doc_embeddings)):
+                    try:
+                        query_vec = np.array(query_emb, dtype=np.float32)
+                        doc_vec = np.array(doc_emb, dtype=np.float32)
+                        
+                        # Calculate cosine similarity
+                        similarity = self._cosine_similarity(query_vec, doc_vec)
+                        scores.append(similarity)
+                        
+                    except Exception as e:
+                        logger.warning(f"Error calculating similarity for pair {i}: {e}")
+                        scores.append(0.5)
+                
+                print(f"[RERANKER] Calculated {len(scores)} similarity scores")
+                return scores
                     
         except Exception as e:
             logger.error(f"Error computing reranking scores: {str(e)}", exc_info=True)
@@ -586,9 +527,11 @@ _current_reranker_model = "BAAI/bge-reranker-large"
 
 def get_reranker():
     """Get or create a singleton reranker instance"""
-    global _reranker_instance
+    global _reranker_instance, _current_reranker_model
     if (_reranker_instance is None):
-        _reranker_instance = HybridReranker()
+        logger.info(f"Creating reranker instance with model: {_current_reranker_model}")
+        base_reranker = CrossEncoderReranker(model_name=_current_reranker_model)
+        _reranker_instance = HybridReranker(base_reranker=base_reranker)
     return _reranker_instance
 
 def get_current_reranker_model():
@@ -609,3 +552,10 @@ def set_reranker_model(model_name: str):
     # Create new instance with the specified model
     base_reranker = CrossEncoderReranker(model_name=model_name)
     _reranker_instance = HybridReranker(base_reranker=base_reranker)
+    
+    # Clear the RAG module's cached reranker instance
+    try:
+        from rag import clear_reranker_cache
+        clear_reranker_cache()
+    except ImportError:
+        logger.warning("Could not import clear_reranker_cache from rag module")

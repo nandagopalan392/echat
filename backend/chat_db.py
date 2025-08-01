@@ -129,6 +129,18 @@ class ChatDB:
                     )
                 ''')
 
+                # Create retrieval configs table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS retrieval_configs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT,
+                        config TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id)
+                    )
+                ''')
+
                 conn.commit()
                 logger.info("Database initialized successfully")
 
@@ -1202,3 +1214,42 @@ class ChatDB:
         except Exception as e:
             logger.error(f"Error loading model settings: {e}")
         return None
+
+    def save_user_retrieval_config(self, user_id: str, config: dict):
+        """Save retrieval configuration for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Use INSERT OR REPLACE to handle both new and existing configs
+                cursor.execute('''
+                    INSERT OR REPLACE INTO retrieval_configs (user_id, config, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                ''', (user_id, json.dumps(config)))
+                conn.commit()
+                logger.info(f"Saved retrieval config for user {user_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Error saving retrieval config for user {user_id}: {e}")
+            return False
+
+    def get_user_retrieval_config(self, user_id: str):
+        """Get retrieval configuration for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT config FROM retrieval_configs
+                    WHERE user_id = ?
+                ''', (user_id,))
+                row = cursor.fetchone()
+                if row:
+                    config = json.loads(row[0])
+                    logger.info(f"Loaded retrieval config for user {user_id}")
+                    return config
+        except Exception as e:
+            logger.error(f"Error loading retrieval config for user {user_id}: {e}")
+        return None
+
+    def get_default_retrieval_config(self):
+        """Get default retrieval configuration."""
+        return self.get_user_retrieval_config('default')

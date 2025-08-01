@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Ollama model scraper to fetch available models from Ollama library
 with comprehensive fallback list and real-time model discovery
@@ -346,6 +347,96 @@ FALLBACK_MODELS = {
         "size": "Various sizes: 30m, 278m",
         "source": "ollama",
         "variants": ["30m", "278m"]
+    },
+    
+    # Dedicated Reranker Models
+    "linux6200/bge-reranker-v2-m3": {
+        "name": "linux6200/bge-reranker-v2-m3",
+        "category": "reranker",
+        "description": "BGE Reranker v2 M3 - Dedicated reranking model for improving search relevance",
+        "tags": ["bge", "reranker", "ranking"],
+        "size": "Unknown",
+        "source": "ollama"
+    },
+    "dengcao/Qwen3-Reranker-8B": {
+        "name": "dengcao/Qwen3-Reranker-8B",
+        "category": "reranker", 
+        "description": "Alibaba's text reranking model. Supports 100+ languages with 8B parameters and 32k context length",
+        "tags": ["qwen", "reranker", "multilingual", "alibaba"],
+        "size": "8B",
+        "source": "ollama"
+    },
+    "dengcao/Qwen3-Reranker-4B": {
+        "name": "dengcao/Qwen3-Reranker-4B",
+        "category": "reranker",
+        "description": "Alibaba's text reranking model. Supports 100+ languages with 4B parameters and 32k context length",
+        "tags": ["qwen", "reranker", "multilingual", "alibaba"],
+        "size": "4B", 
+        "source": "ollama"
+    },
+    "dengcao/Qwen3-Reranker-0.6B": {
+        "name": "dengcao/Qwen3-Reranker-0.6B",
+        "category": "reranker",
+        "description": "Alibaba's text reranking model. Supports 100+ languages with 0.6B parameters and 32k context length",
+        "tags": ["qwen", "reranker", "multilingual", "alibaba"],
+        "size": "0.6B",
+        "source": "ollama"
+    },
+    "xitao/bge-reranker-v2-m3": {
+        "name": "xitao/bge-reranker-v2-m3",
+        "category": "reranker",
+        "description": "BGE Reranker v2 M3 implementation following HuggingFace BAAI/bge-reranker-v2-m3",
+        "tags": ["bge", "reranker", "ranking"],
+        "size": "Unknown",
+        "source": "ollama"
+    },
+    "qllama/bce-reranker-base_v1": {
+        "name": "qllama/bce-reranker-base_v1",
+        "category": "reranker",
+        "description": "BCE Reranker Base v1 - Quantized reranking model with f16/q8_0/q4_k_m variants",
+        "tags": ["bce", "reranker", "quantized"],
+        "size": "Various: f16, q8_0, q4_k_m",
+        "source": "ollama"
+    },
+    "qllama/bge-reranker-v2-m3": {
+        "name": "qllama/bge-reranker-v2-m3", 
+        "category": "reranker",
+        "description": "BGE Reranker v2 M3 - Quantized version with f16/q8_0/q4_k_m variants",
+        "tags": ["bge", "reranker", "quantized"],
+        "size": "Various: f16, q8_0, q4_k_m",
+        "source": "ollama"
+    },
+    "qllama/bge-reranker-large": {
+        "name": "qllama/bge-reranker-large",
+        "category": "reranker",
+        "description": "BGE Reranker Large - Quantized version with f16/q8_0/q4_k_m variants", 
+        "tags": ["bge", "reranker", "quantized"],
+        "size": "Various: f16, q8_0, q4_k_m",
+        "source": "ollama"
+    },
+    "dengcao/bge-reranker-v2-m3": {
+        "name": "dengcao/bge-reranker-v2-m3",
+        "category": "reranker",
+        "description": "BGE-Reranker-v2-M3 lightweight reranking model optimized for multilingual retrieval tasks, especially Chinese-English mixed scenarios",
+        "tags": ["bge", "reranker", "multilingual", "chinese"],
+        "size": "Unknown",
+        "source": "ollama"
+    },
+    "dengcao/bce-reranker-base_v1": {
+        "name": "dengcao/bce-reranker-base_v1", 
+        "category": "reranker",
+        "description": "Cross-language semantic representation model by NetEase Youdao, supports Chinese, English, Japanese, Korean languages with long text reranking (512-32k)",
+        "tags": ["bce", "reranker", "multilingual", "netease"],
+        "size": "Unknown",
+        "source": "ollama"
+    },
+    "AuditAid/Qwen3_Reranker": {
+        "name": "AuditAid/Qwen3_Reranker",
+        "category": "reranker", 
+        "description": "Qwen3 Reranker built for Ollama - Specialized reranking model",
+        "tags": ["qwen", "reranker", "audit"],
+        "size": "Unknown",
+        "source": "ollama"
     }
 }
 

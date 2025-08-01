@@ -39,6 +39,7 @@ import subprocess
 import re
 from enhanced_document_processor import get_document_processor
 from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
+from retrieval_config import get_retrieval_config_manager, RetrievalConfig
 
 # Add stub for reranker that will be dynamically loaded
 _reranker_instance = None
@@ -51,6 +52,12 @@ def get_reranker():
         from reranker import get_reranker as _get_reranker
         _reranker_instance = _get_reranker()
     return _reranker_instance
+
+def clear_reranker_cache():
+    """Clear the cached reranker instance to force recreation"""
+    global _reranker_instance
+    _reranker_instance = None
+    logger.info("RAG reranker cache cleared")
 
 set_debug(True)
 set_verbose(True)
@@ -193,6 +200,97 @@ class ChatPDF:
         # Replace problematic characters with underscores
         safe_model_name = self.embedding_model.replace(":", "_").replace("-", "_").replace("/", "_")
         return f"embeddings_{safe_model_name}"
+
+    def _get_retrieval_config(self, user_id: Optional[str] = None) -> RetrievalConfig:
+        """Get retrieval configuration for the current user or default"""
+        try:
+            config_manager = get_retrieval_config_manager()
+            config = config_manager.get_config(user_id)
+            logger.info(f"🔧 CONFIG LOADED for user_id='{user_id}': reranker_enabled={config.reranker_enabled}, reranker_model='{config.reranker_model}'")
+            return config
+        except Exception as e:
+            logger.warning(f"Could not load retrieval config: {e}")
+            # Return default config if loading fails
+            default_config = RetrievalConfig()
+            logger.info(f"🔧 CONFIG FALLBACK: reranker_enabled={default_config.reranker_enabled}, reranker_model='{default_config.reranker_model}'")
+            return default_config
+
+    def _create_retriever_with_config(self, config: RetrievalConfig):
+        """Create retriever with the given configuration"""
+        if not self.vector_store:
+            return None
+        
+        search_kwargs = {"k": config.max_chunks}
+        
+        # Add score threshold if specified
+        if config.search_type == "similarity_score_threshold":
+            search_kwargs["score_threshold"] = config.similarity_threshold
+        
+        return self.vector_store.as_retriever(
+            search_type=config.search_type,
+            search_kwargs=search_kwargs
+        )
+
+    async def _apply_reranking(self, query: str, documents: List, config: RetrievalConfig) -> List:
+        """Apply reranking if enabled in configuration"""
+        # Debug: Log reranker configuration
+        logger.info(f"🔍 RERANKER DEBUG: enabled={config.reranker_enabled}, model='{config.reranker_model}', documents={len(documents)}")
+        
+        if not config.reranker_enabled or not config.reranker_model:
+            logger.info(f"🔍 RERANKER SKIPPED: enabled={config.reranker_enabled}, model='{config.reranker_model}'")
+            return documents
+        
+        try:
+            reranker = get_reranker()
+            if reranker:
+                # Set the reranker model to match the configuration
+                from reranker import set_reranker_model
+                set_reranker_model(config.reranker_model)
+                logger.info(f"🔧 RERANKER MODEL SET to: {config.reranker_model}")
+                
+                # Use the configured max_chunks as top_k for reranking
+                logger.info(f"🔍 RERANKER STARTING: Processing {len(documents)} documents with top_k={config.max_chunks}")
+                reranked_docs = await reranker.rerank(query, documents, top_k=config.max_chunks)
+                logger.info(f"✅ RERANKER SUCCESS: Reranked {len(documents)} documents to {len(reranked_docs)} using {config.reranker_model}")
+                
+                # Apply auto merging if enabled
+                if config.auto_merging_enabled:
+                    logger.info(f"🔗 AUTO MERGE STARTING: Processing {len(reranked_docs)} reranked documents")
+                    try:
+                        from auto_merging_retriever import create_auto_merging_retriever
+                        auto_merger = create_auto_merging_retriever(
+                            similarity_threshold=config.auto_merging_similarity_threshold
+                        )
+                        merged_docs = auto_merger.merge_documents(reranked_docs)
+                        logger.info(f"✅ AUTO MERGE SUCCESS: Merged {len(reranked_docs)} documents to {len(merged_docs)}")
+                        return merged_docs
+                    except Exception as e:
+                        logger.warning(f"❌ AUTO MERGE FAILED: {e}")
+                        return reranked_docs
+                else:
+                    logger.info(f"🔗 AUTO MERGE SKIPPED: auto_merging_enabled={config.auto_merging_enabled}")
+                    
+                return reranked_docs
+            else:
+                logger.warning("❌ RERANKER ERROR: Reranker requested but not available")
+        except Exception as e:
+            logger.warning(f"❌ RERANKER FAILED: {e}")
+        
+        # Apply auto merging even if reranker is disabled or failed
+        if config.auto_merging_enabled:
+            logger.info(f"🔗 AUTO MERGE STARTING: Processing {len(documents)} documents (no reranker)")
+            try:
+                from auto_merging_retriever import create_auto_merging_retriever
+                auto_merger = create_auto_merging_retriever(
+                    similarity_threshold=config.auto_merging_similarity_threshold
+                )
+                merged_docs = auto_merger.merge_documents(documents)
+                logger.info(f"✅ AUTO MERGE SUCCESS: Merged {len(documents)} documents to {len(merged_docs)}")
+                return merged_docs
+            except Exception as e:
+                logger.warning(f"❌ AUTO MERGE FAILED: {e}")
+        
+        return documents
 
     def _ensure_chroma_dir(self):
         """Ensure Chroma directory exists with proper permissions"""
@@ -389,11 +487,9 @@ class ChatPDF:
                 
                 # Initialize retriever if vector store has data
                 if existing_collection.count() > 0:
-                    self.retriever = self.vector_store.as_retriever(
-                        search_type="similarity",
-                        search_kwargs={"k": 3}
-                    )
-                    logger.info("Initialized retriever with existing data")
+                    retrieval_config = self._get_retrieval_config()
+                    self.retriever = self._create_retriever_with_config(retrieval_config)
+                    logger.info(f"Initialized retriever with existing data (k={retrieval_config.max_chunks}, threshold={retrieval_config.similarity_threshold})")
                 else:
                     logger.info("Collection exists but is empty")
                     
@@ -462,11 +558,9 @@ class ChatPDF:
                     
                     if doc_count > 0:
                         # Initialize retriever for existing data
-                        self.retriever = self.vector_store.as_retriever(
-                            search_type="similarity",
-                            search_kwargs={"k": 3}
-                        )
-                        logger.info("Initialized retriever with existing vector data")
+                        retrieval_config = self._get_retrieval_config()
+                        self.retriever = self._create_retriever_with_config(retrieval_config)
+                        logger.info(f"Initialized retriever with existing vector data (k={retrieval_config.max_chunks})")
                     else:
                         logger.info("Collection is empty, will need to ingest documents")
                         
@@ -480,10 +574,9 @@ class ChatPDF:
                 if success:
                     # Reinitialize retriever after re-ingestion
                     try:
-                        self.retriever = self.vector_store.as_retriever(
-                            search_type="similarity",
-                            search_kwargs={"k": 3}
-                        )
+                        retrieval_config = self._get_retrieval_config()
+                        self.retriever = self._create_retriever_with_config(retrieval_config)
+                        logger.info(f"Reinitialized retriever after re-ingestion (k={retrieval_config.max_chunks})")
                         logger.info("Retriever reinitialized after successful re-ingestion")
                     except Exception as e:
                         logger.error(f"Failed to reinitialize retriever: {e}")
@@ -606,11 +699,9 @@ class ChatPDF:
             elif self.vector_store and self.embeddings:
                 # If only LLM changed, just reinitialize retriever
                 try:
-                    self.retriever = self.vector_store.as_retriever(
-                        search_type="similarity",
-                        search_kwargs={"k": 3}
-                    )
-                    logger.info("Vector store retriever updated")
+                    retrieval_config = self._get_retrieval_config()
+                    self.retriever = self._create_retriever_with_config(retrieval_config)
+                    logger.info(f"Vector store retriever updated (k={retrieval_config.max_chunks})")
                 except Exception as e:
                     logger.warning(f"Could not update vector store retriever: {str(e)}")
             
@@ -812,11 +903,9 @@ class ChatPDF:
                 
                 # Initialize or update retriever
                 if not self.retriever:
-                    self.retriever = self.vector_store.as_retriever(
-                        search_type="similarity",
-                        search_kwargs={"k": 3}
-                    )
-                    logger.debug("Initialized retriever")
+                    retrieval_config = self._get_retrieval_config()
+                    self.retriever = self._create_retriever_with_config(retrieval_config)
+                    logger.debug(f"Initialized retriever (k={retrieval_config.max_chunks})")
                 
                 # No need to call persist() with PersistentClient - it auto-persists
                 logger.info(f"Successfully processed PDF: {pdf_file_path}")
@@ -835,10 +924,9 @@ class ChatPDF:
                         if self.vector_store:
                             self._handle_chromadb_operation(self.vector_store.add_documents, chunks)
                             if not self.retriever:
-                                self.retriever = self.vector_store.as_retriever(
-                                    search_type="similarity",
-                                    search_kwargs={"k": 3}
-                                )
+                                retrieval_config = self._get_retrieval_config()
+                                self.retriever = self._create_retriever_with_config(retrieval_config)
+                                logger.debug(f"Initialized retriever after migration (k={retrieval_config.max_chunks})")
                             logger.info(f"Successfully processed PDF after migration: {pdf_file_path}")
                             return True
                     except Exception as migration_error:
@@ -937,7 +1025,8 @@ class ChatPDF:
                     chunking_method,
                     chunking_config,
                     None,  # user_id not needed for reingestion
-                    original_filename=filename
+                    original_filename=filename,
+                    document_id=document_id  # Pass document_id for chunk metadata
                 )
                 
                 if not chunking_result or not chunking_result.chunks:
@@ -1261,10 +1350,9 @@ class ChatPDF:
                     logger.error(f"🔍 DEBUG: Could not verify stored chunks: {verify_error}")
                 
                 # Update retriever
-                self.retriever = self.vector_store.as_retriever(
-                    search_type="similarity",
-                    search_kwargs={"k": 3}
-                )
+                retrieval_config = self._get_retrieval_config()
+                self.retriever = self._create_retriever_with_config(retrieval_config)
+                logger.debug(f"Updated retriever after adding chunks (k={retrieval_config.max_chunks})")
                 
                 # Backup to MinIO after successful ingestion
                 backup_success = self._backup_vector_store_to_minio(collection_name)
@@ -1663,15 +1751,17 @@ class ChatPDF:
             logger.error(f"Error switching embedding model: {e}")
             return False
 
-    async def stream_response(self, question: str, style: str = "standard"):
+    async def stream_response(self, question: str, style: str = "standard", user_id: Optional[str] = None):
         """
         Generate a streaming response to a question based on the ingested documents
         
         Args:
             question: The user's question
             style: Response style ("standard", "conversational", "detailed")
+            user_id: User ID for loading user-specific configuration
         """
         try:
+            logger.info(f"🔧 STREAM DEBUG: stream_response called with user_id='{user_id}'")
             # Ensure models are loaded
             self.ensure_models_loaded()
             
@@ -1685,7 +1775,17 @@ class ChatPDF:
                     return
             
             # Retrieve relevant documents
-            relevant_docs = self.retriever.get_relevant_documents(question)
+            retrieval_config = self._get_retrieval_config(user_id)
+            
+            # Use vector store similarity search if available, otherwise use retriever
+            if self.vector_store:
+                relevant_docs = self.vector_store.similarity_search(question, k=retrieval_config.max_chunks * 2)
+            else:
+                # Fallback to retriever's get_relevant_documents if vector store not available
+                relevant_docs = self.retriever.get_relevant_documents(question)
+            
+            # Apply reranking if enabled
+            relevant_docs = await self._apply_reranking(question, relevant_docs, retrieval_config)
             
             if not relevant_docs:
                 logger.warning("No relevant documents found for query")
@@ -1738,7 +1838,16 @@ class ChatPDF:
                     return "I don't have any documents to reference. Please upload some documents first."
             
             # Retrieve relevant documents
+            retrieval_config = self._get_retrieval_config()
             relevant_docs = self.retriever.get_relevant_documents(question)
+            
+            # Apply reranking if enabled (sync version)
+            if retrieval_config.reranker_enabled and retrieval_config.reranker_model:
+                try:
+                    import asyncio
+                    relevant_docs = asyncio.run(self._apply_reranking(question, relevant_docs, retrieval_config))
+                except Exception as e:
+                    logger.warning(f"Reranking failed in sync mode: {e}")
             
             if not relevant_docs:
                 logger.warning("No relevant documents found for query")
@@ -1924,11 +2033,9 @@ class ChatPDF:
                         logger.info(f"Vector store initialized for collection '{collection_name}'")
                     
                     # Initialize retriever
-                    self.retriever = self.vector_store.as_retriever(
-                        search_type="similarity",
-                        search_kwargs={"k": 3}
-                    )
-                    logger.info(f"Retriever reinitialized with {doc_count} documents")
+                    retrieval_config = self._get_retrieval_config()
+                    self.retriever = self._create_retriever_with_config(retrieval_config)
+                    logger.info(f"Retriever reinitialized with {doc_count} documents (k={retrieval_config.max_chunks})")
                     return True
                 else:
                     logger.warning(f"Collection '{collection_name}' is empty")
@@ -2061,43 +2168,55 @@ class ChatPDF:
             return False
 
     def remove_document_from_vectorstore(self, filename: str) -> bool:
-        """Remove document chunks from vector store by filename"""
+        """Remove document chunks from vector store by filename across ALL embedding models"""
         try:
             if not self.vector_store:
                 logger.warning("Vector store not initialized")
                 return False
             
-            # Get collection name for current embedding model
-            collection_name = f"collection_{self.embedding_model.replace('/', '_').replace('-', '_')}"
-            
             # Get ChromaDB client
             chroma_client = self.vector_store._client
             
-            # Get the collection
+            # Get all collections (all embedding models)
             try:
-                collection = chroma_client.get_collection(collection_name)
+                collections = chroma_client.list_collections()
+                collection_names = [col.name for col in collections]
             except Exception as e:
-                logger.warning(f"Collection {collection_name} not found: {e}")
-                return True  # Consider it success if collection doesn't exist
+                logger.warning(f"Could not list collections: {e}")
+                # Fallback to current model only
+                collection_names = [f"collection_{self.embedding_model.replace('/', '_').replace('-', '_')}"]
             
-            # Query for documents with this filename in metadata
-            try:
-                results = collection.get(
-                    where={"source": filename}
-                )
-                
-                if results and results.get('ids'):
-                    # Delete all chunks for this document
-                    collection.delete(ids=results['ids'])
-                    logger.info(f"Removed {len(results['ids'])} chunks for document {filename}")
-                    return True
-                else:
-                    logger.info(f"No chunks found for document {filename}")
-                    return True
+            total_deleted = 0
+            
+            # Remove from all collections
+            for collection_name in collection_names:
+                try:
+                    collection = chroma_client.get_collection(collection_name)
                     
-            except Exception as e:
-                logger.error(f"Error removing document {filename} from vector store: {e}")
-                return False
+                    # Query for documents with this filename in metadata
+                    results = collection.get(
+                        where={"source": filename}
+                    )
+                    
+                    if results and results.get('ids'):
+                        # Delete all chunks for this document
+                        collection.delete(ids=results['ids'])
+                        deleted_count = len(results['ids'])
+                        total_deleted += deleted_count
+                        logger.info(f"Removed {deleted_count} chunks for document {filename} from collection {collection_name}")
+                    else:
+                        logger.debug(f"No chunks found for document {filename} in collection {collection_name}")
+                        
+                except Exception as e:
+                    logger.warning(f"Could not remove from collection {collection_name}: {e}")
+                    continue
+            
+            if total_deleted > 0:
+                logger.info(f"Successfully removed {total_deleted} total chunks for document {filename} from all collections")
+            else:
+                logger.info(f"No chunks found for document {filename} in any collection")
+            
+            return True
                 
         except Exception as e:
             logger.error(f"Error removing document from vectorstore: {e}")
@@ -2144,7 +2263,11 @@ class ChatPDF:
             # Remove from all relevant embedding model collections
             for model in embedding_models:
                 try:
-                    collection_name = f"collection_{model.replace('/', '_').replace('-', '_')}"
+                    # Store current embedding model and temporarily switch to the target model
+                    original_model = self.embedding_model
+                    self.embedding_model = model
+                    collection_name = self._get_collection_name()
+                    self.embedding_model = original_model
                     
                     # Get the collection
                     try:
@@ -2155,18 +2278,43 @@ class ChatPDF:
                     
                     # Query for documents with this document_id in metadata
                     try:
+                        # First, debug what metadata keys and values exist in the collection
+                        logger.info(f"🔍 DEBUG: Searching for document_id={document_id} in collection {collection_name}")
+                        
+                        # Get a few sample documents to see what metadata looks like
+                        sample_results = collection.get(limit=5, include=["metadatas"])
+                        if sample_results and sample_results.get('metadatas'):
+                            logger.info(f"🔍 DEBUG: Sample metadata in collection: {sample_results['metadatas'][:3]}")
+                        
+                        # Try both string and integer document_id searches
                         results = collection.get(
                             where={"document_id": str(document_id)}
                         )
                         
+                        # If not found, try with integer document_id
+                        if not results or not results.get('ids'):
+                            logger.info(f"🔍 DEBUG: No results found with string document_id, trying integer")
+                            results = collection.get(
+                                where={"document_id": document_id}
+                            )
+                        
                         if results and results.get('ids'):
                             # Delete all chunks for this document
+                            logger.info(f"🔍 DEBUG: Found {len(results['ids'])} chunks with document_id {document_id}")
                             collection.delete(ids=results['ids'])
                             deleted_count = len(results['ids'])
                             total_deleted += deleted_count
                             logger.info(f"Removed {deleted_count} chunks for document {document_id} from model {model}")
                         else:
-                            logger.info(f"No chunks found for document {document_id} in model {model}")
+                            logger.warning(f"🔍 DEBUG: No chunks found for document_id {document_id} in model {model}")
+                            # Let's try to find all chunks and see their document_ids
+                            all_results = collection.get(include=["metadatas"])
+                            document_ids_found = set()
+                            if all_results and all_results.get('metadatas'):
+                                for metadata in all_results['metadatas']:
+                                    if 'document_id' in metadata:
+                                        document_ids_found.add(metadata['document_id'])
+                            logger.warning(f"🔍 DEBUG: All document_ids found in collection: {sorted(document_ids_found)}")
                             
                     except Exception as e:
                         logger.error(f"Error removing document {document_id} from vector store {model}: {e}")
@@ -2181,6 +2329,18 @@ class ChatPDF:
                 
         except Exception as e:
             logger.error(f"Error removing document {document_id} from vectorstore: {e}")
+            return False
+
+    def remove_document_completely(self, document_id: str) -> bool:
+        """
+        Completely remove a document from all embedding model collections
+        This is used during reingestion to ensure old chunks are fully deleted
+        """
+        try:
+            logger.info(f"Completely removing document {document_id} from all collections")
+            return self.remove_document_from_vectorstore(document_id)
+        except Exception as e:
+            logger.error(f"Error completely removing document {document_id}: {e}")
             return False
 
     def clear_vectorstore(self):
@@ -2257,6 +2417,8 @@ class ChatPDF:
             
             for doc_id in document_ids:
                 try:
+                    logger.info(f"Processing document {doc_id}")
+                    
                     # Step 1: Check if document exists in DB and MinIO
                     doc_info = self.doc_storage.get_document_with_config(doc_id)
                     if not doc_info:
@@ -2285,7 +2447,7 @@ class ChatPDF:
                     # Step 2: Delete old chunks from vector store for this document+model
                     logger.info(f"Removing old chunks for document {doc_id}")
                     try:
-                        self.remove_document_by_id(doc_id, [self.embedding_model])
+                        self.remove_document_completely(doc_id)
                     except Exception as e:
                         logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
                     
@@ -2325,7 +2487,8 @@ class ChatPDF:
                             chunking_method,
                             chunking_config,
                             None,  # user_id not needed for reingestion
-                            original_filename=doc_info['filename']
+                            original_filename=doc_info['filename'],
+                            document_id=doc_id
                         )
                         
                         if not chunking_result.chunks:
@@ -2450,6 +2613,8 @@ class ChatPDF:
                 chunking_config = doc_config.get('chunking_config')
                 
                 try:
+                    logger.info(f"Processing document {doc_id} with custom config")
+                    
                     # Step 1: Check if document exists in DB and MinIO
                     doc_info = self.doc_storage.get_document_with_config(doc_id)
                     if not doc_info:
@@ -2478,7 +2643,7 @@ class ChatPDF:
                     # Step 2: Delete old chunks from vector store for this document+model
                     logger.info(f"Removing old chunks for document {doc_id}")
                     try:
-                        self.remove_document_by_id(doc_id, [self.embedding_model])
+                        self.remove_document_completely(doc_id)
                     except Exception as e:
                         logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
                     
@@ -2518,7 +2683,8 @@ class ChatPDF:
                             chunking_method,
                             chunking_config,
                             None,  # user_id not needed for reingestion
-                            original_filename=doc_info['filename']
+                            original_filename=doc_info['filename'],
+                            document_id=doc_id
                         )
                         
                         if not chunking_result.chunks:
@@ -2697,7 +2863,8 @@ class ChatPDF:
                     chunking_method, 
                     chunking_config, 
                     user_id,
-                    original_filename  # Pass the original filename
+                    original_filename,  # Pass the original filename
+                    document_id=doc_info['id']  # Pass document_id for chunk metadata
                 )
                 
                 logger.info(f"Document processed: {len(chunking_result.chunks)} chunks created using {chunking_result.method_used.value}")

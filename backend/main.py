@@ -701,6 +701,7 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
     try:
         user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = user["sub"]
+        logger.info(f"🔧 CHAT DEBUG: Decoded user from JWT - username='{username}'")
         
         if not message.session_id:
             message.session_id = chat_db.create_session(username, message.content)
@@ -718,7 +719,8 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
             # Get the first response with conversational style (friendly, detailed explanations)
             response_a_chunks = []
             rag = get_rag()
-            async for chunk in rag.stream_response(user_prompt, style="conversational"):
+            logger.info(f"🔧 CHAT DEBUG: About to call stream_response with user_id='{username}'")
+            async for chunk in rag.stream_response(user_prompt, style="conversational", user_id=username):
                 response_a_chunks.append(chunk)
             
             # Parse the final response from chunks
@@ -755,7 +757,7 @@ async def send_message(message: Message, token: str = Depends(oauth2_scheme)):
             
             # Get second response with detailed/analytical style
             response_b_chunks = []
-            async for chunk in rag.stream_response(user_prompt, style="detailed"):
+            async for chunk in rag.stream_response(user_prompt, style="detailed", user_id=username):
                 response_b_chunks.append(chunk)
             
             # Parse the final response from chunks
@@ -1474,9 +1476,15 @@ async def retry_document_processing(
             
             logger.info(f"Retrying processing for {filename} with method {selected_method.value}")
             
-            # First, remove any existing chunks for this document
+            # First, remove any existing chunks for this document using document ID for more accuracy
             try:
-                get_rag().remove_document_from_vectorstore(filename)
+                rag_instance = get_rag()
+                # Use remove_document_by_id for more comprehensive deletion across all embedding models
+                deletion_success = rag_instance.remove_document_by_id(document_id)
+                if not deletion_success:
+                    logger.warning(f"Could not fully remove existing chunks for document {document_id}")
+                    # Fallback to filename-based removal
+                    rag_instance.remove_document_from_vectorstore(filename)
             except Exception as e:
                 logger.warning(f"Could not remove existing chunks: {e}")
             
@@ -3075,6 +3083,377 @@ async def get_optimal_chunking_method(file_extension: str, token: str = Depends(
     except Exception as e:
         logger.error(f"Error getting optimal chunking method: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Retrieval Configuration API Endpoints
+
+@app.get("/api/retrieval/config")
+async def get_retrieval_config(token: str = Depends(oauth2_scheme)):
+    """Get current retrieval configuration"""
+    try:
+        current_user = await get_current_user(token)
+        user_id = current_user.get('sub') if current_user else None
+        
+        from retrieval_config import get_retrieval_config_manager
+        config_manager = get_retrieval_config_manager()
+        config = config_manager.get_config(user_id)
+        
+        return {
+            "config": config.to_dict()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting retrieval config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def check_and_download_reranker_model(model_name: str) -> Dict[str, Any]:
+    """Check if a reranker model is available locally, download if not"""
+    if not model_name or model_name.lower() == "none":
+        return {"success": True, "downloaded": False, "message": "No reranker model specified"}
+    
+    try:
+        import httpx
+        ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        # Check if model is available locally
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(f"{ollama_host}/api/tags")
+            if response.status_code == 200:
+                models_data = response.json()
+                available_models = {model.get('name', '') for model in models_data.get('models', [])}
+                
+                # Check for exact model name and common variants
+                model_variants = [
+                    model_name,
+                    f"{model_name}:latest",
+                    model_name.replace(":latest", "")
+                ]
+                
+                model_found = any(variant in available_models for variant in model_variants)
+                
+                if model_found:
+                    logger.info(f"🎯 Reranker model {model_name} is already available locally")
+                    return {"success": True, "downloaded": False, "message": f"Model {model_name} already available"}
+                
+                # Model not found locally, download it
+                logger.info(f"🔄 Downloading reranker model: {model_name}")
+                
+                # Try download with enhanced error handling and progress tracking
+                download_response = await client.post(
+                    f"{ollama_host}/api/pull",
+                    json={"name": model_name, "stream": True},
+                    timeout=600.0  # 10 minute timeout
+                )
+                
+                if download_response.status_code != 200:
+                    error_text = await download_response.text()
+                    error_msg = f"Failed to download reranker model {model_name}: HTTP {download_response.status_code} - {error_text}"
+                    logger.error(error_msg)
+                    return {"success": False, "downloaded": False, "message": error_msg}
+                
+                # Process download stream with better status tracking
+                download_success = False
+                last_status = ""
+                try:
+                    async for line in download_response.aiter_lines():
+                        if line:
+                            try:
+                                data = json.loads(line)
+                                status = data.get("status", "")
+                                
+                                # Log status changes
+                                if status != last_status and status:
+                                    logger.info(f"🎯 Reranker model {model_name}: {status}")
+                                    last_status = status
+                                
+                                # Check for completion indicators
+                                if any(indicator in status.lower() for indicator in [
+                                    "success", "pull complete", "already exists"
+                                ]):
+                                    download_success = True
+                                    logger.info(f"✅ Reranker model {model_name}: Download completed - {status}")
+                                    break
+                                    
+                                # Check for error indicators
+                                if any(error_word in status.lower() for error_word in [
+                                    "error", "failed", "not found"
+                                ]):
+                                    logger.error(f"❌ Reranker model {model_name}: Download failed - {status}")
+                                    return {"success": False, "downloaded": False, "message": f"Download failed: {status}"}
+                                    
+                            except json.JSONDecodeError:
+                                # Skip malformed JSON lines
+                                continue
+                                
+                except Exception as stream_error:
+                    logger.error(f"Error processing download stream for {model_name}: {stream_error}")
+                    # Don't fail immediately, try to verify if model was downloaded
+                
+                # Verify download by checking if model is now available
+                verification_response = await client.get(f"{ollama_host}/api/tags")
+                if verification_response.status_code == 200:
+                    updated_models_data = verification_response.json()
+                    updated_available_models = {model.get('name', '') for model in updated_models_data.get('models', [])}
+                    
+                    # Check if any variant of the model is now available
+                    verification_found = any(variant in updated_available_models for variant in model_variants)
+                    
+                    if verification_found:
+                        download_success = True
+                        logger.info(f"✅ Reranker model {model_name}: Verified successful download")
+                    else:
+                        logger.warning(f"⚠️ Reranker model {model_name}: Download status unclear, model not found in verification")
+                
+                if download_success:
+                    return {"success": True, "downloaded": True, "message": f"Successfully downloaded reranker model {model_name}"}
+                else:
+                    error_msg = f"Download verification failed for reranker model {model_name}. Model may not be available in Ollama registry."
+                    logger.error(error_msg)
+                    return {"success": False, "downloaded": False, "message": error_msg}
+            else:
+                error_msg = f"Failed to check available models: HTTP {response.status_code}"
+                logger.error(error_msg)
+                return {"success": False, "downloaded": False, "message": error_msg}
+                
+    except httpx.TimeoutException:
+        error_msg = f"Timeout downloading reranker model {model_name}. Large models may take longer to download."
+        logger.error(error_msg)
+        return {"success": False, "downloaded": False, "message": error_msg}
+    except Exception as e:
+        error_msg = f"Error with reranker model {model_name}: {str(e)}"
+        logger.error(error_msg)
+        return {"success": False, "downloaded": False, "message": error_msg}
+
+@app.put("/api/retrieval/config")
+async def update_retrieval_config(
+    config_data: Dict[str, Any],
+    token: str = Depends(oauth2_scheme)
+):
+    """Update retrieval configuration with auto-download for reranker models"""
+    try:
+        current_user = await get_current_user(token)
+        user_id = current_user.get('sub') if current_user else None
+        
+        from retrieval_config import get_retrieval_config_manager, RetrievalConfig
+        config_manager = get_retrieval_config_manager()
+        
+        # Create config from provided data
+        config = RetrievalConfig.from_dict(config_data)
+        
+        # Check and download reranker model if needed
+        download_result = {"success": True, "downloaded": False, "message": "No reranker model specified"}
+        if config.reranker_enabled and config.reranker_model and config.reranker_model.lower() != "none":
+            logger.info(f"🎯 Checking reranker model availability: {config.reranker_model}")
+            download_result = await check_and_download_reranker_model(config.reranker_model)
+            
+            if not download_result["success"]:
+                # If download failed, still save config but include warning
+                logger.warning(f"⚠️ Reranker model download failed but continuing with config save: {download_result['message']}")
+        
+        # Validate configuration
+        warnings = config_manager.validate_config(config)
+        
+        # Add download-related warning if download failed
+        if not download_result["success"]:
+            warnings.append(f"Reranker model download failed: {download_result['message']}")
+        
+        # Save configuration
+        success = config_manager.save_config(config, user_id)
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to save retrieval configuration")
+        
+        response_data = {
+            "success": True,
+            "config": config.to_dict(),
+            "warnings": warnings,
+            "reranker_download": download_result
+        }
+        
+        # Add success message if model was downloaded
+        if download_result["downloaded"]:
+            response_data["message"] = f"Configuration saved and reranker model '{config.reranker_model}' downloaded successfully"
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating retrieval config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/retrieval/reranker-models")
+async def get_available_reranker_models(token: str = Depends(oauth2_scheme)):
+    """Get list of available reranker models from Ollama (both local and library)"""
+    try:
+        # Get models from Ollama API (locally installed) and Ollama scraper (library)
+        ollama_url = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        
+        import httpx
+        from ollama_scraper import get_available_ollama_models
+        
+        # Get locally installed models
+        local_models = []
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{ollama_url}/api/tags")
+            
+            if response.status_code == 200:
+                ollama_data = response.json()
+                local_models = ollama_data.get('models', [])
+            else:
+                logger.error(f"Failed to fetch models from Ollama API: {response.status_code}")
+                # Continue without local models, will use library models only
+        
+        # Get models from Ollama library
+        try:
+            library_models = get_available_ollama_models(use_cache=True)
+            logger.info(f"Found {len(library_models)} models from Ollama library")
+        except Exception as e:
+            logger.warning(f"Could not fetch Ollama library models: {e}")
+            library_models = []
+        
+        # Combine local and library models
+        all_ollama_models = list(local_models)  # Start with local models
+        
+        # Add library models that aren't already installed locally
+        local_model_names = {model.get('name', '') for model in local_models}
+        for lib_model in library_models:
+            if lib_model.get('name', '') not in local_model_names:
+                # Convert library model format to match local model format
+                all_ollama_models.append({
+                    'name': lib_model.get('name', ''),
+                    'category': lib_model.get('category', 'llm')
+                })
+        
+        # Filter for reranker/embedding models that can be used for reranking
+        reranker_models = []
+        
+        # Add "None" option first
+        reranker_models.append({
+            "name": "",
+            "display_name": "None (Vector + Keyword)",
+            "description": "Use weighted combination of vector similarity and keyword matching"
+        })
+        
+        # Check each model (both local and library)
+        total_models_checked = 0
+        reranker_models_found = 0
+        
+        for model in all_ollama_models:
+            total_models_checked += 1
+            model_name = model.get('name', '').lower()
+            original_name = model.get('name', '')
+            model_category = model.get('category', 'llm')
+            
+            # Prioritize dedicated reranker models ONLY - exclude general embedding models
+            is_dedicated_reranker = (
+                model_category == 'reranker' or
+                any(keyword in model_name for keyword in [
+                    'rerank', 'cross-encoder', 'qwen3-reranker', 'qwen-reranker', 
+                    'bce-reranker', 'bge-reranker', 'reranker', 'ranking'
+                ])
+            )
+            
+            # Only include BGE models that are specifically rerankers (not general embedding models)
+            is_bge_reranker = (
+                'bge' in model_name and 
+                ('reranker' in model_name or 'rerank' in model_name)
+            )
+            
+            # Include ONLY dedicated reranker models, exclude general embedding models
+            if is_dedicated_reranker or is_bge_reranker:
+                reranker_models_found += 1
+                
+                # Create display name by cleaning up the model name
+                display_name = original_name.replace(':', ' ').replace('-', ' ').replace('_', ' ')
+                display_name = ' '.join(word.capitalize() for word in display_name.split())
+                
+                # Add description - all should be reranker-specific
+                if 'qwen' in model_name and 'reranker' in model_name:
+                    description = "🎯 Qwen dedicated reranking model (multilingual, high performance)"
+                elif 'bge-reranker' in model_name or ('bge' in model_name and 'reranker' in model_name):
+                    description = "🎯 BGE dedicated reranking model (excellent for document ranking)"
+                elif 'bce-reranker' in model_name:
+                    description = "🎯 BCE reranking model (cross-language support)"
+                elif 'cross-encoder' in model_name:
+                    description = "🎯 Cross-encoder reranking model (high accuracy)"
+                else:
+                    description = "🎯 Dedicated reranking model"
+                
+                # Check if it's locally installed
+                is_local = original_name in local_model_names
+                if not is_local:
+                    description += " (available to download)"
+                
+                reranker_models.append({
+                    "name": original_name,
+                    "display_name": display_name,
+                    "description": description,
+                    "is_local": is_local
+                })
+        
+        logger.info(f"Reranker model filtering: Checked {total_models_checked} models, found {reranker_models_found} dedicated reranker models")
+        
+        # If no reranker models found, add some fallback models
+        if len(reranker_models) == 1:  # Only "None" option
+            logger.warning("No reranker models found in Ollama, adding fallback models")
+            fallback_models = [
+                {
+                    "name": "linux6200/bge-reranker-v2-m3",
+                    "display_name": "BGE Reranker V2 M3",
+                    "description": "High-performance BGE reranking model (available to download)",
+                    "is_local": False
+                },
+                {
+                    "name": "dengcao/Qwen3-Reranker-8B",
+                    "display_name": "Qwen3 Reranker 8B",
+                    "description": "Alibaba's multilingual reranking model (available to download)",
+                    "is_local": False
+                },
+                {
+                    "name": "qllama/bge-reranker-large",
+                    "display_name": "BGE Reranker Large (Quantized)",
+                    "description": "Quantized BGE reranking model (available to download)",
+                    "is_local": False
+                },
+                {
+                    "name": "BAAI/bge-reranker-large",
+                    "display_name": "BGE Reranker Large (Original)",
+                    "description": "Original BGE reranking model (may need to be pulled)",
+                    "is_local": False
+                }
+            ]
+            reranker_models.extend(fallback_models)
+        
+        return {
+            "models": reranker_models
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting reranker models: {e}")
+        # Return basic fallback on error
+        fallback_models = [
+            {
+                "name": "",
+                "display_name": "None (Vector + Keyword)",
+                "description": "Use weighted combination of vector similarity and keyword matching"
+            },
+            {
+                "name": "linux6200/bge-reranker-v2-m3",
+                "display_name": "BGE Reranker V2 M3",
+                "description": "High-performance BGE reranking model (error occurred)",
+                "is_local": False
+            },
+            {
+                "name": "dengcao/Qwen3-Reranker-8B",
+                "display_name": "Qwen3 Reranker 8B",
+                "description": "Alibaba's multilingual reranking model (error occurred)",
+                "is_local": False
+            }
+        ]
+        return {
+            "models": fallback_models
+        }
 
 def _get_method_description(method: ChunkingMethod) -> str:
     """Get description for chunking method"""
