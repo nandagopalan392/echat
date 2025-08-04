@@ -1,6 +1,6 @@
 """
-Enhanced Document Processor with Multiple Chunking Methods
-Handles different document types and chunking strategies with table-aware processing
+Enhanced Document Processor with Docling Integration
+Handles different document types and chunking strategies with advanced document parsing
 """
 
 import os
@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
 
 from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
 from table_extraction import (
@@ -24,8 +23,21 @@ from table_extraction import (
 
 logger = logging.getLogger(__name__)
 
-# Try to import additional libraries for enhanced document processing
+# Try to import Docling for advanced document processing
 try:
+    from docling.document_converter import DocumentConverter
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+    DOCLING_AVAILABLE = True
+    logger.info("Docling available for advanced document processing")
+except ImportError:
+    logger.warning("Docling not available. Falling back to basic document loaders.")
+    DOCLING_AVAILABLE = False
+
+# Fallback document loaders
+try:
+    from langchain_community.document_loaders import PyPDFLoader
     from langchain_community.document_loaders import Docx2txtLoader, CSVLoader, TextLoader
     from langchain_community.document_loaders import UnstructuredPowerPointLoader
     ADVANCED_LOADERS_AVAILABLE = True
@@ -61,23 +73,225 @@ class ChunkingResult:
         if self.warnings is None:
             self.warnings = []
 
+class DoclingDocumentProcessor:
+    """Docling-based document processor for advanced document parsing"""
+    
+    def __init__(self):
+        if DOCLING_AVAILABLE:
+            # Configure Docling converter with PDF pipeline options
+            self.pipeline_options = PdfPipelineOptions()
+            self.pipeline_options.do_ocr = True  # Enable OCR for better text extraction
+            self.pipeline_options.do_table_structure = True  # Enable table structure detection
+            
+            self.converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: self.pipeline_options,
+                }
+            )
+            
+            # Supported formats by Docling
+            self.docling_formats = {
+                '.pdf': InputFormat.PDF,
+                '.docx': InputFormat.DOCX,
+                '.pptx': InputFormat.PPTX,
+                '.html': InputFormat.HTML,
+                '.md': InputFormat.MD,
+                '.txt': InputFormat.TXT
+            }
+        else:
+            self.converter = None
+            self.docling_formats = {}
+    
+    def can_process(self, file_path: str) -> bool:
+        """Check if Docling can process this file format"""
+        if not DOCLING_AVAILABLE:
+            return False
+        
+        ext = Path(file_path).suffix.lower()
+        return ext in self.docling_formats
+    
+    def process_document(self, file_path: str) -> List[Document]:
+        """Process document using Docling for comprehensive content extraction"""
+        if not self.can_process(file_path):
+            raise ValueError(f"Cannot process {file_path} with Docling")
+        
+        try:
+            # Convert document using Docling
+            result = self.converter.convert(file_path)
+            documents = []
+            
+            # Extract content from Docling result
+            doc_content = result.document
+            
+            # Process tables first (if any)
+            table_docs = self._extract_tables_from_docling(doc_content, file_path)
+            documents.extend(table_docs)
+            
+            # Process text content
+            text_docs = self._extract_text_from_docling(doc_content, file_path)
+            documents.extend(text_docs)
+            
+            # Process images with OCR (if any)
+            image_docs = self._extract_images_from_docling(doc_content, file_path)
+            documents.extend(image_docs)
+            
+            logger.info(f"Docling processed {file_path}: {len(documents)} document sections extracted")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"Docling processing failed for {file_path}: {e}")
+            raise
+    
+    def _extract_tables_from_docling(self, doc_content, file_path: str) -> List[Document]:
+        """Extract tables from Docling document"""
+        documents = []
+        
+        try:
+            # Access tables from Docling document structure
+            if hasattr(doc_content, 'tables') and doc_content.tables:
+                for i, table in enumerate(doc_content.tables):
+                    # Convert Docling table to pandas DataFrame
+                    if hasattr(table, 'data') and table.data:
+                        try:
+                            # Create DataFrame from table data
+                            df = pd.DataFrame(table.data) if PANDAS_AVAILABLE else None
+                            
+                            if df is not None and not df.empty:
+                                # Create table document with enhanced metadata
+                                table_content = df.to_string(index=False)
+                                
+                                # Add table context and structure information
+                                context_info = f"Table {i+1} from document"
+                                if hasattr(table, 'caption') and table.caption:
+                                    context_info += f": {table.caption}"
+                                
+                                metadata = {
+                                    'source': Path(file_path).name,
+                                    'content_type': 'table',
+                                    'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
+                                    'table_index': i,
+                                    'table_rows': len(df),
+                                    'table_cols': len(df.columns),
+                                    'context_info': context_info,
+                                    'extraction_method': 'docling_advanced',
+                                    'confidence_score': 0.95  # High confidence for Docling extraction
+                                }
+                                
+                                doc = Document(
+                                    page_content=table_content,
+                                    metadata=metadata
+                                )
+                                documents.append(doc)
+                                
+                        except Exception as e:
+                            logger.warning(f"Failed to process table {i} from Docling: {e}")
+                            
+        except Exception as e:
+            logger.warning(f"Table extraction from Docling failed: {e}")
+        
+        return documents
+    
+    def _extract_text_from_docling(self, doc_content, file_path: str) -> List[Document]:
+        """Extract text content from Docling document"""
+        documents = []
+        
+        try:
+            # Get main text content
+            if hasattr(doc_content, 'main_text') and doc_content.main_text:
+                text_content = doc_content.main_text
+                
+                metadata = {
+                    'source': Path(file_path).name,
+                    'content_type': 'text',
+                    'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
+                    'extraction_method': 'docling_text',
+                    'page_count': getattr(doc_content, 'page_count', 1)
+                }
+                
+                doc = Document(
+                    page_content=text_content,
+                    metadata=metadata
+                )
+                documents.append(doc)
+                
+            # Also extract from pages if available (for page-by-page processing)
+            elif hasattr(doc_content, 'pages') and doc_content.pages:
+                for i, page in enumerate(doc_content.pages):
+                    if hasattr(page, 'text') and page.text:
+                        metadata = {
+                            'source': Path(file_path).name,
+                            'content_type': 'text',
+                            'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
+                            'extraction_method': 'docling_page',
+                            'page_number': i + 1
+                        }
+                        
+                        doc = Document(
+                            page_content=page.text,
+                            metadata=metadata
+                        )
+                        documents.append(doc)
+                        
+        except Exception as e:
+            logger.warning(f"Text extraction from Docling failed: {e}")
+        
+        return documents
+    
+    def _extract_images_from_docling(self, doc_content, file_path: str) -> List[Document]:
+        """Extract and OCR images from Docling document"""
+        documents = []
+        
+        try:
+            if hasattr(doc_content, 'images') and doc_content.images and OCR_AVAILABLE:
+                for i, image in enumerate(doc_content.images):
+                    try:
+                        # OCR image content if available
+                        if hasattr(image, 'pil_image'):
+                            ocr_text = pytesseract.image_to_string(image.pil_image)
+                            
+                            if ocr_text.strip():
+                                metadata = {
+                                    'source': Path(file_path).name,
+                                    'content_type': 'image_text',
+                                    'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
+                                    'extraction_method': 'docling_ocr',
+                                    'image_index': i
+                                }
+                                
+                                doc = Document(
+                                    page_content=ocr_text,
+                                    metadata=metadata
+                                )
+                                documents.append(doc)
+                                
+                    except Exception as e:
+                        logger.warning(f"OCR failed for image {i}: {e}")
+                        
+        except Exception as e:
+            logger.warning(f"Image extraction from Docling failed: {e}")
+        
+        return documents
+
 class EnhancedDocumentProcessor:
-    """Enhanced document processor with multiple chunking methods"""
+    """Enhanced document processor with Docling integration and multiple chunking methods"""
     
     def __init__(self):
         self.config_manager = get_chunking_config_manager()
-        self.supported_extensions = {
-            '.pdf': self._process_pdf,
-            '.docx': self._process_docx,
-            '.doc': self._process_docx,
-            '.txt': self._process_text,
-            '.md': self._process_text,
+        self.docling_processor = DoclingDocumentProcessor()
+        
+        # Fallback processors for formats not supported by Docling
+        self.fallback_processors = {
+            '.pdf': self._process_pdf_fallback,
+            '.docx': self._process_docx_fallback,
+            '.doc': self._process_docx_fallback,
+            '.txt': self._process_text_fallback,
+            '.md': self._process_text_fallback,
             '.csv': self._process_csv,
             '.xlsx': self._process_excel,
             '.xls': self._process_excel,
             '.ppt': self._process_presentation,
-            '.pptx': self._process_presentation,
-            '.html': self._process_html,
+            '.pptx': self._process_pptx_fallback,
+            '.html': self._process_html_fallback,
             '.json': self._process_json,
             '.eml': self._process_email,
             '.jpg': self._process_image,
@@ -87,11 +301,17 @@ class EnhancedDocumentProcessor:
             '.tif': self._process_image,
             '.tiff': self._process_image
         }
+        
+        # All supported extensions (Docling + fallback)
+        self.supported_extensions = set(self.fallback_processors.keys())
+        if DOCLING_AVAILABLE:
+            self.supported_extensions.update(self.docling_processor.docling_formats.keys())
     
     def process_document(self, file_path: str, method: ChunkingMethod = None, 
-                        config: ChunkingConfig = None, user_id: str = None, original_filename: str = None, document_id: int = None) -> ChunkingResult:
+                        config: ChunkingConfig = None, user_id: str = None, 
+                        original_filename: str = None, document_id: int = None) -> ChunkingResult:
         """
-        Process document with specified chunking method and configuration
+        Process document with Docling-first approach and specified chunking method
         """
         file_ext = Path(file_path).suffix.lower()
         
@@ -104,6 +324,7 @@ class EnhancedDocumentProcessor:
             source_filename = Path(original_filename).name
         else:
             source_filename = Path(file_path).name
+            
         if method is None:
             from chunking_config import FileFormatSupport
             method = FileFormatSupport.get_optimal_method(file_ext[1:])  # Remove dot
@@ -117,24 +338,47 @@ class EnhancedDocumentProcessor:
         
         logger.info(f"Processing {file_path} with method {method.value}")
         
-        # Load document content
-        loader_func = self.supported_extensions[file_ext]
-        raw_documents = loader_func(file_path)
+        # Try Docling first for supported formats
+        raw_documents = []
+        docling_used = False
+        
+        if self.docling_processor.can_process(file_path):
+            try:
+                raw_documents = self.docling_processor.process_document(file_path)
+                docling_used = True
+                logger.info(f"Successfully processed {file_path} with Docling")
+            except Exception as e:
+                logger.warning(f"Docling processing failed for {file_path}: {e}. Falling back to traditional methods.")
+        
+        # Fallback to traditional processors if Docling failed or not available
+        if not raw_documents:
+            if file_ext in self.fallback_processors:
+                loader_func = self.fallback_processors[file_ext]
+                raw_documents = loader_func(file_path)
+            else:
+                raise ValueError(f"No processor available for {file_ext}")
         
         if not raw_documents:
             raise ValueError(f"No content extracted from {file_path}")
         
         # Apply chunking method
-        chunks = self._apply_chunking_method(raw_documents, method, config)
+        chunks = self._apply_chunking_method(raw_documents, method, config, docling_used)
         
         # Add metadata to chunks - clear existing metadata first to avoid complex objects
         for i, chunk in enumerate(chunks):
+            # Preserve existing metadata and add processing info
+            existing_metadata = chunk.metadata.copy() if chunk.metadata else {}
             chunk.metadata = {  # Replace instead of update to avoid complex objects
                 'source_file': source_filename,
                 'chunk_index': i,
                 'chunking_method': method.value,
-                'total_chunks': len(chunks)
+                'total_chunks': len(chunks),
+                'processed_with_docling': docling_used
             }
+            # Add back important existing metadata
+            for key in ['content_type', 'extracted_from', 'table_index', 'page_number', 'extraction_method']:
+                if key in existing_metadata:
+                    chunk.metadata[key] = existing_metadata[key]
             
             # Add document_id if provided (needed for deletion functionality)
             if document_id is not None:
@@ -151,7 +395,9 @@ class EnhancedDocumentProcessor:
             'chunk_count': len(chunks),
             'method_used': method.value,
             'config_used': config.to_dict(),
-            'total_tokens': sum(len(chunk.page_content.split()) for chunk in chunks)
+            'total_tokens': sum(len(chunk.page_content.split()) for chunk in chunks),
+            'processed_with_docling': docling_used,
+            'processor_version': 'docling_enhanced_v2.0'
         }
         
         return ChunkingResult(
@@ -163,121 +409,155 @@ class EnhancedDocumentProcessor:
         )
     
     def _apply_chunking_method(self, documents: List[Document], method: ChunkingMethod, 
-                              config: ChunkingConfig) -> List[Document]:
-        """Apply specific chunking method to documents with automatic table detection"""
+                              config: ChunkingConfig, docling_used: bool = False) -> List[Document]:
+        """Apply specific chunking method to documents with Docling-aware processing"""
         
-        # First, check if any document contains tables and extract them
         all_chunks = []
-        table_extractor = get_table_extractor()
         
-        # Track which source files already had tables extracted during document loading
-        sources_with_tables = set()
-        for doc in documents:
-            if (doc.metadata.get('content_type') == 'table' and 
-                doc.metadata.get('extracted_from')):
-                sources_with_tables.add(doc.metadata.get('source', ''))
-        
-        for doc in documents:
-            doc_chunks = []
-            source_file = doc.metadata.get('source', '')
+        # If documents were processed with Docling, they already have proper structure
+        if docling_used:
+            logger.info("Processing Docling-extracted documents with enhanced chunking")
             
-            # Skip table extraction if:
-            # 1. Document already contains processed table content, OR
-            # 2. This source file already had tables extracted during document loading
-            if ((doc.metadata.get('content_type') == 'table' and doc.metadata.get('extracted_from')) or
-                (source_file in sources_with_tables)):
-                logger.info(f"Skipping table extraction for {source_file} - already processed during document loading")
-                # Document already contains table content, just process it normally
-                all_chunks.append(doc)
-                continue
+            # Separate tables and text for different processing
+            table_docs = [doc for doc in documents if doc.metadata.get('content_type') == 'table']
+            text_docs = [doc for doc in documents if doc.metadata.get('content_type') in ['text', 'image_text']]
             
-            # Try to extract tables if we have a file path
-            extracted_tables = []
-            if source_file and Path(source_file).exists():
-                try:
-                    extracted_tables = table_extractor.extract_tables(str(source_file))
-                    if extracted_tables:
-                        logger.info(f"Extracted {len(extracted_tables)} tables from {source_file}")
-                except Exception as e:
-                    logger.warning(f"Table extraction failed for {source_file}: {e}")
-            
-            # Process extracted tables using enhanced table-aware chunking
-            table_chunks_created = False
-            for table_info in extracted_tables:
-                table_data = table_info['data']
-                
-                # Ensure table_data is a pandas DataFrame and not empty
-                try:
-                    if (PANDAS_AVAILABLE and 
-                        isinstance(table_data, pd.DataFrame) and 
-                        not table_data.empty):
-                        
-                        # Use enhanced adaptive table chunking
-                        max_chunk_size = config.chunk_token_num if config.chunk_token_num else 1000
-                        
-                        # Get surrounding text context for better understanding
-                        surrounding_text = doc.page_content[:500] + doc.page_content[-500:]
-                        
-                        # Create contextual table chunks (includes adaptive chunking internally)
-                        table_chunks = create_contextual_table_chunks(
-                            table_data, 
-                            table_info, 
-                            surrounding_text=surrounding_text,
-                            max_chunk_size=max_chunk_size
-                        )
-                        
-                        # Convert to Document objects
-                        for chunk_data in table_chunks:
-                            chunk_metadata = chunk_data['metadata']
-                            chunk_metadata['chunking_method'] = f"{method.value}_table_aware"
-                            chunk_metadata.update(doc.metadata)  # Include original document metadata
-                            
-                            chunk = Document(
-                                page_content=chunk_data['content'],
-                                metadata=chunk_metadata
-                            )
-                            doc_chunks.append(chunk)
-                        
-                        table_chunks_created = True
-                except Exception as e:
-                    logger.warning(f"Failed to process table data: {e}")
-                    # Skip this table and continue with others
-            
-            # If tables were successfully extracted, return only table chunks (no text processing)
-            if table_chunks_created:
-                logger.info(f"Detected table content in document, using table chunks only")
-                all_chunks.extend(doc_chunks)
-                continue  # Skip text processing for this document
-            
-            # Now process the document content based on the selected method
-            # Only use table-aware processing if no tables were extracted via table extractor
-            if method == ChunkingMethod.GENERAL:
-                # Use table-aware chunking for text-based table detection
-                method_chunks = self._chunk_general_table_aware([doc], config)
-            elif method == ChunkingMethod.QA:
-                method_chunks = self._chunk_qa_table_aware([doc], config)
-            elif method == ChunkingMethod.RESUME:
-                method_chunks = self._chunk_resume_table_aware([doc], config)
-            elif method == ChunkingMethod.TABLE:
-                # Pass extracted_tables to avoid re-extraction
-                method_chunks = self._chunk_table([doc], config, extracted_tables)
-            elif method == ChunkingMethod.PRESENTATION:
-                method_chunks = self._chunk_presentation([doc], config)
-            elif method == ChunkingMethod.PICTURE:
-                method_chunks = self._chunk_picture([doc], config)
-            elif method == ChunkingMethod.EMAIL:
-                method_chunks = self._chunk_email([doc], config)
-            else:
-                # Default to general chunking
-                if table_chunks_created:
-                    method_chunks = self._chunk_general([doc], config)
+            # Process tables with table-specific chunking
+            for table_doc in table_docs:
+                # Tables from Docling are already well-structured, just apply method-specific processing
+                if method in [ChunkingMethod.TABLE, ChunkingMethod.GENERAL]:
+                    # Keep table structure intact for table-focused methods
+                    all_chunks.append(table_doc)
                 else:
-                    method_chunks = self._chunk_general_table_aware([doc], config)
+                    # For other methods, apply standard chunking to table content
+                    table_chunks = self._apply_method_to_documents([table_doc], method, config)
+                    all_chunks.extend(table_chunks)
             
-            doc_chunks.extend(method_chunks)
-            all_chunks.extend(doc_chunks)
+            # Process text documents
+            for text_doc in text_docs:
+                text_chunks = self._apply_method_to_documents([text_doc], method, config)
+                all_chunks.extend(text_chunks)
+                
+        else:
+            # Fallback processing - use existing table-aware logic
+            table_extractor = get_table_extractor()
+            
+            # Track which source files already had tables extracted during document loading
+            sources_with_tables = set()
+            table_documents = []
+            text_documents = []
+            
+            # Separate table and text documents, and track sources with tables
+            for doc in documents:
+                if doc.metadata.get('content_type') == 'table' and doc.metadata.get('extracted_from'):
+                    table_documents.append(doc)
+                    source_file = doc.metadata.get('source', '')
+                    if source_file:
+                        sources_with_tables.add(source_file)
+                else:
+                    text_documents.append(doc)
+            
+            # Process table documents directly (they're already processed)
+            logger.info(f"Found {len(table_documents)} pre-processed table documents")
+            for table_doc in table_documents:
+                all_chunks.append(table_doc)
+            
+            # Process text documents, but skip table extraction if tables were already extracted for this file
+            logger.info(f"Processing {len(text_documents)} text documents")
+            for doc in text_documents:
+                source_file = doc.metadata.get('source', '')
+                
+                # Skip table extraction if we already have tables from this source file
+                if source_file in sources_with_tables:
+                    logger.info(f"Skipping table extraction for {source_file} - tables already extracted during document loading")
+                    # Process only as text content
+                    method_chunks = self._apply_method_to_documents([doc], method, config)
+                    all_chunks.extend(method_chunks)
+                    continue
+                
+                # For sources without pre-extracted tables, attempt table extraction
+                doc_chunks = []
+                extracted_tables = []
+                if source_file and Path(source_file).exists():
+                    try:
+                        extracted_tables = table_extractor.extract_tables(str(source_file))
+                        if extracted_tables:
+                            logger.info(f"Extracted {len(extracted_tables)} tables from {source_file} during chunking")
+                            # Mark this source as having tables to avoid re-extraction
+                            sources_with_tables.add(source_file)
+                    except Exception as e:
+                        logger.warning(f"Table extraction failed for {source_file}: {e}")
+                
+                # Process extracted tables using enhanced table-aware chunking
+                table_chunks_created = False
+                for table_info in extracted_tables:
+                    table_data = table_info['data']
+                    
+                    try:
+                        if (PANDAS_AVAILABLE and 
+                            isinstance(table_data, pd.DataFrame) and 
+                            not table_data.empty):
+                            
+                            max_chunk_size = config.chunk_token_num if config.chunk_token_num else 1000
+                            surrounding_text = doc.page_content[:500] + doc.page_content[-500:]
+                            
+                            table_chunks = create_contextual_table_chunks(
+                                table_data, 
+                                table_info, 
+                                surrounding_text=surrounding_text,
+                                max_chunk_size=max_chunk_size
+                            )
+                            
+                            for chunk_data in table_chunks:
+                                chunk_metadata = chunk_data['metadata']
+                                chunk_metadata['chunking_method'] = f"{method.value}_table_aware"
+                                chunk_metadata.update(doc.metadata)
+                                
+                                chunk = Document(
+                                    page_content=chunk_data['content'],
+                                    metadata=chunk_metadata
+                                )
+                                doc_chunks.append(chunk)
+                            
+                            table_chunks_created = True
+                    except Exception as e:
+                        logger.warning(f"Failed to process table data: {e}")
+                
+                # Add table chunks if they were created
+                if table_chunks_created:
+                    logger.info(f"Detected table content in document, adding {len(doc_chunks)} table chunks")
+                    all_chunks.extend(doc_chunks)
+                
+                # Always process text content as well (unless document is purely tables)
+                if doc.metadata.get('content_type') != 'table':
+                    method_chunks = self._apply_method_to_documents([doc], method, config)
+                    all_chunks.extend(method_chunks)
+                else:
+                    logger.info(f"Skipping text processing for pure table document")
         
         return all_chunks
+    
+    def _apply_method_to_documents(self, documents: List[Document], method: ChunkingMethod, 
+                                  config: ChunkingConfig) -> List[Document]:
+        """Apply specific chunking method to documents"""
+        
+        if method == ChunkingMethod.GENERAL:
+            return self._chunk_general_table_aware(documents, config)
+        elif method == ChunkingMethod.QA:
+            return self._chunk_qa_table_aware(documents, config)
+        elif method == ChunkingMethod.RESUME:
+            return self._chunk_resume_table_aware(documents, config)
+        elif method == ChunkingMethod.TABLE:
+            return self._chunk_table(documents, config)
+        elif method == ChunkingMethod.PRESENTATION:
+            return self._chunk_presentation(documents, config)
+        elif method == ChunkingMethod.PICTURE:
+            return self._chunk_picture(documents, config)
+        elif method == ChunkingMethod.EMAIL:
+            return self._chunk_email(documents, config)
+        else:
+            # Default to general chunking with table awareness
+            return self._chunk_general_table_aware(documents, config)
     
     def _chunk_general(self, documents: List[Document], config: ChunkingConfig) -> List[Document]:
         """Standard recursive character text splitting"""
@@ -374,6 +654,67 @@ class EnhancedDocumentProcessor:
         for doc in documents:
             content = doc.page_content
             source_file = doc.metadata.get('source', '')
+            
+            # Check if this is pre-extracted table data
+            if doc.metadata.get('content_type') == 'table' and doc.metadata.get('table_data'):
+                # This is already extracted table data - format as table chunks
+                table_data = doc.metadata['table_data']
+                
+                try:
+                    if isinstance(table_data, dict):
+                        # Single table - create contextual chunks
+                        max_chunk_size = config.chunk_token_num if config.chunk_token_num else 1000
+                        surrounding_text = doc.page_content[:500] + doc.page_content[-500:]
+                        
+                        table_chunks = create_contextual_table_chunks(
+                            table_data.get('data'), 
+                            table_data, 
+                            surrounding_text=surrounding_text,
+                            max_chunk_size=max_chunk_size
+                        )
+                        
+                        for chunk_data in table_chunks:
+                            chunk_metadata = chunk_data['metadata']
+                            chunk_metadata.update(doc.metadata)
+                            
+                            chunk = Document(
+                                page_content=chunk_data['content'],
+                                metadata=chunk_metadata
+                            )
+                            chunks.append(chunk)
+                            
+                    elif isinstance(table_data, list):
+                        # Multiple tables
+                        for table in table_data:
+                            max_chunk_size = config.chunk_token_num if config.chunk_token_num else 1000
+                            surrounding_text = doc.page_content[:500] + doc.page_content[-500:]
+                            
+                            table_chunks = create_contextual_table_chunks(
+                                table.get('data'), 
+                                table, 
+                                surrounding_text=surrounding_text,
+                                max_chunk_size=max_chunk_size
+                            )
+                            
+                            for chunk_data in table_chunks:
+                                chunk_metadata = chunk_data['metadata']
+                                chunk_metadata.update(doc.metadata)
+                                
+                                chunk = Document(
+                                    page_content=chunk_data['content'],
+                                    metadata=chunk_metadata
+                                )
+                                chunks.append(chunk)
+                                
+                except Exception as e:
+                    logger.warning(f"Failed to process pre-extracted table data: {e}")
+                    
+                continue  # Move to next document
+            
+            # Check if tables were already extracted at file level
+            if doc.metadata.get('file_tables_extracted'):
+                logger.info(f"Skipping table extraction for {doc.metadata.get('source_file_path', 'unknown')} - tables already extracted at file level")
+                continue  # Skip table extraction for text docs when tables already extracted
             
             # Use pre-extracted tables if available to avoid duplicate extraction
             extracted_tables = pre_extracted_tables if pre_extracted_tables else []
@@ -1128,13 +1469,17 @@ class EnhancedDocumentProcessor:
     
 
     
-    # Document loading methods
-    def _process_pdf(self, file_path: str) -> List[Document]:
-        """Process PDF files with table extraction"""
+    # Fallback document loading methods (used when Docling is not available or fails)
+    def _process_pdf_fallback(self, file_path: str) -> List[Document]:
+        """Fallback PDF processing when Docling is not available"""
         documents = []
         table_extractor = get_table_extractor()
         
         try:
+            if not ADVANCED_LOADERS_AVAILABLE:
+                logger.error("No PDF processing capability available")
+                return []
+                
             # First load the PDF with standard text extraction
             loader = PyPDFLoader(file_path)
             text_documents = loader.load()
@@ -1176,7 +1521,8 @@ class EnhancedDocumentProcessor:
                                     chunk_metadata = {
                                         'source': Path(file_path).name,
                                         'content_type': 'table',
-                                        'extracted_from': 'pdf',
+                                        'extracted_from': 'pdf_fallback',
+                                        'extraction_method': 'fallback_table_extractor',
                                         'chunk_type': chunk_data.get('chunk_type', 'adaptive'),
                                         'chunk_index': chunk_data.get('chunk_index', 0),
                                         'original_table_rows': chunk_data.get('original_table_rows', len(table_data)),
@@ -1199,27 +1545,37 @@ class EnhancedDocumentProcessor:
             except Exception as e:
                 logger.warning(f"Table extraction failed for PDF {file_path}: {e}")
             
-            # Only add text documents if no tables were extracted
-            # This prevents duplicate table processing
-            if not table_documents_created:
-                # Process text documents and check for table-like content
-                for doc in text_documents:
-                    content = doc.page_content
-                    
-                    # Check if this page contains table-like structures
-                    if detect_table_in_text(content):
-                        # Mark as containing tables
-                        doc.metadata.update({
-                            'content_type': 'mixed',
-                            'contains_tables': True
-                        })
-                    else:
-                        doc.metadata.update({
-                            'content_type': 'text',
-                            'contains_tables': False
-                        })
-                    
-                    documents.append(doc)
+            # Always add text documents in addition to tables
+            # Process text documents and check for table-like content
+            for doc in text_documents:
+                content = doc.page_content
+                
+                # Mark that tables have been extracted at file level (if any were found)
+                doc.metadata.update({
+                    'file_tables_extracted': table_documents_created,
+                    'source_file_path': file_path  # Keep track of source file path
+                })
+                
+                # Check if this page contains table-like structures
+                if detect_table_in_text(content):
+                    # Mark as containing tables
+                    doc.metadata.update({
+                        'content_type': 'mixed',
+                        'contains_tables': True,
+                        'extraction_method': 'fallback_text'
+                    })
+                else:
+                    doc.metadata.update({
+                        'content_type': 'text',
+                        'contains_tables': False,
+                        'extraction_method': 'fallback_text'
+                    })
+                
+                documents.append(doc)
+            
+            logger.info(f"PDF processing result: {len(documents)} documents total "
+                       f"(tables: {sum(1 for d in documents if d.metadata.get('content_type') == 'table')}, "
+                       f"text: {sum(1 for d in documents if d.metadata.get('content_type') in ['text', 'mixed'])})")
             
             return documents
             
@@ -1227,32 +1583,65 @@ class EnhancedDocumentProcessor:
             logger.error(f"Failed to process PDF {file_path}: {e}")
             return []
     
-    def _process_docx(self, file_path: str) -> List[Document]:
-        """Process DOCX files"""
+    def _process_docx_fallback(self, file_path: str) -> List[Document]:
+        """Fallback DOCX processing when Docling is not available"""
         if ADVANCED_LOADERS_AVAILABLE:
             try:
                 loader = Docx2txtLoader(file_path)
-                return loader.load()
+                docs = loader.load()
+                # Add extraction method metadata
+                for doc in docs:
+                    doc.metadata.update({
+                        'extraction_method': 'fallback_docx',
+                        'content_type': 'text'
+                    })
+                return docs
             except Exception as e:
                 logger.error(f"Failed to process DOCX {file_path}: {e}")
         
         # Fallback to simple text reading
-        return self._process_text(file_path)
+        return self._process_text_fallback(file_path)
     
-    def _process_text(self, file_path: str) -> List[Document]:
-        """Process text files"""
+    def _process_text_fallback(self, file_path: str) -> List[Document]:
+        """Fallback text processing when Docling is not available"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
             return [Document(
                 page_content=content,
-                metadata={'source': Path(file_path).name}  # Use filename only
+                metadata={
+                    'source': Path(file_path).name,
+                    'extraction_method': 'fallback_text',
+                    'content_type': 'text'
+                }
             )]
         except Exception as e:
             logger.error(f"Failed to process text file {file_path}: {e}")
             return []
     
+    def _process_html_fallback(self, file_path: str) -> List[Document]:
+        """Fallback HTML processing when Docling is not available"""
+        return self._process_text_fallback(file_path)  # Simple text fallback
+    
+    def _process_pptx_fallback(self, file_path: str) -> List[Document]:
+        """Fallback PPTX processing when Docling is not available"""
+        if ADVANCED_LOADERS_AVAILABLE:
+            try:
+                loader = UnstructuredPowerPointLoader(file_path)
+                docs = loader.load()
+                # Add extraction method metadata
+                for doc in docs:
+                    doc.metadata.update({
+                        'extraction_method': 'fallback_pptx',
+                        'content_type': 'presentation'
+                    })
+                return docs
+            except Exception as e:
+                logger.error(f"Failed to process PPTX {file_path}: {e}")
+        
+        return []
+
     def _process_csv(self, file_path: str) -> List[Document]:
         """Process CSV files with proper table extraction"""
         documents = []
