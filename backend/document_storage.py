@@ -58,22 +58,22 @@ class DocumentStorageService:
             raise
 
     def get_document(self, document_id: int) -> Optional[Dict]:
-        """Get document by ID with user_id from ingestion metadata"""
+        """Get document by ID with metadata from ingestion_metadata"""
         try:
             # Get basic document info
             doc_info = self._get_document_by_id(document_id)
             if not doc_info:
                 return None
             
-            # Get additional info from ingestion metadata including user_id
+            # Get additional info from ingestion metadata (without user_id since it doesn't exist)
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             
             cursor.execute('''
-                SELECT user_id, status, error_message, embedding_model 
+                SELECT ingestion_status, error_message, embedding_model 
                 FROM ingestion_metadata 
                 WHERE document_id = ? 
-                ORDER BY created_at DESC 
+                ORDER BY ingested_at DESC 
                 LIMIT 1
             ''', (document_id,))
             
@@ -81,12 +81,20 @@ class DocumentStorageService:
             conn.close()
             
             if ingestion_row:
-                doc_info['user_id'] = ingestion_row[0]
-                doc_info['status'] = ingestion_row[1]
-                doc_info['error_message'] = ingestion_row[2]
-                doc_info['embedding_model'] = ingestion_row[3]
+                doc_info['status'] = ingestion_row[0]
+                doc_info['error_message'] = ingestion_row[1]
+                doc_info['embedding_model'] = ingestion_row[2]
+            else:
+                # No ingestion metadata found, set default status
+                doc_info['status'] = 'not_ingested'
+                doc_info['error_message'] = None
+                doc_info['embedding_model'] = None
             
             return doc_info
+            
+        except Exception as e:
+            logger.error(f"Error getting document {document_id}: {e}")
+            return None
             
         except Exception as e:
             logger.error(f"Error getting document {document_id}: {e}")
@@ -114,6 +122,238 @@ class DocumentStorageService:
             
         except Exception as e:
             logger.error(f"Failed to get file content for document {document_id}: {e}")
+            return None
+
+    def get_document_info(self, document_id: int) -> Optional[Dict]:
+        """Get document information - alias for get_document method"""
+        return self.get_document(document_id)
+    
+    def get_document_content(self, document_id: int) -> Optional[str]:
+        """Get document text content for dataset generation using enhanced document processor"""
+        try:
+            # Use enhanced document processor for better text extraction
+            temp_file_path = self.get_temp_file_path(document_id)
+            if not temp_file_path:
+                return None
+            
+            try:
+                from enhanced_document_processor import get_document_processor
+                processor = get_document_processor()
+                
+                # Extract text using enhanced document processor
+                documents = processor.process_document(temp_file_path)
+                
+                # Combine all text content
+                combined_text = []
+                for doc in documents:
+                    if hasattr(doc, 'page_content') and doc.page_content:
+                        combined_text.append(doc.page_content.strip())
+                
+                if combined_text:
+                    return '\n\n'.join(combined_text)
+                
+            except Exception as e:
+                logger.warning(f"Enhanced document processor failed for document {document_id}: {e}")
+                # Fallback to basic content extraction
+                return self._get_basic_document_content(document_id)
+            
+            finally:
+                # Clean up temporary file
+                try:
+                    if temp_file_path and Path(temp_file_path).exists():
+                        Path(temp_file_path).unlink()
+                except Exception as e:
+                    logger.warning(f"Could not clean up temporary file {temp_file_path}: {e}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to get document content for {document_id}: {e}")
+            return None
+
+    def get_document_content_for_dataset(self, document_id: int) -> Optional[str]:
+        """Get raw document text content for dataset generation WITHOUT chunking"""
+        try:
+            # Use enhanced document processor but extract raw text without chunking
+            temp_file_path = self.get_temp_file_path(document_id)
+            if not temp_file_path:
+                return None
+            
+            try:
+                from enhanced_document_processor import get_document_processor
+                processor = get_document_processor()
+                
+                # Try to extract using enhanced document processor first
+                try:
+                    # Process document to get raw text content
+                    result = processor.process_document(temp_file_path)
+                    
+                    # Extract documents from ChunkingResult
+                    if hasattr(result, 'chunks'):
+                        documents = result.chunks
+                    else:
+                        documents = result  # fallback if it's already a list
+                    
+                    # Combine all text content without chunking
+                    combined_text = []
+                    for doc in documents:
+                        if hasattr(doc, 'page_content') and doc.page_content:
+                            combined_text.append(doc.page_content.strip())
+                    
+                    if combined_text:
+                        return '\n\n'.join(combined_text)
+                        
+                except Exception as e:
+                    logger.warning(f"Enhanced document processor failed for document {document_id}: {e}")
+                
+                # Fallback to basic loader methods
+                file_ext = Path(temp_file_path).suffix.lower()
+                
+                if file_ext == '.pdf':
+                    try:
+                        from langchain_community.document_loaders import PyPDFLoader
+                        loader = PyPDFLoader(temp_file_path)
+                        documents = loader.load()
+                        combined_text = []
+                        for doc in documents:
+                            if hasattr(doc, 'page_content') and doc.page_content:
+                                combined_text.append(doc.page_content.strip())
+                        if combined_text:
+                            return '\n\n'.join(combined_text)
+                    except Exception as e:
+                        logger.warning(f"PyPDF extraction failed: {e}")
+                
+                elif file_ext in ['.docx', '.doc']:
+                    try:
+                        from langchain_community.document_loaders import Docx2txtLoader
+                        loader = Docx2txtLoader(temp_file_path)
+                        documents = loader.load()
+                        if documents and hasattr(documents[0], 'page_content'):
+                            return documents[0].page_content.strip()
+                    except Exception as e:
+                        logger.warning(f"DOCX extraction failed: {e}")
+                
+                elif file_ext in ['.pptx', '.ppt']:
+                    try:
+                        from langchain_community.document_loaders import UnstructuredPowerPointLoader
+                        loader = UnstructuredPowerPointLoader(temp_file_path)
+                        documents = loader.load()
+                        combined_text = []
+                        for doc in documents:
+                            if hasattr(doc, 'page_content') and doc.page_content:
+                                combined_text.append(doc.page_content.strip())
+                        if combined_text:
+                            return '\n\n'.join(combined_text)
+                    except Exception as e:
+                        logger.warning(f"PowerPoint extraction failed: {e}")
+                
+                elif file_ext in ['.xlsx', '.xls', '.csv']:
+                    try:
+                        import pandas as pd
+                        if file_ext == '.csv':
+                            df = pd.read_csv(temp_file_path)
+                        else:
+                            df = pd.read_excel(temp_file_path)
+                        
+                        # Convert dataframe to readable text
+                        text_content = f"Spreadsheet Content:\n\n{df.to_string(index=False)}"
+                        return text_content
+                    except Exception as e:
+                        logger.warning(f"Spreadsheet extraction failed: {e}")
+                
+                elif file_ext in ['.txt', '.md']:
+                    try:
+                        with open(temp_file_path, 'r', encoding='utf-8') as f:
+                            return f.read().strip()
+                    except Exception as e:
+                        logger.warning(f"Text file extraction failed: {e}")
+                
+                # Final fallback to basic content extraction
+                return self._get_basic_document_content(document_id)
+                
+            finally:
+                # Clean up temporary file
+                try:
+                    if temp_file_path and Path(temp_file_path).exists():
+                        Path(temp_file_path).unlink()
+                except Exception as e:
+                    logger.warning(f"Could not clean up temporary file {temp_file_path}: {e}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to get raw document content for dataset generation {document_id}: {e}")
+            return None
+
+    def get_temp_file_path(self, document_id: int) -> Optional[str]:
+        """Download file to temporary location and return path"""
+        try:
+            import tempfile
+            import os
+            
+            # Get document metadata
+            doc_info = self._get_document_by_id(document_id)
+            if not doc_info:
+                return None
+            
+            # Get file content
+            file_content = self.get_file_content(document_id)
+            if not file_content:
+                return None
+            
+            # Create temporary file with proper extension
+            filename = doc_info['filename']
+            file_ext = Path(filename).suffix
+            
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+                temp_file.write(file_content)
+                temp_file_path = temp_file.name
+            
+            return temp_file_path
+            
+        except Exception as e:
+            logger.error(f"Failed to create temporary file for document {document_id}: {e}")
+            return None
+
+    def _get_basic_document_content(self, document_id: int) -> Optional[str]:
+        """Basic document content extraction (fallback method)"""
+        try:
+            # Get file content as bytes
+            file_content = self.get_file_content(document_id)
+            if not file_content:
+                return None
+            
+            # Get document info to check content type
+            doc_info = self.get_document(document_id)
+            if not doc_info:
+                return None
+            
+            content_type = doc_info.get('content_type', '').lower()
+            
+            # For text files, decode directly
+            if 'text' in content_type or 'json' in content_type:
+                try:
+                    return file_content.decode('utf-8')
+                except UnicodeDecodeError:
+                    return file_content.decode('latin-1')
+            
+            # For PDFs and other document types, we'd need to extract text
+            # For now, try to decode as text anyway (fallback)
+            try:
+                text_content = file_content.decode('utf-8')
+                # Basic check if it looks like readable text
+                if len(text_content.strip()) > 0:
+                    return text_content
+            except UnicodeDecodeError:
+                pass
+            
+            # If we can't decode as text, return a placeholder
+            logger.warning(f"Could not extract text content from document {document_id} with content type {content_type}")
+            return f"[Content from {doc_info.get('filename', 'document')} - {content_type}]"
+            
+        except Exception as e:
+            logger.error(f"Failed to get basic document content for {document_id}: {e}")
             return None
 
     def update_document_status(self, document_id: int, status: str, error_message: str = None):

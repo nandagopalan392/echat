@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import time
+from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,84 @@ class ChatDB:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(user_id)
+                    )
+                ''')
+
+                # Create evaluation metrics table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS evaluation_metrics (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id INTEGER,
+                        message_id INTEGER,
+                        query TEXT NOT NULL,
+                        response TEXT NOT NULL,
+                        context TEXT,
+                        groundedness_score REAL,
+                        context_relevance_score REAL,
+                        answer_quality_score REAL,
+                        latency_ms INTEGER,
+                        evaluated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (session_id) REFERENCES chat_sessions (id),
+                        FOREIGN KEY (message_id) REFERENCES messages (id)
+                    )
+                ''')
+
+                # Create evaluation datasets table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS evaluation_datasets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL UNIQUE,
+                        description TEXT,
+                        document_count INTEGER DEFAULT 0,
+                        status TEXT DEFAULT 'Processing',
+                        created_by TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        file_path TEXT,
+                        FOREIGN KEY (created_by) REFERENCES users (username)
+                    )
+                ''')
+
+                # Add file_path column to existing evaluation_datasets table if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE evaluation_datasets ADD COLUMN file_path TEXT")
+                    logger.info("Added file_path column to evaluation_datasets table")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" in str(e).lower():
+                        logger.debug("file_path column already exists in evaluation_datasets table")
+                    else:
+                        logger.warning(f"Could not add file_path column: {e}")
+
+                # Create evaluation dataset documents mapping table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS evaluation_dataset_documents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dataset_id INTEGER NOT NULL,
+                        document_id INTEGER NOT NULL,
+                        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (dataset_id) REFERENCES evaluation_datasets (id) ON DELETE CASCADE,
+                        FOREIGN KEY (document_id) REFERENCES files (id) ON DELETE CASCADE,
+                        UNIQUE(dataset_id, document_id)
+                    )
+                ''')
+
+                # Create evaluation results table
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS evaluation_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dataset_id INTEGER NOT NULL,
+                        model_name TEXT NOT NULL,
+                        groundedness_score REAL,
+                        context_relevance_score REAL,
+                        answer_quality_score REAL,
+                        avg_latency REAL,
+                        total_queries INTEGER DEFAULT 0,
+                        status TEXT DEFAULT 'Running',
+                        run_by TEXT NOT NULL,
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TIMESTAMP,
+                        FOREIGN KEY (dataset_id) REFERENCES evaluation_datasets (id) ON DELETE CASCADE,
+                        FOREIGN KEY (run_by) REFERENCES users (username)
                     )
                 ''')
 
@@ -1253,3 +1332,203 @@ class ChatDB:
     def get_default_retrieval_config(self):
         """Get default retrieval configuration."""
         return self.get_user_retrieval_config('default')
+
+    def dataset_name_exists(self, name: str, created_by: str = None) -> bool:
+        """Check if a dataset name already exists"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                if created_by:
+                    # Check for same user only
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM evaluation_datasets 
+                        WHERE name = ? AND created_by = ?
+                    ''', (name, created_by))
+                else:
+                    # Check globally
+                    cursor.execute('''
+                        SELECT COUNT(*) FROM evaluation_datasets 
+                        WHERE name = ?
+                    ''', (name,))
+                
+                count = cursor.fetchone()[0]
+                return count > 0
+        except Exception as e:
+            logger.error(f"Error checking dataset name existence: {e}")
+            return False
+
+    def create_evaluation_dataset(self, name: str, description: str, document_count: int, 
+                                 created_by: str, file_path: str = None) -> int:
+        """Create a new evaluation dataset record"""
+        try:
+            # Check if name already exists
+            if self.dataset_name_exists(name, created_by):
+                raise ValueError(f"Dataset name '{name}' already exists. Please choose a different name.")
+            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO evaluation_datasets 
+                    (name, description, document_count, status, created_by, file_path)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (name, description, document_count, 'Processing', created_by, file_path))
+                conn.commit()
+                dataset_id = cursor.lastrowid
+                logger.info(f"Created evaluation dataset: {name} with ID {dataset_id}")
+                return dataset_id
+        except Exception as e:
+            logger.error(f"Error creating evaluation dataset: {e}")
+            raise
+
+    def update_evaluation_dataset_status(self, dataset_id: int, status: str, 
+                                        file_path: str = None, question_count: int = None):
+        """Update evaluation dataset status and metadata"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                if file_path and question_count is not None:
+                    cursor.execute('''
+                        UPDATE evaluation_datasets 
+                        SET status = ?, file_path = ?, document_count = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (status, file_path, question_count, dataset_id))
+                else:
+                    cursor.execute('''
+                        UPDATE evaluation_datasets 
+                        SET status = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (status, dataset_id))
+                conn.commit()
+                logger.info(f"Updated dataset {dataset_id} status to {status}")
+        except Exception as e:
+            logger.error(f"Error updating dataset {dataset_id}: {e}")
+            raise
+
+    def get_evaluation_datasets(self) -> List[Dict]:
+        """Get all evaluation datasets"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, name, description, document_count, status, created_by, 
+                           created_at, updated_at, file_path
+                    FROM evaluation_datasets 
+                    ORDER BY created_at DESC
+                ''')
+                rows = cursor.fetchall()
+                
+                datasets = []
+                for row in rows:
+                    dataset = {
+                        "id": row[0],
+                        "name": row[1],
+                        "description": row[2],
+                        "document_count": row[3],
+                        "status": row[4],
+                        "created_by": row[5],
+                        "created_at": row[6],
+                        "updated_at": row[7],
+                        "file_path": row[8]
+                    }
+                    datasets.append(dataset)
+                
+                logger.info(f"Retrieved {len(datasets)} evaluation datasets")
+                return datasets
+                
+        except Exception as e:
+            logger.error(f"Error getting evaluation datasets: {e}")
+            return []
+
+    def get_evaluation_dataset_by_id(self, dataset_id: int) -> Optional[Dict]:
+        """Get a specific evaluation dataset by ID"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, name, description, document_count, status, created_by, 
+                           created_at, updated_at, file_path
+                    FROM evaluation_datasets 
+                    WHERE id = ?
+                ''', (dataset_id,))
+                row = cursor.fetchone()
+                
+                if row:
+                    dataset = {
+                        "id": row[0],
+                        "name": row[1],
+                        "description": row[2],
+                        "document_count": row[3],
+                        "status": row[4],
+                        "created_by": row[5],
+                        "created_at": row[6],
+                        "updated_at": row[7],
+                        "file_path": row[8]
+                    }
+                    return dataset
+                else:
+                    return None
+                
+        except Exception as e:
+            logger.error(f"Error getting evaluation dataset {dataset_id}: {e}")
+            return None
+
+    def get_evaluation_dataset(self, dataset_id: int) -> Dict:
+        """Get a specific evaluation dataset"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, name, description, document_count, status, created_by, 
+                           created_at, updated_at, file_path
+                    FROM evaluation_datasets 
+                    WHERE id = ?
+                ''', (dataset_id,))
+                row = cursor.fetchone()
+                
+                if row:
+                    dataset = {
+                        "id": row[0],
+                        "name": row[1],
+                        "description": row[2],
+                        "document_count": row[3],
+                        "status": row[4],
+                        "created_by": row[5],
+                        "created_at": row[6],
+                        "updated_at": row[7],
+                        "file_path": row[8]
+                    }
+                    return dataset
+                
+        except Exception as e:
+            logger.error(f"Error getting dataset {dataset_id}: {e}")
+        
+        return None
+
+    def delete_evaluation_dataset(self, dataset_id: int) -> bool:
+        """Delete an evaluation dataset"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM evaluation_datasets WHERE id = ?', (dataset_id,))
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    logger.info(f"Deleted evaluation dataset {dataset_id}")
+                    return True
+                else:
+                    logger.warning(f"Dataset {dataset_id} not found for deletion")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Error deleting dataset {dataset_id}: {e}")
+            return False
+
+# Global instance for database access
+_chat_db_instance = None
+
+def get_chat_db():
+    """Get or create a ChatDB instance"""
+    global _chat_db_instance
+    if _chat_db_instance is None:
+        _chat_db_instance = ChatDB()
+    return _chat_db_instance

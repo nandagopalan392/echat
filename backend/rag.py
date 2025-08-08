@@ -1872,11 +1872,53 @@ class ChatPDF:
             
             # Get the response
             response = chain.invoke({"context": context, "question": question})
+            
+            # Perform evaluation asynchronously (fire and forget)
+            self._evaluate_response_async(question, response, context)
+            
             return response
                 
         except Exception as e:
             logger.error(f"Error in query: {e}")
             return f"An error occurred while processing your question: {str(e)}"
+    
+    def _evaluate_response_async(self, question: str, response: str, context: str):
+        """Perform evaluation asynchronously without blocking the response"""
+        try:
+            # Import evaluation system
+            from evaluation_system import evaluate_chat_response
+            
+            # Run evaluation in background
+            import asyncio
+            import threading
+            
+            def run_evaluation():
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    
+                    # Run the evaluation
+                    result = loop.run_until_complete(
+                        evaluate_chat_response(
+                            question=question,
+                            answer=response,
+                            context=context
+                        )
+                    )
+                    
+                    logger.info(f"Background evaluation completed - Overall: {result.overall_score:.3f}")
+                    
+                except Exception as e:
+                    logger.warning(f"Background evaluation failed: {e}")
+                finally:
+                    loop.close()
+            
+            # Start evaluation in background thread
+            thread = threading.Thread(target=run_evaluation, daemon=True)
+            thread.start()
+            
+        except Exception as e:
+            logger.warning(f"Could not start background evaluation: {e}")
     
     def _backup_vector_store_to_minio(self, collection_name: str):
         """Backup vector store collection to MinIO"""

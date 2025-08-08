@@ -4,6 +4,29 @@ import { api } from '../services/api';
 import FolderUploadReview from '../components/FolderUploadReview';
 import FileUploadReview from '../components/FileUploadReview';
 import DocumentReingestionModal from '../components/DocumentReingestionModal';
+import {
+    Box,
+    Drawer,
+    List,
+    ListItemButton,
+    ListItemIcon,
+    ListItemText,
+    Typography,
+    IconButton,
+    Divider,
+    ThemeProvider,
+} from '@mui/material';
+import {
+    ArrowBack,
+    Description,
+    Settings,
+    Search,
+    Storage as StorageIcon,
+    CloudUpload as CloudUploadIcon,
+    Folder as FolderIcon,
+    Article as ArticleIcon,
+} from '@mui/icons-material';
+import { theme } from '../theme';
 
 // Add custom styles for resizable table
 const tableStyles = `
@@ -1347,133 +1370,322 @@ const KnowledgeHubPage = () => {
             )}
 
             {/* Sidebar */}
-            <div className="w-64 bg-white shadow-lg">
-                <div className="p-6 border-b border-gray-200">
-                    <div className="flex items-center">
-                        <button
+            <Drawer
+                variant="permanent"
+                sx={{
+                    width: 280,
+                    flexShrink: 0,
+                    '& .MuiDrawer-paper': {
+                        width: 280,
+                        boxSizing: 'border-box',
+                        bgcolor: '#ffffff',
+                        borderRight: '1px solid #f1f5f9',
+                        boxShadow: '0px 4px 6px rgba(0, 0, 0, 0.07), 0px 2px 4px rgba(0, 0, 0, 0.06)',
+                        background: 'linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)',
+                    },
+                }}
+            >
+                <Box sx={{ p: 3 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+                        <IconButton
+                            edge="start"
                             onClick={() => navigate('/chat')}
-                            className="mr-3 p-2 text-gray-400 hover:text-gray-600"
+                            sx={{ 
+                                mr: 2,
+                                color: '#64748b',
+                                borderRadius: '10px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    color: '#2563eb',
+                                    transform: 'scale(1.05)',
+                                },
+                            }}
                         >
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                            </svg>
-                        </button>
-                        <h1 className="text-xl font-bold text-gray-900">Knowledge Hub</h1>
-                    </div>
-                </div>
-                
-                <div className="p-4">
-                    <nav className="space-y-2">
-                        <button
+                            <ArrowBack />
+                        </IconButton>
+                        <StorageIcon sx={{ 
+                            mr: 1, 
+                            color: '#2563eb',
+                            fontSize: '1.5rem',
+                        }} />
+                        <Typography variant="h6" sx={{ 
+                            fontWeight: 700,
+                            color: '#0f172a',
+                            fontSize: '1.125rem',
+                        }}>
+                            Knowledge Hub
+                        </Typography>
+                    </Box>
+                    <Divider sx={{ 
+                        mb: 3,
+                        borderColor: 'rgba(148, 163, 184, 0.2)',
+                    }} />
+                    
+                    {/* Navigation Items */}
+                    <List sx={{ p: 0 }}>
+                        <ListItemButton
+                            selected={activeTab === 'documents'}
                             onClick={() => setActiveTab('documents')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'documents' 
-                                    ? 'bg-indigo-50 text-indigo-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
+                            sx={{ 
+                                borderRadius: '12px', 
+                                mb: 1,
+                                margin: '4px 0',
+                                padding: '12px 16px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    transform: 'translateX(4px)',
+                                },
+                                '&.Mui-selected': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                    color: '#2563eb',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                    },
+                                    '& .MuiListItemIcon-root': {
+                                        color: '#2563eb',
+                                    },
+                                    '& .MuiListItemText-primary': {
+                                        color: '#2563eb',
+                                        fontWeight: 600,
+                                    },
+                                },
+                            }}
                         >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            Documents
-                        </button>
+                            <ListItemIcon sx={{ 
+                                color: activeTab === 'documents' ? '#2563eb' : '#64748b',
+                                minWidth: '40px',
+                            }}>
+                                <Description />
+                            </ListItemIcon>
+                            <ListItemText 
+                                primary="Documents" 
+                                primaryTypographyProps={{
+                                    fontSize: '0.875rem',
+                                    fontWeight: activeTab === 'documents' ? 600 : 500,
+                                    color: activeTab === 'documents' ? '#2563eb' : '#475569',
+                                }}
+                            />
+                        </ListItemButton>
 
-                        <button
+                        <ListItemButton
+                            selected={activeTab === 'chunking'}
                             onClick={() => setActiveTab('chunking')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'chunking' 
-                                    ? 'bg-purple-50 text-purple-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
+                            sx={{ 
+                                borderRadius: '12px', 
+                                mb: 1,
+                                margin: '4px 0',
+                                padding: '12px 16px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    transform: 'translateX(4px)',
+                                },
+                                '&.Mui-selected': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                    color: '#2563eb',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                    },
+                                    '& .MuiListItemIcon-root': {
+                                        color: '#2563eb',
+                                    },
+                                    '& .MuiListItemText-primary': {
+                                        color: '#2563eb',
+                                        fontWeight: 600,
+                                    },
+                                },
+                            }}
                         >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            Chunking Settings
-                        </button>
+                            <ListItemIcon sx={{ 
+                                color: activeTab === 'chunking' ? '#2563eb' : '#64748b',
+                                minWidth: '40px',
+                            }}>
+                                <Settings />
+                            </ListItemIcon>
+                            <ListItemText 
+                                primary="Chunking Settings" 
+                                primaryTypographyProps={{
+                                    fontSize: '0.875rem',
+                                    fontWeight: activeTab === 'chunking' ? 600 : 500,
+                                    color: activeTab === 'chunking' ? '#2563eb' : '#475569',
+                                }}
+                            />
+                        </ListItemButton>
 
-                        <button
+                        <ListItemButton
+                            selected={activeTab === 'retrieval'}
                             onClick={() => setActiveTab('retrieval')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'retrieval' 
-                                    ? 'bg-green-50 text-green-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
+                            sx={{ 
+                                borderRadius: '12px', 
+                                mb: 1,
+                                margin: '4px 0',
+                                padding: '12px 16px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    transform: 'translateX(4px)',
+                                },
+                                '&.Mui-selected': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                    color: '#2563eb',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                    },
+                                    '& .MuiListItemIcon-root': {
+                                        color: '#2563eb',
+                                    },
+                                    '& .MuiListItemText-primary': {
+                                        color: '#2563eb',
+                                        fontWeight: 600,
+                                    },
+                                },
+                            }}
                         >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                            </svg>
-                            Retrieval Settings
-                        </button>
+                            <ListItemIcon sx={{ 
+                                color: activeTab === 'retrieval' ? '#2563eb' : '#64748b',
+                                minWidth: '40px',
+                            }}>
+                                <Search />
+                            </ListItemIcon>
+                            <ListItemText 
+                                primary="Retrieval Settings" 
+                                primaryTypographyProps={{
+                                    fontSize: '0.875rem',
+                                    fontWeight: activeTab === 'retrieval' ? 600 : 500,
+                                    color: activeTab === 'retrieval' ? '#2563eb' : '#475569',
+                                }}
+                            />
+                        </ListItemButton>
                         
                         {activeTab === 'documents' && (
-                            <div className="mt-4 space-y-2 pl-2 border-l border-gray-200">
-                                <label className="flex items-center px-3 py-2 text-gray-700 hover:bg-gray-100 rounded-lg cursor-pointer transition-colors">
-                                    <svg className="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                                    </svg>
+                            <Box sx={{ mt: 2, pl: 2, borderLeft: '2px solid #f1f5f9' }}>
+                                <label 
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        padding: '12px 16px',
+                                        color: '#475569',
+                                        cursor: 'pointer',
+                                        borderRadius: '12px',
+                                        transition: 'all 0.2s ease-in-out',
+                                        fontSize: '0.875rem',
+                                        fontWeight: 500,
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.target.style.backgroundColor = 'rgba(37, 99, 235, 0.08)';
+                                        e.target.style.transform = 'translateX(4px)';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.backgroundColor = 'transparent';
+                                        e.target.style.transform = 'translateX(0)';
+                                    }}
+                                >
+                                    <CloudUploadIcon sx={{ width: 16, height: 16, mr: 1.5 }} />
                                     Upload Files
                                     <input
                                         type="file"
                                         multiple
                                         onChange={handleFileUpload}
-                                        className="hidden"
+                                        style={{ display: 'none' }}
                                         accept=".pdf,.doc,.docx,.txt,.md,.xlsx,.csv"
                                     />
                                 </label>
                                 
                                 {/* Chunking Method Status */}
                                 {selectedMethod && (
-                                    <div className="px-3 py-2 text-xs bg-blue-50 text-blue-700 rounded-lg">
-                                        <div className="flex items-center">
-                                            <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                            </svg>
-                                            <span className="font-medium">Chunking Method: {selectedMethod}</span>
-                                        </div>
+                                    <Box sx={{ 
+                                        px: 2, 
+                                        py: 1.5, 
+                                        fontSize: '0.75rem', 
+                                        bgcolor: 'rgba(37, 99, 235, 0.08)', 
+                                        color: '#2563eb', 
+                                        borderRadius: '8px',
+                                        mt: 1,
+                                    }}>
+                                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
+                                            <ArticleIcon sx={{ width: 12, height: 12, mr: 1 }} />
+                                            <Typography sx={{ fontWeight: 600, fontSize: '0.75rem' }}>
+                                                Chunking Method: {selectedMethod}
+                                            </Typography>
+                                        </Box>
                                         {methodsData[selectedMethod]?.supported_formats && (
-                                            <div className="mt-1 text-blue-600">
+                                            <Typography sx={{ 
+                                                fontSize: '0.7rem', 
+                                                color: '#2563eb',
+                                                opacity: 0.8,
+                                                mt: 0.5
+                                            }}>
                                                 Supports: {methodsData[selectedMethod].supported_formats.join(', ')}
-                                            </div>
+                                            </Typography>
                                         )}
-                                    </div>
+                                    </Box>
                                 )}
-                                
-                                <button 
+
+                                <Box
                                     onClick={handleShowFolderUpload}
-                                    className="flex items-center px-3 py-2 text-gray-700 hover:bg-gray-100 rounded-lg cursor-pointer transition-colors w-full text-left"
+                                    sx={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        padding: '12px 16px',
+                                        color: '#475569',
+                                        cursor: 'pointer',
+                                        borderRadius: '12px',
+                                        transition: 'all 0.2s ease-in-out',
+                                        fontSize: '0.875rem',
+                                        fontWeight: 500,
+                                        mt: 1,
+                                        '&:hover': {
+                                            backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                            transform: 'translateX(4px)',
+                                        },
+                                    }}
                                 >
-                                    <svg className="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                    </svg>
+                                    <FolderIcon sx={{ width: 16, height: 16, mr: 1.5 }} />
                                     Upload Folder
-                                </button>
-                            </div>
+                                </Box>
+                            </Box>
                         )}
-                    </nav>
+                    </List>
                     
                     {/* Stats */}
-                    <div className="mt-8 p-4 bg-gray-50 rounded-lg">
-                        <h3 className="text-sm font-medium text-gray-900 mb-2">Quick Stats</h3>
-                        <div className="text-sm text-gray-600 space-y-1">
+                    <Box sx={{ 
+                        mt: 3, 
+                        p: 2.5, 
+                        bgcolor: 'rgba(148, 163, 184, 0.05)', 
+                        borderRadius: '12px',
+                        border: '1px solid rgba(148, 163, 184, 0.1)',
+                    }}>
+                        <Typography variant="subtitle2" sx={{ 
+                            fontWeight: 600,
+                            color: '#0f172a',
+                            mb: 1.5,
+                            fontSize: '0.875rem',
+                        }}>
+                            Quick Stats
+                        </Typography>
+                        <Box sx={{ fontSize: '0.875rem', color: '#64748b' }}>
                             {activeTab === 'documents' && (
                                 <>
-                                    <div className="flex justify-between">
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
                                         <span>Files:</span>
-                                        <span className="font-medium">{files.length}</span>
-                                    </div>
-                                    <div className="flex justify-between">
+                                        <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
+                                            {files.length}
+                                        </Typography>
+                                    </Box>
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                                         <span>Total Size:</span>
-                                        <span className="font-medium">
+                                        <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
                                             {formatFileSize(files.reduce((total, file) => total + (file.size || 0), 0))}
-                                        </span>
-                                    </div>
+                                        </Typography>
+                                    </Box>
                                 </>
                             )}
-                        </div>
-                    </div>
-                </div>
-            </div>
+                        </Box>
+                    </Box>
+                </Box>
+            </Drawer>
 
             {/* Main Content */}
             <div className="flex-1 flex flex-col">

@@ -76,3 +76,7 @@ psutil>=5.9.5  # Added for system resource monitoring
 
 # Storage and database
 minio>=7.1.0
+
+# TruLens-inspired evaluation system
+nltk>=3.8.0  # For sentence tokenization in evaluation
+scipy>=1.10.0  # For statistical calculations in evaluation

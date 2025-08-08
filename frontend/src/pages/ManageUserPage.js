@@ -1,6 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import { 
+    ThemeProvider, 
+    createTheme, 
+    Box, 
+    Drawer, 
+    List, 
+    ListItemButton, 
+    ListItemIcon, 
+    ListItemText, 
+    Typography, 
+    Divider, 
+    IconButton 
+} from '@mui/material';
+import { 
+    ArrowBack, 
+    People as PeopleIcon, 
+    Timeline as TimelineIcon, 
+    Assessment as AssessmentIcon,
+    PersonAdd as PersonAddIcon 
+} from '@mui/icons-material';
 
 const ManageUserPage = () => {
     const navigate = useNavigate();
@@ -137,10 +157,18 @@ const ManageUserPage = () => {
         }
     };
 
+    const theme = createTheme({
+        palette: {
+            primary: {
+                main: '#2563eb',
+            },
+        },
+    });
+
     const tabs = [
-        { id: 'users', name: 'All Users', icon: '👥' },
-        { id: 'activities', name: 'Activities', icon: '📊' },
-        { id: 'stats', name: 'Statistics', icon: '📈' }
+        { id: 'users', name: 'All Users', icon: PeopleIcon },
+        { id: 'activities', name: 'Activities', icon: TimelineIcon },
+        { id: 'stats', name: 'Statistics', icon: AssessmentIcon }
     ];
 
     if (loading) {
@@ -155,88 +183,216 @@ const ManageUserPage = () => {
     }
 
     return (
-        <div className="min-h-screen bg-gray-50 flex">
-            {/* Sidebar */}
-            <div className="w-64 bg-white shadow-lg">
-                <div className="p-6 border-b border-gray-200">
-                    <div className="flex items-center">
-                        <button
-                            onClick={() => navigate('/chat')}
-                            className="mr-3 p-2 text-gray-400 hover:text-gray-600"
-                        >
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                            </svg>
-                        </button>
-                        <h1 className="text-xl font-bold text-gray-900">Manage Users</h1>
-                    </div>
-                </div>
-                
-                <div className="p-4">
-                    <nav className="space-y-2">
-                        {tabs.map((tab) => (
-                            <button
-                                key={tab.id}
-                                onClick={() => setActiveTab(tab.id)}
-                                className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                    activeTab === tab.id 
-                                        ? 'bg-indigo-50 text-indigo-700' 
-                                        : 'text-gray-700 hover:bg-gray-100'
-                                }`}
+        <ThemeProvider theme={theme}>
+            <Box sx={{ minHeight: '100vh', bgcolor: '#f8fafc', display: 'flex' }}>
+                {/* Sidebar */}
+                <Drawer
+                    variant="permanent"
+                    sx={{
+                        width: 280,
+                        flexShrink: 0,
+                        '& .MuiDrawer-paper': {
+                            width: 280,
+                            boxSizing: 'border-box',
+                            bgcolor: '#ffffff',
+                            borderRight: '1px solid #f1f5f9',
+                            boxShadow: '0px 4px 6px rgba(0, 0, 0, 0.07), 0px 2px 4px rgba(0, 0, 0, 0.06)',
+                            background: 'linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)',
+                        },
+                    }}
+                >
+                    <Box sx={{ p: 3 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+                            <IconButton
+                                edge="start"
+                                onClick={() => navigate('/chat')}
+                                sx={{ 
+                                    mr: 2,
+                                    color: '#64748b',
+                                    borderRadius: '10px',
+                                    transition: 'all 0.2s ease-in-out',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                        color: '#2563eb',
+                                        transform: 'scale(1.05)',
+                                    },
+                                }}
                             >
-                                <span className="mr-3 text-lg">{tab.icon}</span>
-                                {tab.name}
-                            </button>
-                        ))}
-                    </nav>
-                    
-                    {/* Stats */}
-                    <div className="mt-8 p-4 bg-gray-50 rounded-lg">
-                        <h3 className="text-sm font-medium text-gray-900 mb-2">Quick Stats</h3>
-                        <div className="text-sm text-gray-600 space-y-1">
-                            <div className="flex justify-between">
-                                <span>Total Users:</span>
-                                <span className="font-medium">{stats.totalUsers}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span>Active Users:</span>
-                                <span className="font-medium">{stats.activeUsers}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span>Total Sessions:</span>
-                                <span className="font-medium">{stats.totalSessions}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span>Messages:</span>
-                                <span className="font-medium">{stats.totalMessages}</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+                                <ArrowBack />
+                            </IconButton>
+                            <PeopleIcon sx={{ 
+                                mr: 1, 
+                                color: '#2563eb',
+                                fontSize: '1.5rem',
+                            }} />
+                            <Typography variant="h6" sx={{ 
+                                fontWeight: 700,
+                                color: '#0f172a',
+                                fontSize: '1.125rem',
+                            }}>
+                                Manage Users
+                            </Typography>
+                        </Box>
+                        <Divider sx={{ 
+                            mb: 3,
+                            borderColor: 'rgba(148, 163, 184, 0.2)',
+                        }} />
+                        
+                        <List sx={{ p: 0 }}>
+                            {tabs.map((tab) => {
+                                const IconComponent = tab.icon;
+                                return (
+                                    <ListItemButton
+                                        key={tab.id}
+                                        selected={activeTab === tab.id}
+                                        onClick={() => setActiveTab(tab.id)}
+                                        sx={{ 
+                                            borderRadius: '12px', 
+                                            mb: 1,
+                                            margin: '4px 0',
+                                            padding: '12px 16px',
+                                            transition: 'all 0.2s ease-in-out',
+                                            '&:hover': {
+                                                backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                                transform: 'translateX(4px)',
+                                            },
+                                            '&.Mui-selected': {
+                                                backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                                color: '#2563eb',
+                                                '&:hover': {
+                                                    backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                                },
+                                                '& .MuiListItemIcon-root': {
+                                                    color: '#2563eb',
+                                                },
+                                                '& .MuiListItemText-primary': {
+                                                    color: '#2563eb',
+                                                    fontWeight: 600,
+                                                },
+                                            },
+                                        }}
+                                    >
+                                        <ListItemIcon sx={{ 
+                                            color: activeTab === tab.id ? '#2563eb' : '#64748b',
+                                            minWidth: '40px',
+                                        }}>
+                                            <IconComponent />
+                                        </ListItemIcon>
+                                        <ListItemText 
+                                            primary={tab.name} 
+                                            primaryTypographyProps={{
+                                                fontSize: '0.875rem',
+                                                fontWeight: activeTab === tab.id ? 600 : 500,
+                                                color: activeTab === tab.id ? '#2563eb' : '#475569',
+                                            }}
+                                        />
+                                    </ListItemButton>
+                                );
+                            })}
+                        </List>
+                        
+                        {activeTab === 'users' && (
+                            <Box sx={{ mt: 2, pl: 2, borderLeft: '2px solid #f1f5f9' }}>
+                                <Box
+                                    onClick={() => setShowAddUserModal(true)}
+                                    sx={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        padding: '12px 16px',
+                                        color: '#475569',
+                                        cursor: 'pointer',
+                                        borderRadius: '12px',
+                                        transition: 'all 0.2s ease-in-out',
+                                        fontSize: '0.875rem',
+                                        fontWeight: 500,
+                                        '&:hover': {
+                                            backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                            transform: 'translateX(4px)',
+                                        },
+                                    }}
+                                >
+                                    <PersonAddIcon sx={{ width: 16, height: 16, mr: 1.5 }} />
+                                    Add New User
+                                </Box>
+                            </Box>
+                        )}
+                        
+                        <Box sx={{ 
+                            mt: 3, 
+                            p: 2.5, 
+                            bgcolor: 'rgba(148, 163, 184, 0.05)', 
+                            borderRadius: '12px',
+                            border: '1px solid rgba(148, 163, 184, 0.1)',
+                        }}>
+                            <Typography variant="subtitle2" sx={{ 
+                                fontWeight: 600,
+                                color: '#0f172a',
+                                mb: 1.5,
+                                fontSize: '0.875rem',
+                            }}>
+                                Quick Stats
+                            </Typography>
+                            <Box sx={{ fontSize: '0.875rem', color: '#64748b' }}>
+                                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                                    <span>Total Users:</span>
+                                    <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
+                                        {stats.totalUsers}
+                                    </Typography>
+                                </Box>
+                                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                                    <span>Active Users:</span>
+                                    <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
+                                        {stats.activeUsers}
+                                    </Typography>
+                                </Box>
+                                <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                                    <span>Total Sessions:</span>
+                                    <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
+                                        {stats.totalSessions}
+                                    </Typography>
+                                </Box>
+                                <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                                    <span>Messages:</span>
+                                    <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
+                                        {stats.totalMessages}
+                                    </Typography>
+                                </Box>
+                            </Box>
+                        </Box>
+                    </Box>
+                </Drawer>
 
-            {/* Main Content */}
-            <div className="flex-1 flex flex-col">
-                {/* Header */}
-                <div className="bg-white shadow-sm border-b">
-                    <div className="px-6 py-4">
-                        <div className="flex justify-between items-center">
-                            <div>
-                                <h2 className="text-2xl font-bold text-gray-900">
-                                    {tabs.find(t => t.id === activeTab)?.name}
-                                </h2>
-                                <p className="mt-1 text-sm text-gray-500">
-                                    {activeTab === 'users' && 'View and manage all system users'}
-                                    {activeTab === 'activities' && 'Monitor user activities and system usage'}
-                                    {activeTab === 'stats' && 'View detailed system statistics and analytics'}
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                {/* Main Content */}
+                <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
+                    {/* Header */}
+                    <Box sx={{ bgcolor: 'white', borderBottom: '1px solid #f1f5f9', boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)' }}>
+                        <Box sx={{ px: 3, py: 2 }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <Box>
+                                    <Typography variant="h4" sx={{ 
+                                        fontWeight: 700,
+                                        color: '#0f172a',
+                                        fontSize: '1.5rem',
+                                        mb: 0.5,
+                                    }}>
+                                        {tabs.find(t => t.id === activeTab)?.name}
+                                    </Typography>
+                                    <Typography sx={{ 
+                                        color: '#64748b',
+                                        fontSize: '0.875rem',
+                                    }}>
+                                        {activeTab === 'users' && 'View and manage all system users'}
+                                        {activeTab === 'activities' && 'Monitor user activities and system usage'}
+                                        {activeTab === 'stats' && 'View detailed system statistics and analytics'}
+                                    </Typography>
+                                </Box>
+                            </Box>
+                        </Box>
+                    </Box>
 
-                {/* Content */}
-                <div className="flex-1 p-6">
+                    {/* Content */}
+                    <Box sx={{ flexGrow: 1, p: 3 }}>
+                        <div className="flex-1 p-6">
                 {/* All Users Tab */}
                 {activeTab === 'users' && (
                     <div className="bg-white rounded-lg shadow">
@@ -415,8 +571,9 @@ const ManageUserPage = () => {
                         </div>
                     </div>
                 )}
-                </div>
-            </div>
+                        </div>
+                    </Box>
+                </Box>
 
             {/* Add User Modal */}
             {showAddUserModal && (
@@ -502,7 +659,8 @@ const ManageUserPage = () => {
                     </div>
                 </div>
             )}
-        </div>
+            </Box>
+        </ThemeProvider>
     );
 };
 
