@@ -59,8 +59,9 @@ def clear_reranker_cache():
     _reranker_instance = None
     logger.info("RAG reranker cache cleared")
 
-set_debug(True)
-set_verbose(True)
+# Disable LangChain debug/verbose mode to suppress chain tracing logs
+set_debug(False)
+set_verbose(False)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -160,6 +161,9 @@ class ChatPDF:
         # Add a flag to track if models are loaded - set to False initially
         self.models_loaded = False
         
+        # Store last context documents for evaluation
+        self.last_context_docs = []
+        
         # Update text splitter settings for better handling of technical documents
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,  # Increased chunk size
@@ -225,11 +229,162 @@ class ChatPDF:
         # Add score threshold if specified
         if config.search_type == "similarity_score_threshold":
             search_kwargs["score_threshold"] = config.similarity_threshold
+        elif config.search_type == "mmr":
+            # Maximum Marginal Relevance search
+            search_kwargs["fetch_k"] = config.max_chunks * 2  # Fetch more for diversity
+            search_kwargs["lambda_mult"] = 0.5  # Balance between relevance and diversity
         
         return self.vector_store.as_retriever(
             search_type=config.search_type,
             search_kwargs=search_kwargs
         )
+
+    def _perform_hybrid_search(self, query: str, config: RetrievalConfig) -> List:
+        """
+        Perform hybrid search combining semantic similarity and keyword matching.
+        
+        Args:
+            query: The search query
+            config: Retrieval configuration with keyword_similarity_weight
+            
+        Returns:
+            List of documents ranked by hybrid score
+        """
+        try:
+            from rank_bm25 import BM25Okapi
+            import numpy as np
+            from collections import defaultdict
+            
+            # Get all documents from vector store for keyword search
+            all_docs = []
+            if hasattr(self.vector_store, '_collection') and self.vector_store._collection:
+                try:
+                    # Get all documents for BM25
+                    results = self.vector_store._collection.get()
+                    if results and 'documents' in results:
+                        all_docs = [doc for doc in results['documents'] if doc]
+                except Exception as e:
+                    logger.warning(f"Could not retrieve all documents for BM25: {e}")
+                    # Fallback to semantic search only
+                    return self.vector_store.similarity_search(query, k=config.max_chunks)
+            
+            if not all_docs:
+                logger.warning("No documents available for hybrid search, falling back to semantic search")
+                return self.vector_store.similarity_search(query, k=config.max_chunks)
+            
+            # Perform semantic search
+            semantic_docs = self.vector_store.similarity_search_with_score(
+                query, k=min(config.max_chunks * 3, len(all_docs))
+            )
+            
+            # Prepare documents for BM25
+            tokenized_docs = [doc.split() for doc in all_docs]
+            bm25 = BM25Okapi(tokenized_docs)
+            
+            # Perform BM25 search
+            query_tokens = query.split()
+            bm25_scores = bm25.get_scores(query_tokens)
+            
+            # Normalize BM25 scores to 0-1 range
+            if bm25_scores.max() > 0:
+                bm25_scores = bm25_scores / bm25_scores.max()
+            
+            # Create mapping from document content to BM25 score
+            doc_to_bm25_score = {doc: score for doc, score in zip(all_docs, bm25_scores)}
+            
+            # Combine semantic and keyword scores
+            hybrid_scores = []
+            for doc, semantic_score in semantic_docs:
+                # Normalize semantic score (similarity_search_with_score returns distance, lower is better)
+                # Convert to similarity score (higher is better)
+                normalized_semantic_score = max(0, 1 - semantic_score)
+                
+                # Get BM25 score for this document
+                bm25_score = doc_to_bm25_score.get(doc.page_content, 0.0)
+                
+                # Calculate hybrid score using keyword_similarity_weight
+                # weight = 1.0 means pure keyword search, weight = 0.0 means pure semantic search
+                hybrid_score = (
+                    config.keyword_similarity_weight * bm25_score +
+                    (1 - config.keyword_similarity_weight) * normalized_semantic_score
+                )
+                
+                hybrid_scores.append((doc, hybrid_score))
+            
+            # Sort by hybrid score (descending)
+            hybrid_scores.sort(key=lambda x: x[1], reverse=True)
+            
+            # Apply similarity threshold if specified
+            if config.similarity_threshold > 0:
+                hybrid_scores = [
+                    (doc, score) for doc, score in hybrid_scores 
+                    if score >= config.similarity_threshold
+                ]
+            
+            # Return top k documents
+            result_docs = [doc for doc, score in hybrid_scores[:config.max_chunks]]
+            
+            logger.info(f"Hybrid search completed: {len(result_docs)} documents, "
+                       f"keyword_weight: {config.keyword_similarity_weight}")
+            
+            return result_docs
+            
+        except ImportError:
+            logger.warning("rank_bm25 not available, falling back to semantic search")
+            return self.vector_store.similarity_search(query, k=config.max_chunks)
+        except Exception as e:
+            logger.error(f"Error in hybrid search: {e}")
+            # Fallback to semantic search
+            return self.vector_store.similarity_search(query, k=config.max_chunks)
+
+    def _perform_search_with_config(self, query: str, config: RetrievalConfig) -> List:
+        """
+        Perform document search based on the specified search type and configuration.
+        
+        Args:
+            query: The search query
+            config: Retrieval configuration
+            
+        Returns:
+            List of relevant documents
+        """
+        try:
+            if config.search_type == "hybrid":
+                # Use hybrid search that combines semantic and keyword search
+                return self._perform_hybrid_search(query, config)
+            
+            elif config.search_type == "mmr":
+                # Maximum Marginal Relevance search for diversity
+                search_kwargs = {
+                    "k": config.max_chunks,
+                    "fetch_k": config.max_chunks * 2,
+                    "lambda_mult": 0.5  # Balance between relevance and diversity
+                }
+                return self.vector_store.max_marginal_relevance_search(query, **search_kwargs)
+            
+            elif config.search_type == "similarity_score_threshold":
+                # Similarity search with score threshold
+                search_kwargs = {
+                    "k": config.max_chunks,
+                    "score_threshold": config.similarity_threshold
+                }
+                docs_with_scores = self.vector_store.similarity_search_with_score(query, **search_kwargs)
+                # Filter by threshold and return documents
+                filtered_docs = [doc for doc, score in docs_with_scores if score >= config.similarity_threshold]
+                return filtered_docs[:config.max_chunks]
+            
+            elif config.search_type == "similarity":
+                # Standard similarity search
+                return self.vector_store.similarity_search(query, k=config.max_chunks)
+            
+            else:
+                logger.warning(f"Unknown search type: {config.search_type}, falling back to similarity search. Valid types: similarity, mmr, similarity_score_threshold, hybrid")
+                return self.vector_store.similarity_search(query, k=config.max_chunks)
+                
+        except Exception as e:
+            logger.error(f"Error in search with config: {e}")
+            # Fallback to basic similarity search
+            return self.vector_store.similarity_search(query, k=config.max_chunks)
 
     async def _apply_reranking(self, query: str, documents: List, config: RetrievalConfig) -> List:
         """Apply reranking if enabled in configuration"""
@@ -1777,9 +1932,9 @@ class ChatPDF:
             # Retrieve relevant documents
             retrieval_config = self._get_retrieval_config(user_id)
             
-            # Use vector store similarity search if available, otherwise use retriever
+            # Use the new search method with configuration
             if self.vector_store:
-                relevant_docs = self.vector_store.similarity_search(question, k=retrieval_config.max_chunks * 2)
+                relevant_docs = self._perform_search_with_config(question, retrieval_config)
             else:
                 # Fallback to retriever's get_relevant_documents if vector store not available
                 relevant_docs = self.retriever.get_relevant_documents(question)
@@ -1839,7 +1994,13 @@ class ChatPDF:
             
             # Retrieve relevant documents
             retrieval_config = self._get_retrieval_config()
-            relevant_docs = self.retriever.get_relevant_documents(question)
+            
+            # Use the new search method with configuration
+            if self.vector_store:
+                relevant_docs = self._perform_search_with_config(question, retrieval_config)
+            else:
+                # Fallback to retriever's get_relevant_documents if vector store not available
+                relevant_docs = self.retriever.get_relevant_documents(question)
             
             # Apply reranking if enabled (sync version)
             if retrieval_config.reranker_enabled and retrieval_config.reranker_model:
@@ -1855,6 +2016,9 @@ class ChatPDF:
             
             # Create context from relevant documents
             context = "\n\n".join([doc.page_content for doc in relevant_docs])
+            
+            # Store context docs for evaluation (last query context)
+            self.last_context_docs = relevant_docs
             
             # Choose prompt based on style
             if style == "conversational":

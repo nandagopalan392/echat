@@ -1523,6 +1523,171 @@ class ChatDB:
             logger.error(f"Error deleting dataset {dataset_id}: {e}")
             return False
 
+    def save_evaluation_results(self, dataset_id: int, model_name: str, 
+                               groundedness_score: float, context_relevance_score: float,
+                               answer_quality_score: float, avg_latency: float,
+                               total_queries: int, status: str = 'completed',
+                               run_by: str = 'system', started_at: str = None, 
+                               completed_at: str = None) -> bool:
+        """Save evaluation results to database"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO evaluation_results (
+                        dataset_id, model_name, groundedness_score, context_relevance_score, 
+                        answer_quality_score, avg_latency, total_queries, status, run_by, 
+                        started_at, completed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    dataset_id, model_name, groundedness_score, context_relevance_score,
+                    answer_quality_score, avg_latency, total_queries, status, run_by,
+                    started_at, completed_at
+                ))
+                conn.commit()
+                logger.info(f"Saved evaluation results for model {model_name} on dataset {dataset_id}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error saving evaluation results: {e}")
+            return False
+
+    def get_evaluation_overview_stats(self) -> Dict:
+        """Get overview statistics for all evaluations"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get total evaluations count
+                cursor.execute('SELECT COUNT(*) FROM evaluation_results')
+                total_evaluations = cursor.fetchone()[0]
+                
+                # Get average scores
+                cursor.execute('''
+                    SELECT 
+                        AVG(groundedness_score) as avg_groundedness,
+                        AVG(context_relevance_score) as avg_context_relevance,
+                        AVG(answer_quality_score) as avg_answer_quality,
+                        AVG(avg_latency) as avg_latency
+                    FROM evaluation_results
+                    WHERE status = 'completed'
+                ''')
+                
+                result = cursor.fetchone()
+                if result and result[0] is not None:
+                    avg_groundedness, avg_context_relevance, avg_answer_quality, avg_latency = result
+                else:
+                    avg_groundedness = avg_context_relevance = avg_answer_quality = avg_latency = 0
+                
+                # Get recent evaluations count (last 7 days)
+                cursor.execute('''
+                    SELECT COUNT(*) FROM evaluation_results 
+                    WHERE datetime(completed_at) >= datetime('now', '-7 days')
+                ''')
+                recent_evaluations = cursor.fetchone()[0]
+                
+                # Get unique models count
+                cursor.execute('SELECT COUNT(DISTINCT model_name) FROM evaluation_results')
+                unique_models = cursor.fetchone()[0]
+                
+                return {
+                    'total_evaluations': total_evaluations,
+                    'recent_evaluations': recent_evaluations,
+                    'unique_models': unique_models,
+                    'average_scores': {
+                        'groundedness': round(avg_groundedness or 0, 3),
+                        'context_relevance': round(avg_context_relevance or 0, 3),
+                        'answer_quality': round(avg_answer_quality or 0, 3)
+                    },
+                    'average_latency': round(avg_latency or 0, 2)
+                }
+                
+        except Exception as e:
+            logger.error(f"Error getting evaluation overview stats: {e}")
+            return {
+                'total_evaluations': 0,
+                'recent_evaluations': 0, 
+                'unique_models': 0,
+                'average_scores': {'groundedness': 0, 'context_relevance': 0, 'answer_quality': 0},
+                'average_latency': 0
+            }
+    
+    def get_evaluation_results(self, model_filter: str = None, dataset_filter: str = None, limit: int = 50) -> List[Dict]:
+        """Get evaluation results from database with optional filtering"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Build query with joins to get dataset names
+                query = '''
+                    SELECT 
+                        er.id,
+                        er.dataset_id,
+                        ed.name as dataset_name,
+                        er.model_name,
+                        er.groundedness_score,
+                        er.context_relevance_score,
+                        er.answer_quality_score,
+                        er.avg_latency,
+                        er.total_queries,
+                        er.status,
+                        er.run_by,
+                        er.started_at,
+                        er.completed_at
+                    FROM evaluation_results er
+                    LEFT JOIN evaluation_datasets ed ON er.dataset_id = ed.id
+                    WHERE er.status = 'completed'
+                '''
+                
+                params = []
+                
+                # Add filters if provided
+                if model_filter:
+                    query += ' AND er.model_name = ?'
+                    params.append(model_filter)
+                
+                if dataset_filter:
+                    query += ' AND ed.name = ?'
+                    params.append(dataset_filter)
+                
+                # Order by completed date, most recent first
+                query += ' ORDER BY er.completed_at DESC'
+                
+                # Add limit
+                if limit > 0:
+                    query += ' LIMIT ?'
+                    params.append(limit)
+                
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                
+                results = []
+                for row in rows:
+                    result = {
+                        'id': row[0],
+                        'test_case_id': row[0],  # Use id as test_case_id for compatibility
+                        'dataset_id': row[1],
+                        'dataset': row[2] or f'Dataset {row[1]}',
+                        'model': row[3],
+                        'groundedness': row[4] or 0.0,
+                        'context_relevance': row[5] or 0.0,
+                        'answer_quality': row[6] or 0.0,
+                        'avg_latency': row[7] or 0.0,
+                        'total_questions': row[8] or 0,
+                        'status': row[9] or 'Unknown',
+                        'run_by': row[10],
+                        'run_date': row[12].split('T')[0] if row[12] else (row[11].split('T')[0] if row[11] else ''),
+                        'started_at': row[11],
+                        'completed_at': row[12]
+                    }
+                    results.append(result)
+                
+                return results
+                
+        except Exception as e:
+            logger.error(f"Error getting evaluation results: {e}")
+            return []
+
 # Global instance for database access
 _chat_db_instance = None
 

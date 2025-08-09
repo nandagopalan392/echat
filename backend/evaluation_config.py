@@ -9,13 +9,13 @@ class EvaluationConfig:
     """Configuration class for evaluation system"""
     
     # LLM Provider settings
-    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    EVALUATION_MODEL = os.getenv("EVALUATION_MODEL", "llama3")
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+    EVALUATION_MODEL = os.getenv("EVALUATION_MODEL", "gemma3n:e2b")
     
     # Evaluation settings
     EVALUATION_TEMPERATURE = float(os.getenv("EVALUATION_TEMPERATURE", "0.0"))
     EVALUATION_MAX_TOKENS = int(os.getenv("EVALUATION_MAX_TOKENS", "512"))
-    EVALUATION_TIMEOUT = int(os.getenv("EVALUATION_TIMEOUT", "60"))
+    EVALUATION_TIMEOUT = int(os.getenv("EVALUATION_TIMEOUT", "120"))
     
     # Scoring settings
     MIN_SCORE = 0

@@ -93,6 +93,13 @@ class RetrievalConfig:
             if field in validated_data and not isinstance(validated_data[field], str):
                 validated_data[field] = str(validated_data[field]) if validated_data[field] is not None else ""
         
+        # Validate search_type against allowed values
+        valid_search_types = ['similarity', 'mmr', 'similarity_score_threshold', 'hybrid']
+        if 'search_type' in validated_data:
+            if validated_data['search_type'] not in valid_search_types:
+                logger.warning(f"Invalid search_type: {validated_data['search_type']}, defaulting to 'similarity'")
+                validated_data['search_type'] = 'similarity'
+        
         return cls(**validated_data)
 
 class RetrievalConfigManager:
@@ -185,7 +192,7 @@ class RetrievalConfigManager:
         if config.reranker_enabled and not config.reranker_model:
             warnings.append("Reranker is enabled but no model is specified")
         
-        if config.search_type not in ["similarity", "mmr", "similarity_score_threshold"]:
+        if config.search_type not in ["similarity", "mmr", "similarity_score_threshold", "hybrid"]:
             warnings.append(f"Unknown search type: {config.search_type}")
         
         if config.auto_merging_similarity_threshold < 0.0 or config.auto_merging_similarity_threshold > 1.0:

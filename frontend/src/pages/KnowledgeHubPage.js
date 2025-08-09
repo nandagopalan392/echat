@@ -2501,7 +2501,7 @@ const KnowledgeHubPage = () => {
                                                     className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
                                                 />
                                                 <p className="mt-1 text-xs text-gray-500">
-                                                    Weight of keyword similarity in the combined score. Vector similarity gets (1 - weight).
+                                                    Weight of keyword similarity vs semantic similarity (only used with Hybrid search type). 1.0 = pure keyword search, 0.0 = pure semantic search.
                                                 </p>
                                             </div>
 
@@ -2537,9 +2537,10 @@ const KnowledgeHubPage = () => {
                                                     <option value="similarity">Similarity Search</option>
                                                     <option value="mmr">Maximum Marginal Relevance (MMR)</option>
                                                     <option value="similarity_score_threshold">Similarity with Score Threshold</option>
+                                                    <option value="hybrid">Hybrid (Semantic + Keyword)</option>
                                                 </select>
                                                 <p className="mt-1 text-xs text-gray-500">
-                                                    Search algorithm to use for document retrieval.
+                                                    Search algorithm to use for document retrieval. Hybrid combines semantic similarity with keyword matching.
                                                 </p>
                                             </div>
                                         </div>

@@ -80,3 +80,6 @@ minio>=7.1.0
 # TruLens-inspired evaluation system
 nltk>=3.8.0  # For sentence tokenization in evaluation
 scipy>=1.10.0  # For statistical calculations in evaluation
+
+# Search and ranking
+rank-bm25>=0.2.2  # For keyword-based search in hybrid retrieval

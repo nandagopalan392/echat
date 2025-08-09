@@ -47,7 +47,8 @@ import {
     Tab,
     Accordion,
     AccordionSummary,
-    AccordionDetails
+    AccordionDetails,
+    OutlinedInput
 } from '@mui/material';
 import { 
     ArrowBack, 
@@ -83,7 +84,7 @@ const SIDEBAR_WIDTH = 280;
 const EvaluationPage = () => {
     const navigate = useNavigate();
     const [loading, setLoading] = useState(true);
-    const [activeTab, setActiveTab] = useState(0); // 0: Overview, 1: Evaluations, 2: Datasets, 3: Test Cases
+    const [activeTab, setActiveTab] = useState(0); // 0: Overview, 1: Datasets, 2: Evaluation
     const [error, setError] = useState('');
     const [timeRange, setTimeRange] = useState('7d');
     
@@ -115,8 +116,28 @@ const EvaluationPage = () => {
     const [createTestCaseOpen, setCreateTestCaseOpen] = useState(false);
     const [selectedDataset, setSelectedDataset] = useState('');
     const [selectedModels, setSelectedModels] = useState([]);
+    const [selectedRetriever, setSelectedRetriever] = useState('');
+    // Dialog-specific state variables
+    const [selectedDatasetId, setSelectedDatasetId] = useState('');
+    const [selectedModelId, setSelectedModelId] = useState('');
+    const [selectedRetrieverId, setSelectedRetrieverId] = useState('');
+    // Test case retrieval configuration
+    const [testRetrievalConfig, setTestRetrievalConfig] = useState({
+        similarity_threshold: 0.2,
+        keyword_similarity_weight: 0.7,
+        max_chunks: 5,
+        search_type: 'similarity',
+        reranker_enabled: false,
+        reranker_model: '',
+        auto_merging_enabled: false,
+        auto_merging_similarity_threshold: 0.8
+    });
+    const [showAdvancedRetrieval, setShowAdvancedRetrieval] = useState(false);
     const [availableModels, setAvailableModels] = useState([]);
+    const [availableRetrievers, setAvailableRetrievers] = useState([]);
+    const [rerankerModels, setRerankerModels] = useState([]);
     const [runningTestCase, setRunningTestCase] = useState(null);
+    const [testCaseResults, setTestCaseResults] = useState([]);
     
     // Evaluation results state
     const [evaluationResults, setEvaluationResults] = useState([]);
@@ -146,7 +167,10 @@ const EvaluationPage = () => {
         loadDatasets();
         loadAvailableDocuments();
         loadAvailableModels();
+        loadAvailableRetrievers();
+        loadRerankerModels();
         loadEvaluationResults();
+        loadTestCaseResults();
     }, [timeRange]);
 
     // Load datasets
@@ -221,6 +245,22 @@ const EvaluationPage = () => {
         }
     };
 
+    // Load available retrievers
+    const loadAvailableRetrievers = async () => {
+        try {
+            // Add retrievers list - these would typically come from an API
+            setAvailableRetrievers([
+                { id: 'vector', name: 'Vector Search', description: 'Standard vector similarity search' },
+                { id: 'bm25', name: 'BM25', description: 'Traditional keyword-based search' },
+                { id: 'hybrid', name: 'Hybrid Search', description: 'Combination of vector and BM25' },
+                { id: 'rerank', name: 'Reranked Search', description: 'Vector search with reranking' }
+            ]);
+        } catch (error) {
+            console.error('Error loading retrievers:', error);
+            setAvailableRetrievers([]);
+        }
+    };
+
     // Delete dataset function
     const handleDeleteDataset = async (datasetId, datasetName) => {
         if (!window.confirm(`Are you sure you want to delete the dataset "${datasetName}"? This action cannot be undone.`)) {
@@ -284,6 +324,39 @@ const EvaluationPage = () => {
             ];
             setEvaluationResults(mockResults);
             setFilteredResults(mockResults);
+        }
+    };
+
+    // Load test case results from database
+    const loadTestCaseResults = async () => {
+        try {
+            const response = await evaluationApi.getResults();
+            console.log('Loaded test case results:', response);
+            
+            // Transform the results to match the expected format for the test case table
+            const transformedResults = (response.results || []).map(result => ({
+                id: result.id,
+                dataset_id: result.dataset_id,
+                dataset_name: result.dataset,
+                models: [result.model], // Convert single model to array for compatibility
+                results: [{
+                    model: result.model,
+                    groundedness: result.groundedness,
+                    context_relevance: result.context_relevance,
+                    answer_quality: result.answer_quality,
+                    avg_latency: result.avg_latency,
+                    total_questions: result.total_questions
+                }],
+                status: result.status.toLowerCase(),
+                created_at: result.started_at || result.run_date,
+                completed_at: result.completed_at
+            }));
+            
+            setTestCaseResults(transformedResults);
+        } catch (error) {
+            console.error('Error loading test case results:', error);
+            // Keep empty array on error - real results will be added when tests are run
+            setTestCaseResults([]);
         }
     };
 
@@ -417,23 +490,206 @@ const EvaluationPage = () => {
     };
 
     // Run test case handler
-    const handleRunTestCase = async (datasetId, models) => {
+    const handleRunTestCase = async (datasetId, models, retriever) => {
+        let testCaseId;
         try {
-            setRunningTestCase(datasetId);
+            setRunningTestCase(`${datasetId}-${retriever || 'default'}`);
             
-            const response = await evaluationApi.runTestCase(datasetId, models);
+            // Create test case entry
+            testCaseId = Date.now();
+            const testCase = {
+                id: testCaseId,
+                dataset_id: datasetId,
+                dataset_name: datasets.find(d => d.id === datasetId)?.name || 'Unknown Dataset',
+                models: models,
+                retriever: retriever || 'vector',
+                status: 'running',
+                created_at: new Date().toISOString(),
+                results: null
+            };
+            
+            setTestCaseResults(prev => [...prev, testCase]);
+            
+            const response = await evaluationApi.runTestCase(datasetId, models, retriever);
             
             if (response.success) {
+                // Update test case with results
+                setTestCaseResults(prev => 
+                    prev.map(tc => 
+                        tc.id === testCaseId 
+                            ? { ...tc, status: 'completed', results: response.results, completed_at: new Date().toISOString() }
+                            : tc
+                    )
+                );
+                
                 setEvaluationResults([...evaluationResults, ...response.results]);
                 setFilteredResults([...filteredResults, ...response.results]);
+            } else {
+                // Update test case with error
+                setTestCaseResults(prev => 
+                    prev.map(tc => 
+                        tc.id === testCaseId 
+                            ? { ...tc, status: 'failed', error: response.error, completed_at: new Date().toISOString() }
+                            : tc
+                    )
+                );
             }
             
             setRunningTestCase(null);
         } catch (error) {
             setError('Failed to run test case');
             setRunningTestCase(null);
+            
+            // Update test case with error if testCaseId exists
+            if (testCaseId) {
+                setTestCaseResults(prev => 
+                    prev.map(tc => 
+                        tc.id === testCaseId 
+                            ? { ...tc, status: 'failed', error: error.message, completed_at: new Date().toISOString() }
+                            : tc
+                    )
+                );
+            }
+            
             console.error('Error running test case:', error);
         }
+    };
+
+    // Handle test case creation from dialog
+    const handleCreateTestCase = async () => {
+        if (!selectedDatasetId || !selectedModelId) {
+            setError('Please select dataset and model');
+            return;
+        }
+
+        try {
+            setRunningTestCase(true);
+            setError(null);
+
+            const testCaseData = {
+                dataset_id: selectedDatasetId,
+                models: [selectedModelId], // Convert single model to array for backend compatibility
+                retriever: 'vector_similarity', // Default retriever
+                retrieval_config: testRetrievalConfig,
+                created_at: new Date().toISOString()
+            };
+
+            const response = await fetch('/api/evaluation/test-cases', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
+                },
+                body: JSON.stringify(testCaseData)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to create test case');
+            }
+
+            const result = await response.json();
+            
+            // Add to test case results
+            const newTestCase = {
+                id: result.test_case_id,
+                dataset_name: datasets.find(d => d.id === selectedDatasetId)?.name || 'Unknown',
+                models: [selectedModelId], // Convert single model to array for backend compatibility
+                retriever: 'Vector Similarity', // Default retriever name
+                status: 'running',
+                created_at: new Date().toISOString(),
+                retrieval_config: testRetrievalConfig
+            };
+
+            setTestCaseResults(prev => [newTestCase, ...prev]);
+            
+            // Close dialog and reset form
+            setCreateTestCaseOpen(false);
+            setSelectedDatasetId('');
+            setSelectedModelId('');
+            
+            // Start polling for test case status
+            pollTestCaseStatus(result.test_case_id);
+
+        } catch (error) {
+            console.error('Error creating test case:', error);
+            setError('Failed to create test case: ' + error.message);
+        } finally {
+            setRunningTestCase(false);
+        }
+    };
+
+    const handleTestRetrievalConfigChange = (key, value) => {
+        setTestRetrievalConfig(prev => ({
+            ...prev,
+            [key]: value
+        }));
+    };
+
+    // Load reranker models for test case configuration
+    const loadRerankerModels = async () => {
+        try {
+            const response = await fetch('/api/retrieval/reranker-models', {
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                // Extract models array from the response object
+                const models = data.models || [];
+                // Ensure models is always an array
+                const modelArray = Array.isArray(models) ? models : [];
+                setRerankerModels(modelArray);
+                
+                // Set default reranker model if none selected
+                if (modelArray.length > 0 && !testRetrievalConfig.reranker_model) {
+                    setTestRetrievalConfig(prev => ({
+                        ...prev,
+                        reranker_model: modelArray[0].name
+                    }));
+                }
+            } else {
+                console.error('Failed to load reranker models:', response.status);
+                setRerankerModels([]);
+            }
+        } catch (error) {
+            console.error('Error loading reranker models:', error);
+            setRerankerModels([]);
+        }
+    };
+
+    const pollTestCaseStatus = async (testCaseId) => {
+        const poll = async () => {
+            try {
+                const response = await fetch(`/api/evaluation/test-cases/${testCaseId}`, {
+                    headers: {
+                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+                    }
+                });
+
+                if (response.ok) {
+                    const testCase = await response.json();
+                    
+                    setTestCaseResults(prev => 
+                        prev.map(tc => 
+                            tc.id === testCaseId 
+                                ? { ...tc, ...testCase }
+                                : tc
+                        )
+                    );
+
+                    // Continue polling if still running
+                    if (testCase.status === 'running') {
+                        setTimeout(poll, 2000); // Poll every 2 seconds
+                    }
+                }
+            } catch (error) {
+                console.error('Error polling test case status:', error);
+            }
+        };
+
+        poll();
     };
 
     // Filter evaluation results
@@ -460,105 +716,65 @@ const EvaluationPage = () => {
             setLoading(true);
             setError('');
             
-            // Load real evaluation data from backend
-            const [metricsResponse, historicalResponse, latencyResponse] = await Promise.all([
-                evaluationApi.getMetrics(timeRange),
-                evaluationApi.getHistoricalMetrics(timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90),
-                evaluationApi.getLatencyDistribution(timeRange)
-            ]);
+            // Load real evaluation overview data from new API endpoint
+            const response = await api.call(`/api/evaluation/overview?time_range=${timeRange}`);
             
-            // Transform backend data to match component structure
+            // Use the real data structure from the API
             const transformedData = {
                 overall: {
-                    groundedness: metricsResponse.metrics.groundedness.score,
-                    contextRelevance: metricsResponse.metrics.context_relevance.score,
-                    answerQuality: metricsResponse.metrics.answer_quality.score,
-                    latency: metricsResponse.metrics.latency.score,
-                    totalQueries: metricsResponse.total_interactions
+                    groundedness: response.overall.groundedness,
+                    contextRelevance: response.overall.contextRelevance,
+                    answerQuality: response.overall.answerQuality,
+                    averageLatency: response.overall.averageLatency,
+                    totalQueries: response.overall.totalEvaluations
                 },
-                historical: historicalResponse.data.map(item => ({
+                historical: response.historical.map(item => ({
                     date: item.date,
                     groundedness: item.groundedness,
-                    contextRelevance: item.context_relevance,
-                    answerQuality: item.answer_quality,
+                    contextRelevance: item.contextRelevance,
+                    answerQuality: item.answerQuality,
                     latency: item.latency,
-                    queries: item.total_queries
+                    queries: item.queries
                 })),
-                latencyDistribution: latencyResponse.distribution.map(item => ({
+                latencyDistribution: response.latencyDistribution.map(item => ({
                     range: item.range,
                     count: item.count
                 })),
-                detailed: [] // Mock detailed data for table
+                detailed: response.detailed.map(item => ({
+                    query: item.query,
+                    groundedness: item.groundedness,
+                    contextRelevance: item.contextRelevance,
+                    answerQuality: item.answerQuality,
+                    latency: item.latency,
+                    timestamp: item.timestamp,
+                    model: item.model,
+                    dataset: item.dataset
+                }))
             };
-            
-            // Generate mock detailed data for the table
-            for (let i = 0; i < 20; i++) {
-                transformedData.detailed.push({
-                    query: `Sample query ${i + 1}`,
-                    groundedness: Math.random() * 0.4 + 0.6,
-                    contextRelevance: Math.random() * 0.4 + 0.6,
-                    answerQuality: Math.random() * 0.4 + 0.6,
-                    latency: Math.random() * 2 + 0.5,
-                    timestamp: new Date(Date.now() - Math.random() * 7 * 24 * 60 * 60 * 1000).toISOString()
-                });
-            }
             
             setEvaluationData(transformedData);
             
         } catch (error) {
             console.error('Error loading evaluation data:', error);
-            setError('Failed to load evaluation data. Showing sample data.');
+            setError('Failed to load evaluation data. Please try again.');
             
-            // Use mock data as fallback
-            const mockData = generateMockEvaluationData();
-            setEvaluationData(mockData);
+            // Use empty data as fallback instead of mock data
+            const emptyData = {
+                overall: {
+                    groundedness: 0,
+                    contextRelevance: 0,
+                    answerQuality: 0,
+                    averageLatency: 0,
+                    totalQueries: 0
+                },
+                historical: [],
+                latencyDistribution: [],
+                detailed: []
+            };
+            setEvaluationData(emptyData);
         } finally {
             setLoading(false);
         }
-    };
-
-    const generateMockEvaluationData = () => {
-        const days = timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90;
-        const historical = [];
-        const detailed = [];
-
-        for (let i = days - 1; i >= 0; i--) {
-            const date = new Date();
-            date.setDate(date.getDate() - i);
-            
-            historical.push({
-                date: date.toISOString().split('T')[0],
-                groundedness: 0.75 + Math.random() * 0.2,
-                contextRelevance: 0.70 + Math.random() * 0.25,
-                answerQuality: 0.75 + Math.random() * 0.20,
-                latency: 800 + Math.random() * 800
-            });
-        }
-
-        // Generate detailed evaluation results
-        for (let i = 0; i < 20; i++) {
-            detailed.push({
-                id: `eval_${i + 1}`,
-                timestamp: new Date(Date.now() - Math.random() * 7 * 24 * 60 * 60 * 1000),
-                query: `Sample query ${i + 1}: How can I improve my productivity?`,
-                groundedness: 0.70 + Math.random() * 0.30,
-                contextRelevance: 0.65 + Math.random() * 0.35,
-                answerQuality: 0.70 + Math.random() * 0.30,
-                latency: 500 + Math.random() * 2000,
-                model: ['gpt-4', 'gpt-3.5-turbo', 'claude-3'][Math.floor(Math.random() * 3)]
-            });
-        }
-
-        return {
-            overall: {
-                groundedness: historical.reduce((sum, item) => sum + item.groundedness, 0) / historical.length,
-                contextRelevance: historical.reduce((sum, item) => sum + item.contextRelevance, 0) / historical.length,
-                answerQuality: historical.reduce((sum, item) => sum + item.answerQuality, 0) / historical.length,
-                averageLatency: historical.reduce((sum, item) => sum + item.latency, 0) / historical.length
-            },
-            historical,
-            detailed
-        };
     };
 
     const handleRefresh = async () => {
@@ -978,10 +1194,10 @@ const EvaluationPage = () => {
                                     color: activeTab === 1 ? '#2563eb' : '#64748b',
                                     minWidth: '40px',
                                 }}>
-                                    <Timeline />
+                                    <DataUsage />
                                 </ListItemIcon>
                                 <ListItemText 
-                                    primary="Evaluations" 
+                                    primary="Datasets" 
                                     primaryTypographyProps={{
                                         fontSize: '0.875rem',
                                         fontWeight: activeTab === 1 ? 600 : 500,
@@ -1023,59 +1239,14 @@ const EvaluationPage = () => {
                                     color: activeTab === 2 ? '#2563eb' : '#64748b',
                                     minWidth: '40px',
                                 }}>
-                                    <DataUsage />
+                                    <Timeline />
                                 </ListItemIcon>
                                 <ListItemText 
-                                    primary="Datasets" 
+                                    primary="Evaluations" 
                                     primaryTypographyProps={{
                                         fontSize: '0.875rem',
                                         fontWeight: activeTab === 2 ? 600 : 500,
                                         color: activeTab === 2 ? '#2563eb' : '#475569',
-                                    }}
-                                />
-                            </ListItemButton>
-                            
-                            <ListItemButton
-                                selected={activeTab === 3}
-                                onClick={() => setActiveTab(3)}
-                                sx={{ 
-                                    borderRadius: '12px', 
-                                    mb: 1,
-                                    margin: '4px 0',
-                                    padding: '12px 16px',
-                                    transition: 'all 0.2s ease-in-out',
-                                    '&:hover': {
-                                        backgroundColor: 'rgba(37, 99, 235, 0.08)',
-                                        transform: 'translateX(4px)',
-                                    },
-                                    '&.Mui-selected': {
-                                        backgroundColor: 'rgba(37, 99, 235, 0.12)',
-                                        color: '#2563eb',
-                                        '&:hover': {
-                                            backgroundColor: 'rgba(37, 99, 235, 0.16)',
-                                        },
-                                        '& .MuiListItemIcon-root': {
-                                            color: '#2563eb',
-                                        },
-                                        '& .MuiListItemText-primary': {
-                                            color: '#2563eb',
-                                            fontWeight: 600,
-                                        },
-                                    },
-                                }}
-                            >
-                                <ListItemIcon sx={{ 
-                                    color: activeTab === 3 ? '#2563eb' : '#64748b',
-                                    minWidth: '40px',
-                                }}>
-                                    <Assignment />
-                                </ListItemIcon>
-                                <ListItemText 
-                                    primary="Test Cases" 
-                                    primaryTypographyProps={{
-                                        fontSize: '0.875rem',
-                                        fontWeight: activeTab === 3 ? 600 : 500,
-                                        color: activeTab === 3 ? '#2563eb' : '#475569',
                                     }}
                                 />
                             </ListItemButton>
@@ -1098,9 +1269,8 @@ const EvaluationPage = () => {
                         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                             <Typography variant="h4" sx={{ fontWeight: 300 }}>
                                 {activeTab === 0 && 'Dashboard Overview'}
-                                {activeTab === 1 && 'Evaluation Results'}
-                                {activeTab === 2 && 'Dataset Management'}
-                                {activeTab === 3 && 'Test Case Execution'}
+                                {activeTab === 1 && 'Dataset Management'}
+                                {activeTab === 2 && 'Evaluation Results'}
                             </Typography>
                             <Box sx={{ display: 'flex', gap: 2 }}>
                                 <FormControl sx={{ minWidth: 120 }}>
@@ -1332,6 +1502,7 @@ const EvaluationPage = () => {
                                             <TableCell sx={{ fontWeight: 600 }}>Timestamp</TableCell>
                                             <TableCell sx={{ fontWeight: 600 }}>Query</TableCell>
                                             <TableCell sx={{ fontWeight: 600 }}>Model</TableCell>
+                                            <TableCell sx={{ fontWeight: 600 }}>Dataset</TableCell>
                                             <TableCell align="center" sx={{ fontWeight: 600 }}>Groundedness</TableCell>
                                             <TableCell align="center" sx={{ fontWeight: 600 }}>Context Relevance</TableCell>
                                             <TableCell align="center" sx={{ fontWeight: 600 }}>Answer Quality</TableCell>
@@ -1339,8 +1510,8 @@ const EvaluationPage = () => {
                                         </TableRow>
                                     </TableHead>
                                     <TableBody>
-                                        {evaluationData.detailed.slice(0, 10).map((row) => (
-                                            <TableRow key={row.id} hover>
+                                        {evaluationData.detailed.slice(0, 10).map((row, index) => (
+                                            <TableRow key={row.id || `result-${index}`} hover>
                                                 <TableCell>
                                                     <Typography variant="body2" color="text.secondary">
                                                         {new Date(row.timestamp).toLocaleString()}
@@ -1357,6 +1528,14 @@ const EvaluationPage = () => {
                                                         size="small" 
                                                         variant="outlined"
                                                         color={row.model && row.model.includes('gpt-4') ? 'primary' : 'default'}
+                                                    />
+                                                </TableCell>
+                                                <TableCell>
+                                                    <Chip 
+                                                        label={row.dataset || 'Unknown'} 
+                                                        size="small" 
+                                                        variant="outlined"
+                                                        color="secondary"
                                                     />
                                                 </TableCell>
                                                 <TableCell align="center">
@@ -1401,6 +1580,15 @@ const EvaluationPage = () => {
                                                 </TableCell>
                                             </TableRow>
                                         ))}
+                                        {evaluationData.detailed.length === 0 && (
+                                            <TableRow>
+                                                <TableCell colSpan={8} align="center">
+                                                    <Typography variant="body2" color="text.secondary" sx={{ py: 4 }}>
+                                                        No evaluation results found. Run some test cases to see results here.
+                                                    </Typography>
+                                                </TableCell>
+                                            </TableRow>
+                                        )}
                                     </TableBody>
                                 </Table>
                             </TableContainer>
@@ -1409,110 +1597,8 @@ const EvaluationPage = () => {
                         </Box>
                     )}
 
-                    {/* Evaluations Tab */}
-                    {activeTab === 1 && (
-                        <Box>
-                            <Card>
-                                <CardContent>
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                                        <Typography variant="h5" gutterBottom>
-                                            Evaluation Results
-                                        </Typography>
-                                        <Box sx={{ display: 'flex', gap: 2 }}>
-                                            <FormControl size="small" sx={{ minWidth: 150 }}>
-                                                <InputLabel>Filter by Model</InputLabel>
-                                                <Select
-                                                    value={filterModel}
-                                                    onChange={(e) => setFilterModel(e.target.value)}
-                                                    label="Filter by Model"
-                                                >
-                                                    <MenuItem value="">All Models</MenuItem>
-                                                    {availableModels.map((model) => (
-                                                        <MenuItem key={model?.name || 'unknown'} value={model?.name || ''}>
-                                                            {model?.display_name || model?.name || 'Unknown Model'}
-                                                        </MenuItem>
-                                                    ))}
-                                                </Select>
-                                            </FormControl>
-                                            <FormControl size="small" sx={{ minWidth: 150 }}>
-                                                <InputLabel>Filter by Dataset</InputLabel>
-                                                <Select
-                                                    value={filterDataset}
-                                                    onChange={(e) => setFilterDataset(e.target.value)}
-                                                    label="Filter by Dataset"
-                                                >
-                                                    <MenuItem value="">All Datasets</MenuItem>
-                                                    {datasets.map((dataset) => (
-                                                        <MenuItem key={dataset?.id || 'unknown'} value={dataset?.name || ''}>
-                                                            {dataset?.name || 'Unknown Dataset'}
-                                                        </MenuItem>
-                                                    ))}
-                                                </Select>
-                                            </FormControl>
-                                        </Box>
-                                    </Box>
-                                    
-                                    <TableContainer>
-                                        <Table>
-                                            <TableHead>
-                                                <TableRow>
-                                                    <TableCell>Dataset</TableCell>
-                                                    <TableCell>Model</TableCell>
-                                                    <TableCell>Groundedness</TableCell>
-                                                    <TableCell>Context Relevance</TableCell>
-                                                    <TableCell>Answer Quality</TableCell>
-                                                    <TableCell>Avg Latency (s)</TableCell>
-                                                    <TableCell>Run Date</TableCell>
-                                                    <TableCell>Status</TableCell>
-                                                </TableRow>
-                                            </TableHead>
-                                            <TableBody>
-                                                {filteredResults.map((result) => (
-                                                    <TableRow key={result?.id || 'unknown'}>
-                                                        <TableCell>{result?.dataset || 'Unknown'}</TableCell>
-                                                        <TableCell>{result?.model || 'Unknown'}</TableCell>
-                                                        <TableCell>
-                                                            <Chip 
-                                                                label={(result?.groundedness || 0).toFixed(3)}
-                                                                color={(result?.groundedness || 0) > 0.8 ? "success" : (result?.groundedness || 0) > 0.7 ? "warning" : "error"}
-                                                                size="small"
-                                                            />
-                                                        </TableCell>
-                                                        <TableCell>
-                                                            <Chip 
-                                                                label={(result?.contextRelevance || 0).toFixed(3)}
-                                                                color={(result?.contextRelevance || 0) > 0.8 ? "success" : (result?.contextRelevance || 0) > 0.7 ? "warning" : "error"}
-                                                                size="small"
-                                                            />
-                                                        </TableCell>
-                                                        <TableCell>
-                                                            <Chip 
-                                                                label={(result?.answerQuality || 0).toFixed(3)}
-                                                                color={(result?.answerQuality || 0) > 0.8 ? "success" : (result?.answerQuality || 0) > 0.7 ? "warning" : "error"}
-                                                                size="small"
-                                                            />
-                                                        </TableCell>
-                                                        <TableCell>{(result?.avgLatency || 0).toFixed(2)}</TableCell>
-                                                        <TableCell>{result?.runDate || 'Unknown'}</TableCell>
-                                                        <TableCell>
-                                                            <Chip 
-                                                                label={result?.status || 'Unknown'}
-                                                                color="success"
-                                                                size="small"
-                                                            />
-                                                        </TableCell>
-                                                    </TableRow>
-                                                ))}
-                                            </TableBody>
-                                        </Table>
-                                    </TableContainer>
-                                </CardContent>
-                            </Card>
-                        </Box>
-                    )}
-
                     {/* Datasets Tab */}
-                    {activeTab === 2 && (
+                    {activeTab === 1 && (
                         <Box>
                             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
                                 <Typography variant="h5" gutterBottom>
@@ -2104,65 +2190,169 @@ const EvaluationPage = () => {
                         </Box>
                     )}
 
-                    {/* Test Cases Tab */}
-                    {activeTab === 3 && (
+                    {/* Evaluations Tab */}
+                    {activeTab === 2 && (
                         <Box>
                             <Card>
                                 <CardContent>
                                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
                                         <Typography variant="h5" gutterBottom>
-                                            Test Cases
+                                            Evaluations
                                         </Typography>
                                         <Button
                                             variant="contained"
                                             startIcon={<PlayArrow />}
                                             onClick={() => setCreateTestCaseOpen(true)}
                                         >
-                                            Run New Test
+                                            Create Test
                                         </Button>
                                     </Box>
                                     
-                                    <Grid container spacing={3}>
-                                        {datasets.filter(d => d?.status === "Ready").map((dataset) => (
-                                            <Grid item xs={12} md={6} key={dataset?.id || 'unknown'}>
-                                                <Card variant="outlined">
-                                                    <CardContent>
-                                                        <Typography variant="h6" gutterBottom>
-                                                            {dataset?.name || 'Unknown Dataset'}
-                                                        </Typography>
-                                                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                                                            {dataset?.description || 'No description'}
-                                                        </Typography>
-                                                        <Typography variant="body2" sx={{ mb: 2 }}>
-                                                            Documents: {dataset?.documentCount || 0}
-                                                        </Typography>
-                                                        
-                                                        <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-                                                            {availableModels.slice(0, 3).map((model) => (
-                                                                <Chip
-                                                                    key={model?.name || 'unknown'}
-                                                                    label={model?.display_name || model?.name || 'Unknown Model'}
-                                                                    size="small"
+                                    {error && (
+                                        <Alert severity="error" sx={{ mb: 2 }}>
+                                            {error}
+                                        </Alert>
+                                    )}
+                                    
+                                    {/* Test Case Results Table */}
+                                    <TableContainer>
+                                        <Table>
+                                            <TableHead>
+                                                <TableRow>
+                                                    <TableCell>Test ID</TableCell>
+                                                    <TableCell>Dataset</TableCell>
+                                                    <TableCell>Model</TableCell>
+                                                    <TableCell>Groundedness</TableCell>
+                                                    <TableCell>Context Relevance</TableCell>
+                                                    <TableCell>Answer Quality</TableCell>
+                                                    <TableCell>Avg Latency (s)</TableCell>
+                                                    <TableCell>Run Date</TableCell>
+                                                    <TableCell>Status</TableCell>
+                                                </TableRow>
+                                            </TableHead>
+                                            <TableBody>
+                                                {testCaseResults.length === 0 ? (
+                                                    <TableRow>
+                                                        <TableCell colSpan={9} align="center" sx={{ py: 4 }}>
+                                                            <Typography variant="body2" color="text.secondary">
+                                                                No test cases run yet. Create your first test case to get started.
+                                                            </Typography>
+                                                        </TableCell>
+                                                    </TableRow>
+                                                ) : (
+                                                    testCaseResults.map((testCase) => (
+                                                        <TableRow key={testCase.id}>
+                                                            <TableCell>#{testCase.id}</TableCell>
+                                                            <TableCell>{testCase.dataset_name}</TableCell>
+                                                            <TableCell>
+                                                                <Chip 
+                                                                    label={testCase.models && testCase.models.length > 0 ? testCase.models[0] : 'N/A'} 
+                                                                    size="small" 
                                                                     variant="outlined"
                                                                 />
-                                                            ))}
-                                                        </Box>
-                                                        
-                                                        <Button
-                                                            variant="contained"
-                                                            size="small"
-                                                            startIcon={runningTestCase === (dataset?.id || 'unknown') ? <Stop /> : <PlayArrow />}
-                                                            disabled={runningTestCase === (dataset?.id || 'unknown')}
-                                                            onClick={() => handleRunTestCase(dataset?.id || 'unknown', availableModels.slice(0, 3).map(m => m?.name || 'unknown').filter(name => name !== 'unknown'))}
-                                                            fullWidth
-                                                        >
-                                                            {runningTestCase === (dataset?.id || 'unknown') ? 'Running...' : 'Run Test'}
-                                                        </Button>
-                                                    </CardContent>
-                                                </Card>
-                                            </Grid>
-                                        ))}
-                                    </Grid>
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                {testCase.results && testCase.results.length > 0 ? (
+                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                        <Typography variant="body2" fontWeight="bold">
+                                                                            {(testCase.results[0].groundedness * 100).toFixed(1)}%
+                                                                        </Typography>
+                                                                        <LinearProgress 
+                                                                            variant="determinate" 
+                                                                            value={testCase.results[0].groundedness * 100}
+                                                                            sx={{ 
+                                                                                width: 60, 
+                                                                                height: 6,
+                                                                                '& .MuiLinearProgress-bar': {
+                                                                                    backgroundColor: testCase.results[0].groundedness >= 0.8 ? theme.palette.success.main :
+                                                                                                   testCase.results[0].groundedness >= 0.6 ? theme.palette.warning.main :
+                                                                                                   theme.palette.error.main
+                                                                                }
+                                                                            }}
+                                                                        />
+                                                                    </Box>
+                                                                ) : '-'}
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                {testCase.results && testCase.results.length > 0 ? (
+                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                        <Typography variant="body2" fontWeight="bold">
+                                                                            {(testCase.results[0].context_relevance * 100).toFixed(1)}%
+                                                                        </Typography>
+                                                                        <LinearProgress 
+                                                                            variant="determinate" 
+                                                                            value={testCase.results[0].context_relevance * 100}
+                                                                            sx={{ 
+                                                                                width: 60, 
+                                                                                height: 6,
+                                                                                '& .MuiLinearProgress-bar': {
+                                                                                    backgroundColor: testCase.results[0].context_relevance >= 0.8 ? theme.palette.success.main :
+                                                                                                   testCase.results[0].context_relevance >= 0.6 ? theme.palette.warning.main :
+                                                                                                   theme.palette.error.main
+                                                                                }
+                                                                            }}
+                                                                        />
+                                                                    </Box>
+                                                                ) : '-'}
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                {testCase.results && testCase.results.length > 0 ? (
+                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                        <Typography variant="body2" fontWeight="bold">
+                                                                            {(testCase.results[0].answer_quality * 100).toFixed(1)}%
+                                                                        </Typography>
+                                                                        <LinearProgress 
+                                                                            variant="determinate" 
+                                                                            value={testCase.results[0].answer_quality * 100}
+                                                                            sx={{ 
+                                                                                width: 60, 
+                                                                                height: 6,
+                                                                                '& .MuiLinearProgress-bar': {
+                                                                                    backgroundColor: testCase.results[0].answer_quality >= 0.8 ? theme.palette.success.main :
+                                                                                                   testCase.results[0].answer_quality >= 0.6 ? theme.palette.warning.main :
+                                                                                                   theme.palette.error.main
+                                                                                }
+                                                                            }}
+                                                                        />
+                                                                    </Box>
+                                                                ) : '-'}
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                {testCase.results && testCase.results.length > 0 ? (
+                                                                    <Typography 
+                                                                        variant="body2" 
+                                                                        fontWeight="bold"
+                                                                        color={
+                                                                            testCase.results[0].avg_latency < 1 ? theme.palette.success.main :
+                                                                            testCase.results[0].avg_latency < 2 ? theme.palette.warning.main :
+                                                                            theme.palette.error.main
+                                                                        }
+                                                                    >
+                                                                        {testCase.results[0].avg_latency.toFixed(2)}s
+                                                                    </Typography>
+                                                                ) : '-'}
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                {new Date(testCase.created_at).toLocaleDateString()}
+                                                            </TableCell>
+                                                            <TableCell>
+                                                                <Chip 
+                                                                    label={testCase.status}
+                                                                    color={
+                                                                        testCase.status === "completed" ? "success" : 
+                                                                        testCase.status === "running" ? "warning" :
+                                                                        testCase.status === "failed" ? "error" : "default"
+                                                                    }
+                                                                    size="small"
+                                                                    icon={testCase.status === "running" ? <CircularProgress size={12} /> : undefined}
+                                                                />
+                                                            </TableCell>
+                                                        </TableRow>
+                                                    ))
+                                                )}
+                                            </TableBody>
+                                        </Table>
+                                    </TableContainer>
                                 </CardContent>
                             </Card>
                         </Box>
@@ -2416,6 +2606,309 @@ const EvaluationPage = () => {
                                 </Button>
                             </DialogActions>
                         ) : null}
+                    </Dialog>
+
+                    {/* Test Case Creation Dialog */}
+                    <Dialog 
+                        open={createTestCaseOpen} 
+                        onClose={() => setCreateTestCaseOpen(false)}
+                        maxWidth="md"
+                        fullWidth
+                    >
+                        <DialogTitle>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <PlayArrow color="primary" />
+                                Create Test Case
+                            </Box>
+                        </DialogTitle>
+                        <DialogContent>
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, mt: 2 }}>
+                                {/* Dataset Selector */}
+                                <FormControl fullWidth>
+                                    <InputLabel>Select Dataset</InputLabel>
+                                    <Select
+                                        value={selectedDatasetId}
+                                        onChange={(e) => setSelectedDatasetId(e.target.value)}
+                                        input={<OutlinedInput label="Select Dataset" />}
+                                    >
+                                        {datasets.filter(d => d?.status === "Ready").map((dataset) => (
+                                            <MenuItem key={dataset?.id} value={dataset?.id}>
+                                                <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                                                    <Typography variant="body1">
+                                                        {dataset?.name || 'Unknown Dataset'}
+                                                    </Typography>
+                                                    <Typography variant="caption" color="text.secondary">
+                                                        {dataset?.description || 'No description'} • {dataset?.documentCount || 0} documents
+                                                    </Typography>
+                                                </Box>
+                                            </MenuItem>
+                                        ))}
+                                    </Select>
+                                </FormControl>
+
+                                {/* Model Selector */}
+                                <FormControl fullWidth>
+                                    <InputLabel>Select Model</InputLabel>
+                                    <Select
+                                        value={selectedModelId}
+                                        onChange={(e) => setSelectedModelId(e.target.value)}
+                                        input={<OutlinedInput label="Select Model" />}
+                                    >
+                                        {availableModels.map((model) => (
+                                            <MenuItem key={model.name} value={model.name}>
+                                                <ListItemText 
+                                                    primary={model.display_name || model.name}
+                                                    secondary={`Size: ${model.size || 'Unknown'}`}
+                                                />
+                                            </MenuItem>
+                                        ))}
+                                    </Select>
+                                </FormControl>
+
+                                <Divider />
+
+                                {/* Retrieval Configuration Toggle */}
+                                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <Typography variant="h6">
+                                        Retrieval Configuration
+                                    </Typography>
+                                    <Button
+                                        variant="outlined"
+                                        size="small"
+                                        onClick={() => setShowAdvancedRetrieval(!showAdvancedRetrieval)}
+                                    >
+                                        {showAdvancedRetrieval ? 'Hide Advanced' : 'Show Advanced'}
+                                    </Button>
+                                </Box>
+
+                                {/* Advanced Retrieval Settings */}
+                                {showAdvancedRetrieval && (
+                                    <Card variant="outlined" sx={{ p: 2 }}>
+                                        <Grid container spacing={2}>
+                                            {/* Similarity Threshold */}
+                                            <Grid item xs={12} sm={6}>
+                                                <Typography variant="subtitle2" gutterBottom>
+                                                    Similarity Threshold: {testRetrievalConfig.similarity_threshold}
+                                                </Typography>
+                                                <Box sx={{ px: 1 }}>
+                                                    <input
+                                                        type="range"
+                                                        min="0.0"
+                                                        max="1.0"
+                                                        step="0.1"
+                                                        value={testRetrievalConfig.similarity_threshold}
+                                                        onChange={(e) => handleTestRetrievalConfigChange('similarity_threshold', parseFloat(e.target.value))}
+                                                        style={{ width: '100%' }}
+                                                    />
+                                                </Box>
+                                                <Typography variant="caption" color="text.secondary">
+                                                    Minimum similarity score for retrieving chunks
+                                                </Typography>
+                                            </Grid>
+
+                                            {/* Keyword Similarity Weight */}
+                                            <Grid item xs={12} sm={6}>
+                                                <Typography variant="subtitle2" gutterBottom>
+                                                    Keyword Weight: {testRetrievalConfig.keyword_similarity_weight}
+                                                </Typography>
+                                                <Box sx={{ px: 1 }}>
+                                                    <input
+                                                        type="range"
+                                                        min="0.0"
+                                                        max="1.0"
+                                                        step="0.1"
+                                                        value={testRetrievalConfig.keyword_similarity_weight}
+                                                        onChange={(e) => handleTestRetrievalConfigChange('keyword_similarity_weight', parseFloat(e.target.value))}
+                                                        style={{ width: '100%' }}
+                                                    />
+                                                </Box>
+                                                <Typography variant="caption" color="text.secondary">
+                                                    Only used with Hybrid search. 1.0 = keyword, 0.0 = semantic
+                                                </Typography>
+                                            </Grid>
+
+                                            {/* Max Chunks */}
+                                            <Grid item xs={12} sm={6}>
+                                                <FormControl fullWidth size="small">
+                                                    <InputLabel>Max Chunks</InputLabel>
+                                                    <Select
+                                                        value={testRetrievalConfig.max_chunks}
+                                                        onChange={(e) => handleTestRetrievalConfigChange('max_chunks', parseInt(e.target.value))}
+                                                        input={<OutlinedInput label="Max Chunks" />}
+                                                    >
+                                                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20].map((num) => (
+                                                            <MenuItem key={num} value={num}>{num}</MenuItem>
+                                                        ))}
+                                                    </Select>
+                                                </FormControl>
+                                                <Typography variant="caption" color="text.secondary">
+                                                    Maximum chunks to retrieve
+                                                </Typography>
+                                            </Grid>
+
+                                            {/* Search Type */}
+                                            <Grid item xs={12} sm={6}>
+                                                <FormControl fullWidth size="small">
+                                                    <InputLabel>Search Type</InputLabel>
+                                                    <Select
+                                                        value={testRetrievalConfig.search_type}
+                                                        onChange={(e) => handleTestRetrievalConfigChange('search_type', e.target.value)}
+                                                        input={<OutlinedInput label="Search Type" />}
+                                                    >
+                                                        <MenuItem value="similarity">Similarity Search</MenuItem>
+                                                        <MenuItem value="mmr">Maximum Marginal Relevance (MMR)</MenuItem>
+                                                        <MenuItem value="similarity_score_threshold">Similarity with Score Threshold</MenuItem>
+                                                        <MenuItem value="hybrid">Hybrid (Semantic + Keyword)</MenuItem>
+                                                    </Select>
+                                                </FormControl>
+                                                <Typography variant="caption" color="text.secondary">
+                                                    Search algorithm for document retrieval. Hybrid combines semantic similarity with keyword matching.
+                                                </Typography>
+                                            </Grid>
+
+                                            {/* Reranker Settings */}
+                                            <Grid item xs={12}>
+                                                <Box sx={{ mt: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                                                    <Typography variant="subtitle1" gutterBottom>
+                                                        Reranker Configuration
+                                                    </Typography>
+                                                    
+                                                    <FormControlLabel
+                                                        control={
+                                                            <Switch
+                                                                checked={testRetrievalConfig.reranker_enabled}
+                                                                onChange={(e) => handleTestRetrievalConfigChange('reranker_enabled', e.target.checked)}
+                                                            />
+                                                        }
+                                                        label="Enable Reranker Model"
+                                                    />
+
+                                                    {testRetrievalConfig.reranker_enabled && (
+                                                        <FormControl fullWidth size="small" sx={{ mt: 2 }}>
+                                                            <InputLabel>Reranker Model</InputLabel>
+                                                            <Select
+                                                                value={testRetrievalConfig.reranker_model}
+                                                                onChange={(e) => handleTestRetrievalConfigChange('reranker_model', e.target.value)}
+                                                                input={<OutlinedInput label="Reranker Model" />}
+                                                            >
+                                                                {Array.isArray(rerankerModels) && rerankerModels.map((model) => (
+                                                                    <MenuItem key={model?.name || 'unknown'} value={model?.name || ''}>
+                                                                        {model?.display_name || model?.name || 'Unknown Model'}
+                                                                    </MenuItem>
+                                                                ))}
+                                                            </Select>
+                                                        </FormControl>
+                                                    )}
+                                                </Box>
+                                            </Grid>
+
+                                            {/* Auto Merging Settings */}
+                                            <Grid item xs={12}>
+                                                <Box sx={{ mt: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                                                    <Typography variant="subtitle1" gutterBottom>
+                                                        Auto Merging Retrieval
+                                                    </Typography>
+                                                    
+                                                    <FormControlLabel
+                                                        control={
+                                                            <Switch
+                                                                checked={testRetrievalConfig.auto_merging_enabled}
+                                                                onChange={(e) => handleTestRetrievalConfigChange('auto_merging_enabled', e.target.checked)}
+                                                            />
+                                                        }
+                                                        label="Enable Auto Merging"
+                                                    />
+
+                                                    {testRetrievalConfig.auto_merging_enabled && (
+                                                        <Box sx={{ mt: 2 }}>
+                                                            <Typography variant="subtitle2" gutterBottom>
+                                                                Merging Similarity Threshold: {testRetrievalConfig.auto_merging_similarity_threshold}
+                                                            </Typography>
+                                                            <Box sx={{ px: 1 }}>
+                                                                <input
+                                                                    type="range"
+                                                                    min="0.5"
+                                                                    max="1.0"
+                                                                    step="0.05"
+                                                                    value={testRetrievalConfig.auto_merging_similarity_threshold}
+                                                                    onChange={(e) => handleTestRetrievalConfigChange('auto_merging_similarity_threshold', parseFloat(e.target.value))}
+                                                                    style={{ width: '100%' }}
+                                                                />
+                                                            </Box>
+                                                            <Typography variant="caption" color="text.secondary">
+                                                                Higher values merge only very similar chunks
+                                                            </Typography>
+                                                        </Box>
+                                                    )}
+                                                </Box>
+                                            </Grid>
+                                        </Grid>
+                                    </Card>
+                                )}
+
+                                {/* Configuration Summary */}
+                                {selectedDatasetId && selectedModelId && (
+                                    <Card variant="outlined" sx={{ p: 2, bgcolor: 'background.default' }}>
+                                        <Typography variant="h6" gutterBottom color="primary">
+                                            Test Configuration Summary
+                                        </Typography>
+                                        <Grid container spacing={2}>
+                                            <Grid item xs={12} sm={6}>
+                                                <Typography variant="subtitle2" color="text.secondary">
+                                                    Dataset
+                                                </Typography>
+                                                <Typography variant="body2">
+                                                    {datasets.find(d => d.id === selectedDatasetId)?.name || 'Unknown'}
+                                                </Typography>
+                                            </Grid>
+                                            <Grid item xs={12} sm={6}>
+                                                <Typography variant="subtitle2" color="text.secondary">
+                                                    Model
+                                                </Typography>
+                                                <Typography variant="body2">
+                                                    {(() => {
+                                                        const model = availableModels.find(m => m.name === selectedModelId);
+                                                        return model?.display_name || selectedModelId;
+                                                    })()}
+                                                </Typography>
+                                            </Grid>
+                                            <Grid item xs={12}>
+                                                <Typography variant="subtitle2" color="text.secondary">
+                                                    Retrieval Settings
+                                                </Typography>
+                                                <Typography variant="body2">
+                                                    Similarity: {testRetrievalConfig.similarity_threshold}, 
+                                                    Max Chunks: {testRetrievalConfig.max_chunks}, 
+                                                    Search: {testRetrievalConfig.search_type}
+                                                    {testRetrievalConfig.reranker_enabled && ', Reranker: Enabled'}
+                                                    {testRetrievalConfig.auto_merging_enabled && ', Auto-merge: Enabled'}
+                                                </Typography>
+                                            </Grid>
+                                        </Grid>
+                                    </Card>
+                                )}
+
+                                {/* Error Display */}
+                                {error && (
+                                    <Alert severity="error">
+                                        {error}
+                                    </Alert>
+                                )}
+                            </Box>
+                        </DialogContent>
+                        <DialogActions>
+                            <Button onClick={() => setCreateTestCaseOpen(false)}>
+                                Cancel
+                            </Button>
+                            <Button
+                                variant="contained"
+                                onClick={handleCreateTestCase}
+                                disabled={!selectedDatasetId || !selectedModelId || runningTestCase}
+                                startIcon={runningTestCase ? <CircularProgress size={20} /> : <PlayArrow />}
+                            >
+                                {runningTestCase ? 'Running Test...' : 'Run Evaluation'}
+                            </Button>
+                        </DialogActions>
                     </Dialog>
                 </Box>
             </Box>

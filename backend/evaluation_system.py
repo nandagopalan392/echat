@@ -84,6 +84,13 @@ class OllamaProvider(LLMProvider):
             )
             response.raise_for_status()
             return response.json().get("response", "")
+        except requests.exceptions.Timeout as e:
+            logger.error(f"Timeout error when calling Ollama (timeout: {evaluation_config.EVALUATION_TIMEOUT}s): {e}")
+            # Return a default low score for timeout cases instead of failing completely
+            return "Error: Request timed out. The evaluation model is taking too long to respond."
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error when calling Ollama: {e}")
+            return "Error: Could not connect to evaluation model."
         except Exception as e:
             logger.error(f"Error generating response from Ollama: {e}")
             raise
