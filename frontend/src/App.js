@@ -1,4 +1,6 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { ThemeProvider, CssBaseline } from '@mui/material';
+import { theme } from './theme';
 import Login from './components/Login';
 import Register from './components/Register';
 import Chat from './components/Chat';
@@ -6,6 +8,7 @@ import KnowledgeHubPage from './pages/KnowledgeHubPage';
 import DocumentChunksPage from './pages/DocumentChunksPage';
 import ModelSettingsPage from './pages/ModelSettingsPage';
 import ManageUserPage from './pages/ManageUserPage';
+import EvaluationPage from './pages/EvaluationPage';
 
 const PrivateRoute = ({ children }) => {
     const isAuthenticated = !!localStorage.getItem('token');
@@ -14,10 +17,12 @@ const PrivateRoute = ({ children }) => {
 
 function App() {
     return (
-        <Router>
-            <Routes>
-                <Route path="/login" element={<Login />} />
-                <Route path="/register" element={<Register />} />
+        <ThemeProvider theme={theme}>
+            <CssBaseline />
+            <Router>
+                <Routes>
+                    <Route path="/login" element={<Login />} />
+                    <Route path="/register" element={<Register />} />
                 <Route
                     path="/chat"
                     element={
@@ -58,9 +63,18 @@ function App() {
                         </PrivateRoute>
                     }
                 />
+                <Route
+                    path="/evaluation"
+                    element={
+                        <PrivateRoute>
+                            <EvaluationPage />
+                        </PrivateRoute>
+                    }
+                />
                 <Route path="/" element={<Navigate to="/login" />} />
             </Routes>
         </Router>
+        </ThemeProvider>
     );
 }
 

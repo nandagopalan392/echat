@@ -1,38 +1,29 @@
 """
 Table Extraction and Processing for Document Chunking
-Handles table detection and extraction from various document formats
+Handles table detection and extraction from various document formats using Docling
 """
-
-import logging
 import pandas as pd
+import re
+import logging
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
-import re
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
-# Try to import table extraction libraries
+# Try to import Docling for advanced document parsing
 try:
-    import pdfplumber
-    PDFPLUMBER_AVAILABLE = True
+    from docling.document_converter import DocumentConverter
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import PdfFormatOption
+    DOCLING_AVAILABLE = True
+    logger.info("Docling is available for advanced document parsing")
 except ImportError:
-    logger.warning("pdfplumber not available. PDF table extraction will be limited.")
-    PDFPLUMBER_AVAILABLE = False
+    logger.warning("Docling not available. Falling back to basic extraction methods.")
+    DOCLING_AVAILABLE = False
 
-try:
-    import tabula
-    TABULA_AVAILABLE = True
-except ImportError:
-    logger.warning("tabula-py not available. Advanced PDF table extraction disabled.")
-    TABULA_AVAILABLE = False
-
-try:
-    import camelot
-    CAMELOT_AVAILABLE = True
-except ImportError:
-    logger.warning("camelot-py not available. Advanced PDF table extraction disabled.")
-    CAMELOT_AVAILABLE = False
-
+# Fallback libraries for non-PDF formats
 try:
     from pptx import Presentation
     PPTX_AVAILABLE = True
@@ -47,11 +38,412 @@ except ImportError:
     logger.warning("python-docx not available. Word table extraction disabled.")
     DOCX_AVAILABLE = False
 
+# Legacy libraries for fallback
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    logger.warning("pdfplumber not available. PDF table extraction will be limited.")
+    PDFPLUMBER_AVAILABLE = False
 
-class TableExtractor:
-    """Extract tables from various document formats"""
+
+class DoclingTableExtractor:
+    """Extract tables using Docling's advanced document parsing capabilities"""
     
     def __init__(self):
+        self.converter = None
+        if DOCLING_AVAILABLE:
+            # Initialize Docling converter with optimized settings
+            self.converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(
+                        pipeline_options=PdfPipelineOptions(
+                            do_ocr=True,  # Enable OCR for scanned documents
+                            do_table_structure=True,  # Enable table structure recognition
+                            table_structure_options={
+                                "do_cell_matching": True,
+                                "mode": "accurate"  # Use accurate mode for better table detection
+                            }
+                        )
+                    )
+                }
+            )
+            logger.info("Docling DocumentConverter initialized with table structure recognition")
+    
+    def extract_tables_from_document(self, file_path: str) -> List[Dict[str, Any]]:
+        """
+        Extract tables using Docling's comprehensive document analysis
+        """
+        print(f"\n🚀 DEBUG: Starting Docling extraction for {file_path}")
+        
+        if not DOCLING_AVAILABLE or not self.converter:
+            print("🚀 DEBUG: Docling not available, falling back to legacy methods")
+            return []
+        
+        tables = []
+        
+        try:
+            # Convert document using Docling
+            print("🚀 DEBUG: Converting document with Docling...")
+            result = self.converter.convert(file_path)
+            document = result.document
+            
+            print(f"🚀 DEBUG: Document converted successfully")
+            print(f"  Pages: {len(document.pages) if hasattr(document, 'pages') else 'N/A'}")
+            print(f"  Elements: {len(document.body.elements) if hasattr(document, 'body') and hasattr(document.body, 'elements') else 'N/A'}")
+            
+            # Extract tables from document structure
+            for element_idx, element in enumerate(document.body.elements):
+                print(f"🚀 DEBUG: Processing element {element_idx}: {type(element).__name__}")
+                
+                # Check if element is a table
+                if hasattr(element, 'element_type') and 'table' in str(element.element_type).lower():
+                    print(f"🚀 DEBUG: Found table element {element_idx}")
+                    
+                    # Extract table data from Docling element
+                    table_data = self._extract_docling_table_data(element, element_idx + 1)
+                    
+                    if table_data:
+                        print(f"🚀 DEBUG: Successfully extracted table {element_idx + 1}")
+                        tables.append(table_data)
+                    else:
+                        print(f"🚀 DEBUG: Failed to extract data from table {element_idx + 1}")
+                
+                # Also check for table-like structures in text elements
+                elif hasattr(element, 'text') and element.text:
+                    if self._detect_table_in_text(element.text):
+                        print(f"🚀 DEBUG: Found table-like text in element {element_idx}")
+                        
+                        # Try to parse table from text
+                        table_data = self._parse_table_from_text(element.text, element_idx + 1)
+                        if table_data:
+                            print(f"🚀 DEBUG: Successfully parsed table from text element {element_idx + 1}")
+                            tables.append(table_data)
+            
+            print(f"🚀 DEBUG: Docling extraction completed. Found {len(tables)} tables")
+            return tables
+            
+        except Exception as e:
+            print(f"🚀 DEBUG: Docling extraction failed: {e}")
+            logger.error(f"Docling table extraction failed: {e}")
+            return []
+    
+    def _extract_docling_table_data(self, table_element, table_number: int) -> Optional[Dict[str, Any]]:
+        """Extract table data from Docling table element"""
+        print(f"\n🚀 DEBUG: _extract_docling_table_data for table {table_number}")
+        
+        try:
+            # Get table structure from Docling element
+            if hasattr(table_element, 'cells') and table_element.cells:
+                # Docling provides structured cell data
+                table_data = self._build_table_from_cells(table_element.cells)
+            elif hasattr(table_element, 'text') and table_element.text:
+                # Fallback to text parsing
+                table_data = self._parse_table_text(table_element.text)
+            else:
+                print("🚀 DEBUG: No extractable table data found in element")
+                return None
+            
+            if not table_data or len(table_data) < 2:
+                print("🚀 DEBUG: Insufficient table data extracted")
+                return None
+            
+            print(f"🚀 DEBUG: Raw table data extracted: {len(table_data)} rows")
+            print(f"  First row: {table_data[0] if table_data else 'N/A'}")
+            
+            # Validate table structure
+            if not self._validate_docling_table(table_data):
+                print("🚀 DEBUG: Table validation failed - not a real table")
+                return None
+            
+            # Process table data into DataFrame
+            processed_table = self._process_docling_table(table_data, table_number)
+            
+            if processed_table:
+                print(f"🚀 DEBUG: Successfully processed Docling table {table_number}")
+                return processed_table
+            else:
+                print(f"🚀 DEBUG: Failed to process Docling table {table_number}")
+                return None
+                
+        except Exception as e:
+            print(f"🚀 DEBUG: Error extracting Docling table data: {e}")
+            logger.warning(f"Failed to extract Docling table data: {e}")
+            return None
+    
+    def _build_table_from_cells(self, cells) -> List[List[str]]:
+        """Build table structure from Docling cell objects"""
+        print("🚀 DEBUG: Building table from Docling cells")
+        
+        try:
+            # Group cells by row and column
+            cell_grid = {}
+            max_row, max_col = 0, 0
+            
+            for cell in cells:
+                if hasattr(cell, 'bbox') and hasattr(cell, 'text'):
+                    # Use bounding box to determine position
+                    row = getattr(cell, 'row', 0)
+                    col = getattr(cell, 'col', 0)
+                    
+                    # Fallback: estimate position from bbox if row/col not available
+                    if not hasattr(cell, 'row') and hasattr(cell, 'bbox'):
+                        # Simple heuristic: sort by y-coordinate for rows, x-coordinate for columns
+                        row = int(cell.bbox.top / 20)  # Rough row estimation
+                        col = int(cell.bbox.left / 50)  # Rough column estimation
+                    
+                    cell_grid[(row, col)] = str(cell.text).strip()
+                    max_row = max(max_row, row)
+                    max_col = max(max_col, col)
+            
+            # Build table data from grid
+            table_data = []
+            for row in range(max_row + 1):
+                row_data = []
+                for col in range(max_col + 1):
+                    cell_content = cell_grid.get((row, col), "")
+                    row_data.append(cell_content)
+                table_data.append(row_data)
+            
+            print(f"🚀 DEBUG: Built table with {len(table_data)} rows and {max_col + 1} columns")
+            return table_data
+            
+        except Exception as e:
+            print(f"🚀 DEBUG: Error building table from cells: {e}")
+            return []
+    
+    def _parse_table_text(self, text: str) -> List[List[str]]:
+        """Parse table from text representation"""
+        print("🚀 DEBUG: Parsing table from text")
+        
+        lines = text.strip().split('\n')
+        table_data = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Try different delimiters
+            if '|' in line:
+                row = [cell.strip() for cell in line.split('|') if cell.strip()]
+            elif '\t' in line:
+                row = [cell.strip() for cell in line.split('\t')]
+            elif ',' in line and line.count(',') >= 2:
+                row = [cell.strip() for cell in line.split(',')]
+            else:
+                # Split by multiple spaces
+                row = [cell.strip() for cell in re.split(r'\s{2,}', line) if cell.strip()]
+            
+            if row and len(row) >= 2:
+                table_data.append(row)
+        
+        print(f"🚀 DEBUG: Parsed {len(table_data)} rows from text")
+        return table_data
+    
+    def _validate_docling_table(self, table_data: List[List]) -> bool:
+        """Validate that extracted data represents a real table"""
+        print(f"🚀 DEBUG: Validating Docling table with {len(table_data)} rows")
+        
+        if not table_data or len(table_data) < 2:
+            print("🚀 DEBUG: Too few rows for a table")
+            return False
+        
+        # Check column consistency
+        row_lengths = [len(row) for row in table_data if row]
+        if not row_lengths or max(row_lengths) < 2:
+            print("🚀 DEBUG: Need at least 2 columns")
+            return False
+        
+        # Check for reasonable column consistency
+        avg_cols = sum(row_lengths) / len(row_lengths)
+        col_variation = max(row_lengths) - min(row_lengths)
+        
+        if col_variation > avg_cols * 0.5:  # Too much variation
+            print(f"🚀 DEBUG: Too much column variation: {col_variation} vs avg {avg_cols}")
+            return False
+        
+        # Check for table-like content patterns
+        structured_rows = 0
+        total_cells = 0
+        long_cells = 0
+        
+        for row in table_data[:5]:  # Check first 5 rows
+            if len(row) >= 2:
+                structured_rows += 1
+                
+                for cell in row:
+                    total_cells += 1
+                    if len(str(cell).strip()) > 100:  # Very long cell
+                        long_cells += 1
+        
+        # Too many long cells suggests paragraph text
+        if total_cells > 0 and (long_cells / total_cells) > 0.3:
+            print(f"🚀 DEBUG: Too many long cells ({long_cells}/{total_cells}) - likely text")
+            return False
+        
+        if structured_rows < 2:
+            print(f"🚀 DEBUG: Not enough structured rows ({structured_rows})")
+            return False
+        
+        print("🚀 DEBUG: Docling table validation passed")
+        return True
+    
+    def _process_docling_table(self, table_data: List[List], table_number: int) -> Optional[Dict[str, Any]]:
+        """Process validated table data into final format"""
+        print(f"🚀 DEBUG: Processing Docling table {table_number}")
+        
+        try:
+            # Clean table data
+            cleaned_data = []
+            for row in table_data:
+                cleaned_row = [str(cell).strip() for cell in row]
+                if any(cell for cell in cleaned_row):  # Keep rows with at least one non-empty cell
+                    cleaned_data.append(cleaned_row)
+            
+            if len(cleaned_data) < 2:
+                print("🚀 DEBUG: Not enough data after cleaning")
+                return None
+            
+            # Extract headers and data
+            headers = cleaned_data[0]
+            data_rows = cleaned_data[1:]
+            
+            # Ensure consistent row lengths
+            max_cols = len(headers)
+            for row in data_rows:
+                while len(row) < max_cols:
+                    row.append("")
+                if len(row) > max_cols:
+                    row = row[:max_cols]
+            
+            # Create DataFrame
+            df = pd.DataFrame(data_rows, columns=headers)
+            
+            # Clean DataFrame
+            df = self._clean_docling_dataframe(df)
+            
+            if df.empty:
+                print("🚀 DEBUG: DataFrame empty after cleaning")
+                return None
+            
+            # Final validation
+            if not self._validate_dataframe_structure(df):
+                print("🚀 DEBUG: DataFrame structure validation failed")
+                return None
+            
+            result = {
+                'data': df,
+                'page_number': None,  # Docling provides page info separately
+                'slide_number': None,
+                'table_number': table_number,
+                'bbox': None,
+                'extraction_method': 'docling_advanced',
+                'confidence': 0.95  # Higher confidence for Docling extraction
+            }
+            
+            print(f"🚀 DEBUG: Successfully processed Docling table {table_number}")
+            return result
+            
+        except Exception as e:
+            print(f"🚀 DEBUG: Error processing Docling table: {e}")
+            return None
+    
+    def _clean_docling_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Clean DataFrame extracted from Docling"""
+        if df.empty:
+            return df
+        
+        print(f"🚀 DEBUG: Cleaning Docling DataFrame with shape {df.shape}")
+        
+        # Clean column names
+        new_columns = []
+        for i, col in enumerate(df.columns):
+            col_str = str(col).strip()
+            if not col_str or col_str.lower() in ['none', 'nan', '']:
+                new_columns.append(f'Column_{i+1}')
+            else:
+                # Clean but preserve meaningful names
+                cleaned = re.sub(r'\s+', ' ', col_str).strip()
+                new_columns.append(cleaned)
+        
+        df.columns = new_columns
+        
+        # Clean cell values
+        for col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+            df[col] = df[col].replace(['None', 'nan', '', 'null'], pd.NA)
+        
+        # Remove empty rows and columns
+        df = df.dropna(how='all').reset_index(drop=True)
+        df = df.dropna(axis=1, how='all')
+        
+        print(f"🚀 DEBUG: Cleaned DataFrame shape: {df.shape}")
+        return df
+    
+    def _validate_dataframe_structure(self, df: pd.DataFrame) -> bool:
+        """Final validation of DataFrame structure"""
+        if df.empty or len(df) < 1:
+            return False
+        
+        # Check for meaningful data
+        non_empty_cols = sum(1 for col in df.columns if not df[col].isna().all())
+        if non_empty_cols < 2:
+            return False
+        
+        # Check cell length patterns
+        total_cells = 0
+        long_cells = 0
+        
+        for col in df.columns:
+            for val in df[col].dropna():
+                total_cells += 1
+                if len(str(val)) > 80:
+                    long_cells += 1
+        
+        # Reject if too many cells are very long
+        if total_cells > 0 and (long_cells / total_cells) > 0.4:
+            return False
+        
+        return True
+    
+    def _detect_table_in_text(self, text: str) -> bool:
+        """Detect if text contains table-like structures"""
+        if not text or len(text.strip()) < 50:
+            return False
+        
+        lines = text.strip().split('\n')
+        if len(lines) < 3:
+            return False
+        
+        # Check for table indicators
+        pipe_lines = sum(1 for line in lines if '|' in line)
+        tab_lines = sum(1 for line in lines if '\t' in line)
+        comma_lines = sum(1 for line in lines if line.count(',') >= 2)
+        
+        # If significant portion has table delimiters
+        total_lines = len(lines)
+        if (pipe_lines / total_lines) > 0.3 or (tab_lines / total_lines) > 0.3 or (comma_lines / total_lines) > 0.3:
+            return True
+        
+        return False
+    
+    def _parse_table_from_text(self, text: str, element_number: int) -> Optional[Dict[str, Any]]:
+        """Parse table from text element"""
+        table_data = self._parse_table_text(text)
+        
+        if not table_data or not self._validate_docling_table(table_data):
+            return None
+        
+        return self._process_docling_table(table_data, element_number)
+class TableExtractor:
+    """Enhanced table extractor using Docling as primary method with fallbacks"""
+    
+    def __init__(self):
+        # Initialize Docling extractor
+        self.docling_extractor = DoclingTableExtractor() if DOCLING_AVAILABLE else None
+        
+        # Fallback format support
         self.supported_formats = {
             '.pdf': self.extract_pdf_tables,
             '.pptx': self.extract_pptx_tables,
@@ -65,12 +457,12 @@ class TableExtractor:
     
     def extract_tables(self, file_path: str) -> List[Dict[str, Any]]:
         """
-        Extract tables from a document file
+        Extract tables from a document file using Docling as primary method
         
         Returns:
             List of table dictionaries with structure:
             {
-                'data': pandas.DataFrame or list of lists,
+                'data': pandas.DataFrame,
                 'page_number': int or None,
                 'slide_number': int or None,
                 'table_number': int,
@@ -81,335 +473,171 @@ class TableExtractor:
         """
         file_ext = Path(file_path).suffix.lower()
         
+        print(f"\n🎯 DEBUG: Starting table extraction for {file_path}")
+        print(f"  File extension: {file_ext}")
+        print(f"  Docling available: {DOCLING_AVAILABLE}")
+        
+        # Try Docling first for PDF files (primary method)
+        if file_ext == '.pdf' and self.docling_extractor:
+            print("🎯 DEBUG: Attempting Docling extraction")
+            tables = self.docling_extractor.extract_tables_from_document(file_path)
+            
+            if tables:
+                print(f"🎯 DEBUG: Docling extraction successful - found {len(tables)} tables")
+                return tables
+            else:
+                print("🎯 DEBUG: Docling extraction found no tables, trying fallback methods")
+        
+        # Fallback to format-specific extractors
         if file_ext not in self.supported_formats:
             logger.warning(f"File format {file_ext} not supported for table extraction")
             return []
         
         try:
-            return self.supported_formats[file_ext](file_path)
+            print(f"🎯 DEBUG: Using fallback extraction method for {file_ext}")
+            tables = self.supported_formats[file_ext](file_path)
+            print(f"🎯 DEBUG: Fallback extraction found {len(tables)} tables")
+            return tables
         except Exception as e:
             logger.error(f"Error extracting tables from {file_path}: {e}")
             return []
     
     def extract_pdf_tables(self, file_path: str) -> List[Dict[str, Any]]:
-        """Extract tables from PDF files using multiple methods"""
+        """Extract tables from PDF files - enhanced with Docling integration"""
         tables = []
         
-        # Method 1: pdfplumber (best for simple tables)
+        # Method 1: Docling (primary method - most accurate)
+        if self.docling_extractor:
+            print("🎯 DEBUG: PDF extraction using Docling (primary)")
+            tables.extend(self.docling_extractor.extract_tables_from_document(file_path))
+            
+            if tables:
+                print(f"🎯 DEBUG: Docling found {len(tables)} tables, returning")
+                return tables
+        
+        # Method 2: pdfplumber fallback (for simple tables)
         if PDFPLUMBER_AVAILABLE:
-            tables.extend(self._extract_pdf_tables_pdfplumber(file_path))
-        
-        # Method 2: tabula-py (good for complex tables)
-        if TABULA_AVAILABLE and len(tables) == 0:
-            tables.extend(self._extract_pdf_tables_tabula(file_path))
-        
-        # Method 3: camelot (most accurate but slower)
-        if CAMELOT_AVAILABLE and len(tables) == 0:
-            tables.extend(self._extract_pdf_tables_camelot(file_path))
+            print("🎯 DEBUG: PDF extraction using pdfplumber (fallback)")
+            fallback_tables = self._extract_pdf_tables_pdfplumber_fallback(file_path)
+            tables.extend(fallback_tables)
+            
+            if fallback_tables:
+                print(f"🎯 DEBUG: pdfplumber fallback found {len(fallback_tables)} tables")
         
         return tables
     
-    def _extract_pdf_tables_pdfplumber(self, file_path: str) -> List[Dict[str, Any]]:
-        """Extract tables using pdfplumber with improved settings"""
+    def _extract_pdf_tables_pdfplumber_fallback(self, file_path: str) -> List[Dict[str, Any]]:
+        """Simplified pdfplumber extraction as fallback when Docling fails"""
+        print(f"\n📋 DEBUG: pdfplumber fallback extraction for {file_path}")
         tables = []
         
         try:
             with pdfplumber.open(file_path) as pdf:
+                print(f"📋 DEBUG: PDF has {len(pdf.pages)} pages")
+                
                 for page_num, page in enumerate(pdf.pages, 1):
-                    # Try different table extraction settings
-                    extraction_settings = [
-                        {"vertical_strategy": "lines", "horizontal_strategy": "lines"},
-                        {"vertical_strategy": "text", "horizontal_strategy": "text"},
-                        {"vertical_strategy": "lines_strict", "horizontal_strategy": "lines_strict"},
-                    ]
+                    print(f"📋 DEBUG: Processing page {page_num}")
                     
-                    page_tables_found = False
-                    
-                    for settings in extraction_settings:
-                        try:
-                            page_tables = page.extract_tables(table_settings=settings)
-                            
-                            for table_num, table_data in enumerate(page_tables, 1):
-                                if table_data and len(table_data) > 1:  # Must have header + data
-                                    # Clean the table data
-                                    cleaned_table = self._clean_table_data(table_data)
-                                    
-                                    if cleaned_table and len(cleaned_table) > 1:
-                                        # Convert to DataFrame
-                                        try:
-                                            df = pd.DataFrame(cleaned_table[1:], columns=cleaned_table[0])
-                                            
-                                            # Clean empty rows/columns
-                                            df = df.dropna(how='all').dropna(axis=1, how='all')
-                                            
-                                            # Remove columns that are mostly None or empty
-                                            df = self._clean_dataframe(df)
-                                            
-                                            if not df.empty and len(df.columns) >= 2:
-                                                tables.append({
-                                                    'data': df,
-                                                    'page_number': page_num,
-                                                    'slide_number': None,
-                                                    'table_number': table_num,
-                                                    'bbox': None,
-                                                    'extraction_method': f'pdfplumber_{settings["vertical_strategy"]}',
-                                                    'confidence': 0.8
-                                                })
-                                                page_tables_found = True
-                                                logger.info(f"Successfully extracted table {table_num} from page {page_num} using {settings}")
-                                        except Exception as e:
-                                            logger.warning(f"Failed to process table data on page {page_num}: {e}")
-                                            continue
-                            
-                            if page_tables_found:
-                                break  # Use the first successful extraction method
-                                
-                        except Exception as e:
-                            logger.warning(f"Table extraction failed with settings {settings} on page {page_num}: {e}")
+                    try:
+                        # Use simple extraction with basic settings
+                        page_tables = page.extract_tables()
+                        print(f"📋 DEBUG: Found {len(page_tables)} potential tables")
+                        
+                        # Quick filter for obvious false positives
+                        if len(page_tables) > 5:  # Too many suggests false detection
+                            print("📋 DEBUG: Too many potential tables - likely false detection")
                             continue
-                    
-                    if not page_tables_found:
-                        logger.info(f"No tables found on page {page_num} with pdfplumber")
+                        
+                        for table_num, table_data in enumerate(page_tables, 1):
+                            if table_data and len(table_data) > 1 and len(table_data) < 30:  # Reasonable size
+                                # Basic validation
+                                if self._basic_table_validation(table_data):
+                                    processed_table = self._process_fallback_table(
+                                        table_data, page_num, table_num
+                                    )
+                                    
+                                    if processed_table:
+                                        tables.append(processed_table)
+                                        print(f"📋 DEBUG: Successfully processed fallback table {table_num}")
+                                        
+                    except Exception as e:
+                        print(f"📋 DEBUG: Page {page_num} extraction failed: {e}")
+                        continue
                         
         except Exception as e:
-            logger.error(f"pdfplumber table extraction failed: {e}")
+            print(f"📋 DEBUG: pdfplumber fallback extraction failed: {e}")
+            logger.error(f"pdfplumber fallback extraction failed: {e}")
         
         return tables
-
-    def _clean_table_data(self, table_data: List[List]) -> List[List]:
-        """Clean raw table data from PDF extraction"""
-        if not table_data:
-            return []
+    
+    def _basic_table_validation(self, table_data: List[List]) -> bool:
+        """Basic validation for fallback extraction"""
+        if not table_data or len(table_data) < 2:
+            return False
         
-        cleaned_table = []
+        # Check column consistency and reasonable content
+        row_lengths = [len(row) for row in table_data if row]
+        if not row_lengths or max(row_lengths) < 2:
+            return False
         
-        for row in table_data:
-            cleaned_row = []
+        # Check for extremely long cells (paragraph text)
+        for row in table_data[:3]:
             for cell in row:
-                if cell is None:
-                    cleaned_row.append("")
-                else:
-                    # Clean the cell content
-                    cleaned_cell = str(cell).strip()
-                    # Remove excessive whitespace
-                    cleaned_cell = re.sub(r'\s+', ' ', cleaned_cell)
-                    cleaned_row.append(cleaned_cell)
-            
-            # Only add row if it has some content
-            if any(cell.strip() for cell in cleaned_row):
-                cleaned_table.append(cleaned_row)
+                if cell and len(str(cell)) > 150:  # Very long cell
+                    return False
         
-        return cleaned_table
-
-    def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Clean DataFrame by removing mostly empty columns and fixing headers"""
-        # Ensure we have a valid pandas DataFrame
-        if not isinstance(df, pd.DataFrame):
-            logger.warning(f"Expected pandas DataFrame, got {type(df)}. Attempting to convert.")
-            try:
-                df = pd.DataFrame(df)
-            except Exception as e:
-                logger.error(f"Failed to convert to DataFrame: {e}")
-                return pd.DataFrame()  # Return empty DataFrame
-        
-        if df.empty:
-            return df
-        
-        # Clean column names
-        new_columns = []
-        for i, col in enumerate(df.columns):
-            if pd.isna(col) or str(col).strip() == '' or str(col).strip().lower() in ['none', 'nan']:
-                new_columns.append(f'Column_{i+1}')
-            else:
-                new_columns.append(str(col).strip())
-        df.columns = new_columns
-        
-        # Remove columns that are mostly empty
-        threshold = 0.7  # Keep columns that have at least 30% non-empty values
-        columns_to_drop = []
-        for col in df.columns:
-            try:
-                # Ensure we have a pandas Series before calling .str methods
-                series = df[col]
-                if hasattr(series, 'astype') and hasattr(series, 'str'):
-                    non_empty_ratio = series.astype(str).str.strip().str.len().gt(0).sum() / len(df)
-                    if non_empty_ratio < (1 - threshold):
-                        columns_to_drop.append(col)
-                else:
-                    logger.warning(f"Column {col} doesn't support string operations, skipping threshold check")
-            except AttributeError as e:
-                logger.warning(f"Column {col} doesn't support string operations: {e}")
-                continue
-        
-        # Drop columns that are mostly empty
-        if columns_to_drop:
-            df = df.drop(columns=columns_to_drop)
-        
-        # Clean cell values
-        for col in df.columns:
-            try:
-                series = df[col]
-                if hasattr(series, 'astype') and hasattr(series, 'str'):
-                    df[col] = series.astype(str).str.strip()
-                    df[col] = df[col].replace(['None', 'nan', ''], pd.NA)
-                else:
-                    logger.warning(f"Column {col} doesn't support string operations, leaving as-is")
-            except AttributeError as e:
-                logger.warning(f"Column {col} doesn't support string operations: {e}")
-                continue
-        
-        return df
+        return True
     
-    def _extract_pdf_tables_tabula(self, file_path: str) -> List[Dict[str, Any]]:
-        """Extract tables using tabula-py with multiple strategies"""
-        tables = []
-        
+    def _process_fallback_table(self, table_data: List[List], page_num: int, table_num: int) -> Optional[Dict[str, Any]]:
+        """Process table data for fallback extraction"""
         try:
-            # Strategy 1: Try lattice method (for tables with clear borders)
-            try:
-                dfs_lattice = tabula.read_pdf(
-                    file_path, 
-                    pages='all', 
-                    multiple_tables=True,
-                    lattice=True,
-                    pandas_options={'header': 0}
-                )
-                
-                for table_num, df in enumerate(dfs_lattice, 1):
-                    if not df.empty:
-                        # Clean the DataFrame
-                        df = self._clean_dataframe(df)
-                        df = df.dropna(how='all').dropna(axis=1, how='all')
-                        
-                        if not df.empty and len(df.columns) >= 2:
-                            tables.append({
-                                'data': df,
-                                'page_number': None,  # tabula doesn't provide page info easily
-                                'slide_number': None,
-                                'table_number': table_num,
-                                'bbox': None,
-                                'extraction_method': 'tabula_lattice',
-                                'confidence': 0.8
-                            })
-                            logger.info(f"Successfully extracted table {table_num} using tabula lattice method")
-                
-                if tables:
-                    return tables  # If lattice worked, use those results
-                    
-            except Exception as e:
-                logger.warning(f"tabula lattice method failed: {e}")
+            # Clean data
+            cleaned_data = []
+            for row in table_data:
+                cleaned_row = [str(cell).strip() if cell else "" for cell in row]
+                if any(cell for cell in cleaned_row):
+                    cleaned_data.append(cleaned_row)
             
-            # Strategy 2: Try stream method (for tables without clear borders)
-            try:
-                dfs_stream = tabula.read_pdf(
-                    file_path, 
-                    pages='all', 
-                    multiple_tables=True,
-                    stream=True,
-                    pandas_options={'header': 0}
-                )
-                
-                for table_num, df in enumerate(dfs_stream, 1):
-                    if not df.empty:
-                        # Clean the DataFrame
-                        df = self._clean_dataframe(df)
-                        df = df.dropna(how='all').dropna(axis=1, how='all')
-                        
-                        if not df.empty and len(df.columns) >= 2:
-                            tables.append({
-                                'data': df,
-                                'page_number': None,
-                                'slide_number': None,
-                                'table_number': table_num,
-                                'bbox': None,
-                                'extraction_method': 'tabula_stream',
-                                'confidence': 0.7
-                            })
-                            logger.info(f"Successfully extracted table {table_num} using tabula stream method")
-                            
-            except Exception as e:
-                logger.warning(f"tabula stream method failed: {e}")
+            if len(cleaned_data) < 2:
+                return None
             
-            # Strategy 3: Try basic extraction with guess
-            if not tables:
-                try:
-                    dfs_guess = tabula.read_pdf(
-                        file_path, 
-                        pages='all', 
-                        multiple_tables=True,
-                        guess=True
-                    )
-                    
-                    for table_num, df in enumerate(dfs_guess, 1):
-                        if not df.empty:
-                            # Clean the DataFrame
-                            df = self._clean_dataframe(df)
-                            df = df.dropna(how='all').dropna(axis=1, how='all')
-                            
-                            if not df.empty and len(df.columns) >= 2:
-                                tables.append({
-                                    'data': df,
-                                    'page_number': None,
-                                    'slide_number': None,
-                                    'table_number': table_num,
-                                    'bbox': None,
-                                    'extraction_method': 'tabula_guess',
-                                    'confidence': 0.6
-                                })
-                                logger.info(f"Successfully extracted table {table_num} using tabula guess method")
-                                
-                except Exception as e:
-                    logger.warning(f"tabula guess method failed: {e}")
-        
+            # Create DataFrame
+            headers = cleaned_data[0]
+            data_rows = cleaned_data[1:]
+            
+            # Ensure consistent lengths
+            max_cols = len(headers)
+            for row in data_rows:
+                while len(row) < max_cols:
+                    row.append("")
+                if len(row) > max_cols:
+                    row = row[:max_cols]
+            
+            df = pd.DataFrame(data_rows, columns=headers)
+            
+            # Basic cleaning
+            for col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
+                df[col] = df[col].replace(['None', 'nan', ''], pd.NA)
+            
+            df = df.dropna(how='all').reset_index(drop=True)
+            
+            if df.empty:
+                return None
+            
+            return {
+                'data': df,
+                'page_number': page_num,
+                'slide_number': None,
+                'table_number': table_num,
+                'bbox': None,
+                'extraction_method': 'pdfplumber_fallback',
+                'confidence': 0.6  # Lower confidence for fallback
+            }
+            
         except Exception as e:
-            logger.error(f"tabula table extraction failed: {e}")
-        
-        return tables
-    
-    def _extract_pdf_tables_camelot(self, file_path: str) -> List[Dict[str, Any]]:
-        """Extract tables using camelot-py"""
-        tables = []
-        
-        try:
-            # Extract tables with lattice method (for tables with lines)
-            lattice_tables = camelot.read_pdf(file_path, pages='all', flavor='lattice')
-            
-            for table in lattice_tables:
-                if table.parsing_report['accuracy'] > 50:  # Only use tables with decent accuracy
-                    df = table.df
-                    if not df.empty:
-                        tables.append({
-                            'data': df,
-                            'page_number': table.page,
-                            'slide_number': None,
-                            'table_number': len(tables) + 1,
-                            'bbox': table._bbox,
-                            'extraction_method': 'camelot_lattice',
-                            'confidence': table.parsing_report['accuracy'] / 100
-                        })
-            
-            # If no lattice tables found, try stream method (for tables without lines)
-            if not tables:
-                stream_tables = camelot.read_pdf(file_path, pages='all', flavor='stream')
-                
-                for table in stream_tables:
-                    if table.parsing_report['accuracy'] > 50:
-                        df = table.df
-                        if not df.empty:
-                            tables.append({
-                                'data': df,
-                                'page_number': table.page,
-                                'slide_number': None,
-                                'table_number': len(tables) + 1,
-                                'bbox': table._bbox,
-                                'extraction_method': 'camelot_stream',
-                                'confidence': table.parsing_report['accuracy'] / 100
-                            })
-        
-        except Exception as e:
-            logger.error(f"camelot table extraction failed: {e}")
-        
-        return tables
+            print(f"📋 DEBUG: Error processing fallback table: {e}")
+            return None
     
     def extract_pptx_tables(self, file_path: str) -> List[Dict[str, Any]]:
         """Extract tables from PowerPoint files"""
@@ -417,6 +645,8 @@ class TableExtractor:
         
         if not PPTX_AVAILABLE:
             return tables
+        
+        print(f"📊 DEBUG: Extracting tables from PowerPoint: {file_path}")
         
         try:
             prs = Presentation(file_path)
@@ -428,7 +658,6 @@ class TableExtractor:
                     if hasattr(shape, 'table') and shape.has_table:
                         table_data = []
                         
-                        # Extract table data
                         for row in shape.table.rows:
                             row_data = []
                             for cell in row.cells:
@@ -436,10 +665,9 @@ class TableExtractor:
                             table_data.append(row_data)
                         
                         if table_data and len(table_data) > 1:
-                            # Convert to DataFrame
                             try:
                                 df = pd.DataFrame(table_data[1:], columns=table_data[0])
-                                df = df.dropna(how='all').dropna(axis=1, how='all')
+                                df = self._clean_simple_dataframe(df)
                                 
                                 if not df.empty:
                                     tables.append({
@@ -458,6 +686,7 @@ class TableExtractor:
         except Exception as e:
             logger.error(f"PowerPoint table extraction failed: {e}")
         
+        print(f"📊 DEBUG: PowerPoint extraction found {len(tables)} tables")
         return tables
     
     def extract_docx_tables(self, file_path: str) -> List[Dict[str, Any]]:
@@ -466,6 +695,8 @@ class TableExtractor:
         
         if not DOCX_AVAILABLE:
             return tables
+        
+        print(f"📄 DEBUG: Extracting tables from Word document: {file_path}")
         
         try:
             doc = DocxDocument(file_path)
@@ -482,7 +713,7 @@ class TableExtractor:
                 if table_data and len(table_data) > 1:
                     try:
                         df = pd.DataFrame(table_data[1:], columns=table_data[0])
-                        df = df.dropna(how='all').dropna(axis=1, how='all')
+                        df = self._clean_simple_dataframe(df)
                         
                         if not df.empty:
                             tables.append({
@@ -500,6 +731,7 @@ class TableExtractor:
         except Exception as e:
             logger.error(f"Word document table extraction failed: {e}")
         
+        print(f"📄 DEBUG: Word document extraction found {len(tables)} tables")
         return tables
     
     def extract_csv_tables(self, file_path: str) -> List[Dict[str, Any]]:
@@ -530,7 +762,6 @@ class TableExtractor:
         tables = []
         
         try:
-            # Read all sheets
             excel_file = pd.ExcelFile(file_path)
             
             for sheet_num, sheet_name in enumerate(excel_file.sheet_names, 1):
@@ -540,7 +771,7 @@ class TableExtractor:
                     tables.append({
                         'data': df,
                         'page_number': None,
-                        'slide_number': sheet_num,  # Use slide_number for sheet number
+                        'slide_number': sheet_num,
                         'table_number': 1,
                         'bbox': None,
                         'extraction_method': 'pandas_excel',
@@ -552,24 +783,49 @@ class TableExtractor:
             logger.error(f"Excel table extraction failed: {e}")
         
         return tables
+    
+    def _clean_simple_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Simple DataFrame cleaning for non-PDF formats"""
+        if df.empty:
+            return df
+        
+        # Clean column names
+        new_columns = []
+        for i, col in enumerate(df.columns):
+            col_str = str(col).strip()
+            if not col_str or col_str.lower() in ['none', 'nan', '']:
+                new_columns.append(f'Column_{i+1}')
+            else:
+                new_columns.append(col_str)
+        
+        df.columns = new_columns
+        
+        # Clean cell values
+        for col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+            df[col] = df[col].replace(['None', 'nan', ''], pd.NA)
+        
+        # Remove empty rows and columns
+        df = df.dropna(how='all').reset_index(drop=True)
+        df = df.dropna(axis=1, how='all')
+        
+        return df
 
 
 def detect_table_in_text(text: str) -> bool:
     """
-    Detect if text contains table-like structures with improved detection
-    
-    Args:
-        text: Text content to analyze
-        
-    Returns:
-        bool: True if table-like structure detected
+    Detect if text contains table-like structures
+    Enhanced for Docling integration
     """
+    if not text or len(text.strip()) < 30:
+        return False
+        
     lines = text.strip().split('\n')
     
     if len(lines) < 2:
         return False
     
-    # Check for common table indicators
+    # Check for common table indicators with improved patterns
     table_indicators = [
         # Multiple consecutive lines with delimiters
         lambda: sum(1 for line in lines if '|' in line or '\t' in line) >= 2,
@@ -577,320 +833,157 @@ def detect_table_in_text(text: str) -> bool:
         # Lines with consistent column structure
         lambda: _has_consistent_columns(lines),
         
-        # Table headers pattern
-        lambda: any(re.search(r'^[\w\s]+\s*\|\s*[\w\s]+\s*\|', line) for line in lines[:3]),
+        # Table headers pattern (improved)
+        lambda: any(re.search(r'^[\w\s]+\s*[\|\t]\s*[\w\s]+', line) for line in lines[:3]),
         
-        # CSV-like structure
-        lambda: sum(1 for line in lines if line.count(',') >= 2) >= 2,
+        # CSV-like structure with better detection
+        lambda: sum(1 for line in lines if line.count(',') >= 2 and len(line.split(',')) >= 3) >= 2,
         
-        # Tab-separated values
-        lambda: sum(1 for line in lines if line.count('\t') >= 1) >= 2,
+        # Tab-separated values with minimum columns
+        lambda: sum(1 for line in lines if line.count('\t') >= 1 and len(line.split('\t')) >= 2) >= 2,
         
-        # Patterns that suggest tabular data
-        lambda: _detect_structured_data_patterns(lines),
-        
-        # Look for column-like spacing
-        lambda: _detect_column_spacing(lines),
+        # Structured data patterns (numbers, percentages, etc.)
+        lambda: _has_structured_data_patterns(lines),
     ]
     
     return any(indicator() for indicator in table_indicators)
 
 
-def _detect_structured_data_patterns(lines: List[str]) -> bool:
-    """Detect patterns that suggest structured tabular data"""
-    if len(lines) < 3:
-        return False
-    
-    # Look for repeating patterns that suggest rows of data
-    pattern_matches = 0
-    
-    for line in lines[:10]:  # Check first 10 lines
-        line = line.strip()
-        if line:
-            # Check for patterns like numbers, percentages, currency
-            if re.search(r'\d+%|\$\d+|\d+\.\d+|\d+,\d+', line):
-                pattern_matches += 1
-            
-            # Check for patterns with consistent separators
-            if len(re.findall(r'\s{2,}|\t|\|', line)) >= 2:
-                pattern_matches += 1
-    
-    return pattern_matches >= 3
-
-
-def _detect_column_spacing(lines: List[str]) -> bool:
-    """Detect consistent column-like spacing in text"""
-    if len(lines) < 3:
-        return False
-    
-    # Look for consistent spacing patterns across lines
-    spacing_patterns = []
-    
-    for line in lines[:5]:
-        if line.strip():
-            # Find positions of text blocks separated by spaces
-            words = []
-            current_pos = 0
-            for word in line.split():
-                pos = line.find(word, current_pos)
-                words.append(pos)
-                current_pos = pos + len(word)
-            
-            if len(words) >= 3:  # At least 3 columns
-                spacing_patterns.append(words)
-    
-    if len(spacing_patterns) >= 2:
-        # Check if column positions are relatively consistent
-        first_pattern = spacing_patterns[0]
-        consistent_columns = 0
-        
-        for pattern in spacing_patterns[1:]:
-            if len(pattern) == len(first_pattern):
-                # Check if positions are within reasonable tolerance
-                tolerance = 5  # characters
-                matches = sum(1 for i, pos in enumerate(pattern) 
-                            if abs(pos - first_pattern[i]) <= tolerance)
-                if matches >= len(pattern) * 0.7:  # 70% of columns match
-                    consistent_columns += 1
-        
-        return consistent_columns >= 1
-    
-    return False
-
-
 def _has_consistent_columns(lines: List[str]) -> bool:
-    """Check if lines have consistent column structure with improved detection"""
+    """Check if lines have consistent column structure (enhanced)"""
     if len(lines) < 3:
         return False
     
     # Check for pipe-separated columns
-    pipe_counts = [line.count('|') for line in lines[:5] if line.strip()]
-    if len(set(pipe_counts)) <= 2 and pipe_counts and max(pipe_counts) >= 1:
-        return True
+    pipe_counts = [line.count('|') for line in lines[:6] if line.strip()]
+    if len(pipe_counts) >= 3:
+        unique_counts = set(pipe_counts)
+        if len(unique_counts) <= 2 and max(pipe_counts) >= 1:
+            return True
     
     # Check for tab-separated columns
-    tab_counts = [line.count('\t') for line in lines[:5] if line.strip()]
-    if len(set(tab_counts)) <= 2 and tab_counts and max(tab_counts) >= 1:
-        return True
+    tab_counts = [line.count('\t') for line in lines[:6] if line.strip()]
+    if len(tab_counts) >= 3:
+        unique_counts = set(tab_counts)
+        if len(unique_counts) <= 2 and max(tab_counts) >= 1:
+            return True
     
-    # Check for consistent multi-space separators
-    multi_space_counts = [len(re.findall(r'\s{2,}', line)) for line in lines[:5] if line.strip()]
-    if len(set(multi_space_counts)) <= 2 and multi_space_counts and max(multi_space_counts) >= 1:
-        return True
+    # Check for space-separated columns (multiple spaces as delimiter)
+    space_separated = []
+    for line in lines[:6]:
+        if line.strip():
+            # Split by multiple spaces
+            parts = [part.strip() for part in re.split(r'\s{2,}', line.strip()) if part.strip()]
+            if len(parts) >= 2:
+                space_separated.append(len(parts))
     
-    # Check for space-separated columns (more complex)
-    word_counts = [len(line.split()) for line in lines[:5] if line.strip()]
-    if len(set(word_counts)) <= 3 and word_counts and max(word_counts) >= 3:
-        # Additional check: ensure the words appear to be in columns
-        if _check_column_alignment(lines[:5]):
+    if len(space_separated) >= 3:
+        unique_counts = set(space_separated)
+        if len(unique_counts) <= 2 and max(space_separated) >= 2:
             return True
     
     return False
 
 
-def _check_column_alignment(lines: List[str]) -> bool:
-    """Check if words in lines appear to be aligned in columns"""
-    if len(lines) < 2:
+def _has_structured_data_patterns(lines: List[str]) -> bool:
+    """Check for structured data patterns that indicate table content"""
+    if len(lines) < 3:
         return False
     
-    # Get word positions for each line
-    line_positions = []
-    for line in lines:
-        if line.strip():
-            positions = []
-            words = line.split()
-            current_pos = 0
-            for word in words:
-                pos = line.find(word, current_pos)
-                positions.append(pos)
-                current_pos = pos + len(word)
-            if len(positions) >= 3:  # At least 3 words/columns
-                line_positions.append(positions)
+    pattern_lines = 0
+    total_lines = min(len(lines), 8)  # Check first 8 lines
     
-    if len(line_positions) < 2:
-        return False
-    
-    # Check if column positions are reasonably consistent
-    first_line_positions = line_positions[0]
-    tolerance = 3  # Allow 3 character difference
-    
-    for positions in line_positions[1:]:
-        if len(positions) != len(first_line_positions):
+    for line in lines[:total_lines]:
+        line = line.strip()
+        if not line:
             continue
         
-        aligned_columns = 0
-        for i, pos in enumerate(positions):
-            if abs(pos - first_line_positions[i]) <= tolerance:
-                aligned_columns += 1
+        # Look for patterns that suggest tabular data
+        has_numbers = bool(re.search(r'\d+\.?\d*%?', line))  # Numbers or percentages
+        has_delimited_structure = '|' in line or '\t' in line or line.count(',') >= 2
+        has_short_entries = len(line.split()) >= 2 and all(len(word) <= 30 for word in line.split())
         
-        if aligned_columns >= len(positions) * 0.6:  # At least 60% aligned
-            return True
+        if (has_numbers and has_delimited_structure) or (has_delimited_structure and has_short_entries):
+            pattern_lines += 1
     
-    return False
+    # If at least 40% of lines show structured patterns
+    return pattern_lines >= (total_lines * 0.4)
 
 
-def format_table_for_chunking(table_data: pd.DataFrame, include_headers: bool = True) -> str:
+def create_adaptive_table_chunks(table_data: pd.DataFrame, table_info: Dict[str, Any], 
+                                max_chunk_size: int = 7800, preserve_context: bool = True) -> List[Dict[str, Any]]:
     """
-    Format a table DataFrame for text chunking - DEPRECATED
-    Use create_row_based_chunks instead for proper table-aware chunking
+    Create adaptive table chunks based on table size and content
     """
+    print(f"\n🔍 DEBUG: create_adaptive_table_chunks called")
+    print(f"  table_data shape: {table_data.shape if not table_data.empty else 'EMPTY'}")
+    print(f"  table_info: {table_info}")
+    print(f"  max_chunk_size: {max_chunk_size}")
+    print(f"  preserve_context: {preserve_context}")
+    
     if table_data.empty:
-        return ""
-    
-    # Clean the DataFrame
-    cleaned_df = table_data.copy()
-    
-    # Fill NaN values with empty string
-    cleaned_df = cleaned_df.fillna('')
-    
-    # Convert all columns to string
-    for col in cleaned_df.columns:
-        cleaned_df[col] = cleaned_df[col].astype(str)
-    
-    # Format as pipe-separated text for better readability
-    if include_headers:
-        # Create header row
-        headers = ' | '.join(str(col) for col in cleaned_df.columns)
-        separator = ' | '.join('---' for _ in cleaned_df.columns)
-        
-        # Create data rows
-        data_rows = []
-        for _, row in cleaned_df.iterrows():
-            data_rows.append(' | '.join(str(val) for val in row.values))
-        
-        return '\n'.join([headers, separator] + data_rows)
-    else:
-        # Only data rows
-        data_rows = []
-        for _, row in cleaned_df.iterrows():
-            data_rows.append(' | '.join(str(val) for val in row.values))
-        
-        return '\n'.join(data_rows)
-
-
-def create_row_based_chunks(table_data: pd.DataFrame, table_info: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    Create proper table-aware chunks: one chunk per row with full context
-    
-    This implements the right way to do table chunking:
-    1. Parse the table structure explicitly (headers and rows)
-    2. Create one chunk per row with column headers + cell values
-    3. Format chunks cleanly with key-value pairs
-    
-    Args:
-        table_data: pandas DataFrame containing table data
-        table_info: Table metadata information
-        
-    Returns:
-        List of chunk dictionaries with proper row-based content
-    """
-    if table_data.empty:
+        print("🔍 DEBUG: Table data is empty, returning empty list")
         return []
     
-    chunks = []
+    # Estimate size per row
+    sample_row = table_data.iloc[0] if len(table_data) > 0 else pd.Series()
+    estimated_row_size = sum(len(str(val)) for val in sample_row.values) + 20  # 20 for formatting
+    estimated_row_size = max(estimated_row_size, 30)  # Minimum estimate
     
-    # Clean the DataFrame
-    cleaned_df = table_data.copy()
-    cleaned_df = cleaned_df.fillna('')
+    # Calculate optimal chunk size - keep small to medium tables as single chunks
+    if len(table_data) <= 10:  # Increased threshold for single chunk
+        max_rows_per_chunk = len(table_data)
+        print("🔍 DEBUG: Small/medium table detected, using single chunk")
+    else:
+        max_rows_per_chunk = max(5, min(20, max_chunk_size // estimated_row_size))
+        print(f"🔍 DEBUG: Large table detected, using {max_rows_per_chunk} rows per chunk")
+        print(f"  Estimated size per row: {estimated_row_size}")
     
-    # Convert all columns to string and clean them
-    for col in cleaned_df.columns:
-        try:
-            # Ensure we have a proper pandas Series before applying .str operations
-            series = cleaned_df[col]
-            if hasattr(series, 'astype') and hasattr(series, 'str'):
-                cleaned_df[col] = series.astype(str).str.strip()
-            else:
-                # Fallback for non-pandas series
-                cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
-        except AttributeError as e:
-            logger.warning(f"Column {col} doesn't support string operations: {e}")
-            # Try basic string conversion
-            cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
-    
-    # Get table title/identifier
-    table_identifier = f"Table {table_info.get('table_number', 1)}"
-    if table_info.get('page_number'):
-        table_identifier += f" (Page {table_info['page_number']})"
-    elif table_info.get('slide_number'):
-        table_identifier += f" (Slide {table_info['slide_number']})"
-    
-    # Create one chunk per row
-    for row_idx, (_, row) in enumerate(cleaned_df.iterrows()):
-        # Create key-value pairs for this row
-        row_data = []
-        primary_identifier = None
-        
-        for col_name, cell_value in row.items():
-            if cell_value and str(cell_value).strip() and str(cell_value).strip().lower() not in ['nan', 'none', '']:
-                clean_value = str(cell_value).strip()
-                row_data.append(f"{col_name}: {clean_value}")
-                
-                # Use first meaningful column as primary identifier
-                if primary_identifier is None:
-                    primary_identifier = clean_value
-        
-        if row_data:  # Only create chunk if row has meaningful data
-            # Format the chunk content
-            chunk_title = f"{table_identifier} - Row {row_idx + 1}"
-            if primary_identifier:
-                chunk_title += f" ({primary_identifier})"
-            
-            chunk_content = f"{chunk_title}\n\n" + "\n".join(row_data)
-            
-            # Create metadata for this row chunk
-            chunk_metadata = create_table_chunk_metadata(table_info, chunk_index=row_idx)
-            chunk_metadata.update({
-                'chunk_type': 'table_row',
-                'row_index': row_idx,
-                'primary_identifier': primary_identifier,
-                'column_count': len(row_data),
-                'chunking_strategy': 'row_based'
-            })
-            
-            chunks.append({
-                'content': chunk_content,
-                'metadata': chunk_metadata
-            })
-    
-    return chunks
+    print("🔍 DEBUG: Calling create_semantic_table_chunks")
+    return create_semantic_table_chunks(table_data, table_info, max_rows_per_chunk)
 
 
 def create_semantic_table_chunks(table_data: pd.DataFrame, table_info: Dict[str, Any], 
-                                max_rows_per_chunk: int = 5) -> List[Dict[str, Any]]:
+                                max_rows_per_chunk: int = 10) -> List[Dict[str, Any]]:
     """
-    Create semantically grouped table chunks when rows are related
+    Create semantically grouped table chunks
+    """
+    print(f"\n🔍 DEBUG: create_semantic_table_chunks called")
+    print(f"  table_data shape: {table_data.shape if not table_data.empty else 'EMPTY'}")
+    print(f"  table_info: {table_info}")
+    print(f"  max_rows_per_chunk: {max_rows_per_chunk}")
     
-    Args:
-        table_data: pandas DataFrame containing table data
-        table_info: Table metadata information
-        max_rows_per_chunk: Maximum number of rows to include in one chunk
-        
-    Returns:
-        List of chunk dictionaries with semantically grouped content
-    """
     if table_data.empty:
+        print("🔍 DEBUG: Table data is empty, returning empty list")
         return []
     
     chunks = []
     
     # Clean the DataFrame
+    print("🔍 DEBUG: Cleaning DataFrame")
     cleaned_df = table_data.copy()
     cleaned_df = cleaned_df.fillna('')
     
-    # Convert all columns to string and clean them
+    print(f"  After fillna: {cleaned_df.shape}")
+    print(f"  Columns: {list(cleaned_df.columns)}")
+    print(f"  Data sample:")
+    
+    # Print actual data rows to see what we're working with
+    for i, (idx, row) in enumerate(cleaned_df.iterrows()):
+        if i < 5:  # Show first 5 rows
+            non_empty_values = [str(val) for val in row.values if val and str(val).strip()]
+            print(f"    Row {i}: {non_empty_values}")
+    
+    print(f"  Total non-empty data rows: {len([idx for idx, row in cleaned_df.iterrows() if any(val and str(val).strip() for val in row.values)])}")
+    
+    # Convert all columns to string
+    print("🔍 DEBUG: Converting columns to string")
     for col in cleaned_df.columns:
-        try:
-            series = cleaned_df[col]
-            if hasattr(series, 'astype') and hasattr(series, 'str'):
-                cleaned_df[col] = series.astype(str).str.strip()
-            else:
-                # Fallback for non-pandas series
-                cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
-        except AttributeError as e:
-            logger.warning(f"Column {col} doesn't support string operations: {e}")
-            # Try basic string conversion
-            cleaned_df[col] = cleaned_df[col].apply(lambda x: str(x).strip() if x is not None else '')
+        cleaned_df[col] = cleaned_df[col].astype(str).str.strip()
+        print(f"  Converted column '{col}'")
+    
+    print(f"🔍 DEBUG: Final cleaned DataFrame:")
+    print(cleaned_df.head(3))
     
     # Get table title/identifier
     table_identifier = f"Table {table_info.get('table_number', 1)}"
@@ -899,33 +992,46 @@ def create_semantic_table_chunks(table_data: pd.DataFrame, table_info: Dict[str,
     elif table_info.get('slide_number'):
         table_identifier += f" (Slide {table_info['slide_number']})"
     
-    # Split into chunks of max_rows_per_chunk
-    total_rows = len(cleaned_df)
+    print(f"🔍 DEBUG: Table identifier: {table_identifier}")
     
+    # Split into chunks
+    total_rows = len(cleaned_df)
+    print(f"🔍 DEBUG: Total rows: {total_rows}, max_rows_per_chunk: {max_rows_per_chunk}")
+    
+    # For small tables, use single chunk
+    if max_rows_per_chunk >= total_rows:
+        print("🔍 DEBUG: Creating single chunk for small table")
+        chunk_content = create_single_table_chunk(cleaned_df, table_identifier)
+        print(f"  Single chunk content length: {len(chunk_content)}")
+        print(f"  Content preview: {chunk_content[:200]}...")
+        
+        chunk_metadata = create_table_chunk_metadata(table_info, 0)
+        print(f"  Chunk metadata: {chunk_metadata}")
+        
+        chunks.append({
+            'content': chunk_content,
+            'metadata': chunk_metadata
+        })
+        
+        print(f"🔍 DEBUG: Created 1 single chunk, returning")
+        return chunks
+    
+    # Multiple chunks needed
+    print("🔍 DEBUG: Creating multiple chunks")
     for chunk_start in range(0, total_rows, max_rows_per_chunk):
         chunk_end = min(chunk_start + max_rows_per_chunk, total_rows)
         chunk_df = cleaned_df.iloc[chunk_start:chunk_end]
         
-        # Create chunk content
-        chunk_title = f"{table_identifier} - Rows {chunk_start + 1} to {chunk_end}"
+        print(f"  Creating chunk for rows {chunk_start}-{chunk_end-1}")
+        print(f"  Chunk df shape: {chunk_df.shape}")
         
-        # Add column headers
-        headers = " | ".join(chunk_df.columns)
-        separator = " | ".join("---" for _ in chunk_df.columns)
+        chunk_content = create_multi_table_chunk(
+            chunk_df, table_identifier,
+            chunk_start, chunk_end, total_rows
+        )
         
-        # Add data rows
-        data_rows = []
-        for _, row in chunk_df.iterrows():
-            row_values = []
-            for col_name, cell_value in row.items():
-                clean_value = str(cell_value).strip() if cell_value else ""
-                if clean_value.lower() in ['nan', 'none', '']:
-                    clean_value = ""
-                row_values.append(clean_value)
-            data_rows.append(" | ".join(row_values))
-        
-        # Combine everything
-        chunk_content = f"{chunk_title}\n\n{headers}\n{separator}\n" + "\n".join(data_rows)
+        print(f"  Multi-chunk content length: {len(chunk_content)}")
+        print(f"  Content preview: {chunk_content[:200]}...")
         
         # Create metadata
         chunk_metadata = create_table_chunk_metadata(table_info, chunk_index=chunk_start // max_rows_per_chunk)
@@ -934,59 +1040,198 @@ def create_semantic_table_chunks(table_data: pd.DataFrame, table_info: Dict[str,
             'row_start': chunk_start,
             'row_end': chunk_end - 1,
             'row_count': len(chunk_df),
-            'chunking_strategy': 'semantic_group'
+            'chunking_strategy': 'semantic',
+            'formatting_style': 'structured'
         })
+        
+        print(f"  Multi-chunk metadata: {chunk_metadata}")
         
         chunks.append({
             'content': chunk_content,
             'metadata': chunk_metadata
         })
     
+    print(f"🔍 DEBUG: Created {len(chunks)} chunks total")
     return chunks
 
 
-def create_table_chunk_metadata(table_info: Dict[str, Any], chunk_index: int = 0) -> Dict[str, Any]:
-    """
-    Create metadata for a table chunk
+def create_single_table_chunk(df: pd.DataFrame, table_identifier: str) -> str:
+    """Create optimized single chunk for small tables"""
+    print(f"\n🔍 DEBUG: create_single_table_chunk called")
+    print(f"  df shape: {df.shape}")
+    print(f"  table_identifier: {table_identifier}")
     
-    Args:
-        table_info: Table information dictionary
-        chunk_index: Index of the chunk within the table
+    lines = []
+    
+    # Add title and context
+    lines.append(f"# {table_identifier}")
+    lines.append("")
+    lines.append("This is a data table extracted from the document.")
+    lines.append("")
+    
+    # Use markdown table format for better readability
+    if len(df.columns) <= 10:  # Most tables should fit this
+        # Create header row with proper column names
+        header_cells = []
+        for col in df.columns:
+            # Clean column names for better display
+            clean_col = str(col).replace('\n', ' ').replace('\r', ' ').strip()
+            header_cells.append(clean_col)
         
-    Returns:
-        dict: Metadata for the chunk
-    """
+        header_row = "| " + " | ".join(header_cells) + " |"
+        lines.append(header_row)
+        
+        # Create separator row
+        separator_row = "|" + "|".join("-" * (len(cell) + 2) for cell in header_cells) + "|"
+        lines.append(separator_row)
+        
+        # Add data rows with proper cell formatting
+        for _, row in df.iterrows():
+            data_cells = []
+            for val in row.values:
+                # Clean cell values and handle multi-line content
+                clean_val = str(val).replace('\n', ' ').replace('\r', ' ').strip()
+                if not clean_val or clean_val.lower() in ['nan', 'none', '']:
+                    clean_val = "-"
+                data_cells.append(clean_val)
+            
+            data_row = "| " + " | ".join(data_cells) + " |"
+            lines.append(data_row)
+    else:
+        # For very wide tables, use key-value format
+        lines.append("**Table Data:**")
+        lines.append("")
+        for row_idx, (_, row) in enumerate(df.iterrows(), 1):
+            lines.append(f"**Row {row_idx}:**")
+            for col, val in row.items():
+                clean_val = str(val).strip()
+                if clean_val and clean_val.lower() not in ['nan', 'none', '']:
+                    lines.append(f"- {col}: {clean_val}")
+            lines.append("")
+    
+    result = '\n'.join(lines)
+    print(f"🔍 DEBUG: Single chunk result length: {len(result)}")
+    print(f"  Preview: {result[:300]}...")
+    
+    return result
+
+
+def create_multi_table_chunk(chunk_df: pd.DataFrame, table_identifier: str,
+                           chunk_start: int, chunk_end: int, total_rows: int) -> str:
+    """Create chunk for multi-chunk tables with context preservation"""
+    print(f"\n🔍 DEBUG: create_multi_table_chunk called")
+    print(f"  chunk_df shape: {chunk_df.shape}")
+    print(f"  chunk_start: {chunk_start}, chunk_end: {chunk_end}, total_rows: {total_rows}")
+    
+    lines = []
+    
+    # Chunk title with context
+    chunk_title = f"═══ {table_identifier} - Rows {chunk_start + 1} to {chunk_end} ═══"
+    lines.append(chunk_title)
+    lines.append("")
+    
+    # Add table context
+    lines.append(f"📋 Table Context: {len(chunk_df.columns)} columns, {total_rows} total rows")
+    lines.append(f"📊 This Chunk: {len(chunk_df)} rows ({chunk_start + 1}-{chunk_end})")
+    lines.append("")
+    
+    # Use markdown table format
+    if len(chunk_df.columns) <= 8:
+        # Create header row
+        header_row = "| " + " | ".join(str(col) for col in chunk_df.columns) + " |"
+        lines.append(header_row)
+        
+        # Create separator row
+        separator_row = "|" + "|".join("--------" for _ in chunk_df.columns) + "|"
+        lines.append(separator_row)
+        
+        # Add data rows
+        for _, row in chunk_df.iterrows():
+            data_row = "| " + " | ".join(str(val) for val in row.values) + " |"
+            lines.append(data_row)
+    else:
+        # For wide tables, use key-value format
+        for row_idx, (_, row) in enumerate(chunk_df.iterrows()):
+            lines.append(f"Row {chunk_start + row_idx + 1}:")
+            for col, val in row.items():
+                if str(val).strip():
+                    lines.append(f"  {col}: {val}")
+            lines.append("")
+    
+    result = '\n'.join(lines)
+    print(f"🔍 DEBUG: Multi-chunk result length: {len(result)}")
+    
+    return result
+
+
+def create_table_chunk_metadata(table_info: Dict[str, Any], chunk_index: int = 0) -> Dict[str, Any]:
+    """Create metadata for table chunks"""
     metadata = {
         'chunk_type': 'table',
         'table_number': table_info.get('table_number', 1),
         'extraction_method': table_info.get('extraction_method', 'unknown'),
-        'confidence': table_info.get('confidence', 0.5),
+        'confidence': table_info.get('confidence', 0.8),
         'chunk_index': chunk_index
     }
     
-    # Add page/slide information if available
     if table_info.get('page_number'):
         metadata['page_number'] = table_info['page_number']
     
     if table_info.get('slide_number'):
         metadata['slide_number'] = table_info['slide_number']
     
-    if table_info.get('sheet_name'):
-        metadata['sheet_name'] = table_info['sheet_name']
-    
-    # Add bounding box if available
-    if table_info.get('bbox'):
-        metadata['bbox'] = table_info['bbox']
-    
     return metadata
 
 
-# Global instance
-_table_extractor = None
+def identify_key_columns(df: pd.DataFrame) -> List[str]:
+    """Identify key columns in a table"""
+    key_columns = []
+    
+    for col in df.columns:
+        # Check if column looks like an identifier or primary key
+        col_lower = str(col).lower()
+        if any(keyword in col_lower for keyword in ['id', 'name', 'title', 'category', 'type']):
+            key_columns.append(col)
+        
+        # Check if column has unique or mostly unique values
+        try:
+            unique_ratio = len(df[col].unique()) / len(df)
+            if unique_ratio > 0.8:  # More than 80% unique values
+                key_columns.append(col)
+        except:
+            pass
+    
+    return key_columns[:3]  # Limit to top 3 key columns
+
+
+# Global table extractor instance
+_table_extractor_instance = None
+
 
 def get_table_extractor() -> TableExtractor:
-    """Get global table extractor instance"""
-    global _table_extractor
-    if _table_extractor is None:
-        _table_extractor = TableExtractor()
-    return _table_extractor
+    """Get singleton table extractor instance with Docling support"""
+    global _table_extractor_instance
+    if _table_extractor_instance is None:
+        _table_extractor_instance = TableExtractor()
+        if DOCLING_AVAILABLE:
+            logger.info("Table extractor initialized with Docling support")
+        else:
+            logger.warning("Table extractor initialized without Docling - using fallback methods")
+    return _table_extractor_instance
+
+
+def create_contextual_table_chunks(table_data: pd.DataFrame, table_info: Dict[str, Any], 
+                                  max_chunk_size: int = 7800, preserve_context: bool = True,
+                                  surrounding_text: str = None) -> List[Dict[str, Any]]:
+    """
+    Create contextual table chunks (alias for create_adaptive_table_chunks for backward compatibility)
+    
+    Args:
+        table_data: DataFrame containing the table data
+        table_info: Metadata about the table
+        max_chunk_size: Maximum size for each chunk
+        preserve_context: Whether to preserve context across chunks
+        surrounding_text: Text context surrounding the table (unused but kept for compatibility)
+    """
+    print(f"\n🔍 DEBUG: create_contextual_table_chunks called with surrounding_text: {bool(surrounding_text)}")
+    return create_adaptive_table_chunks(table_data, table_info, max_chunk_size, preserve_context)

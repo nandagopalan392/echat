@@ -4,6 +4,29 @@ import { api } from '../services/api';
 import FolderUploadReview from '../components/FolderUploadReview';
 import FileUploadReview from '../components/FileUploadReview';
 import DocumentReingestionModal from '../components/DocumentReingestionModal';
+import {
+    Box,
+    Drawer,
+    List,
+    ListItemButton,
+    ListItemIcon,
+    ListItemText,
+    Typography,
+    IconButton,
+    Divider,
+    ThemeProvider,
+} from '@mui/material';
+import {
+    ArrowBack,
+    Description,
+    Settings,
+    Search,
+    Storage as StorageIcon,
+    CloudUpload as CloudUploadIcon,
+    Folder as FolderIcon,
+    Article as ArticleIcon,
+} from '@mui/icons-material';
+import { theme } from '../theme';
 
 // Add custom styles for resizable table
 const tableStyles = `
@@ -138,6 +161,22 @@ const KnowledgeHubPage = () => {
         chunkSize: 1000,
         chunkOverlap: 200
     });
+
+    // Retrieval settings states
+    const [retrievalConfig, setRetrievalConfig] = useState({
+        similarity_threshold: 0.2,
+        keyword_similarity_weight: 0.7,
+        reranker_enabled: false,
+        reranker_model: '',
+        max_chunks: 5,
+        search_type: 'similarity',
+        auto_merging_enabled: false,
+        auto_merging_similarity_threshold: 0.8
+    });
+    const [rerankerModels, setRerankerModels] = useState([]);
+    const [loadingRetrievalConfig, setLoadingRetrievalConfig] = useState(false);
+    const [savingRetrievalConfig, setSavingRetrievalConfig] = useState(false);
+    const [retrievalConfigMessage, setRetrievalConfigMessage] = useState(null);
     const [showAdvancedReingestionConfig, setShowAdvancedReingestionConfig] = useState(false);
 
     // Status polling states
@@ -254,7 +293,17 @@ const KnowledgeHubPage = () => {
     useEffect(() => {
         loadFiles();
         loadChunkingMethods();
+        loadRetrievalConfig();
+        loadRerankerModels();
     }, []);
+
+    // Load retrieval config when switching to retrieval tab
+    useEffect(() => {
+        if (activeTab === 'retrieval') {
+            loadRetrievalConfig();
+            loadRerankerModels();
+        }
+    }, [activeTab]);
 
     // Status polling effect - monitors documents with pending status
     useEffect(() => {
@@ -529,6 +578,90 @@ const KnowledgeHubPage = () => {
         
         // Clear message after 4 seconds
         setTimeout(() => setSaveMessage(null), 4000);
+    };
+
+    // Retrieval Configuration Functions
+    const loadRetrievalConfig = async () => {
+        setLoadingRetrievalConfig(true);
+        try {
+            const response = await api.getRetrievalConfig();
+            setRetrievalConfig(response.config || {
+                similarity_threshold: 0.2,
+                keyword_similarity_weight: 0.7,
+                reranker_enabled: false,
+                reranker_model: '',
+                max_chunks: 5,
+                search_type: 'similarity',
+                auto_merging_enabled: false,
+                auto_merging_similarity_threshold: 0.8
+            });
+        } catch (error) {
+            console.error('Error loading retrieval config:', error);
+            setRetrievalConfigMessage({ type: 'error', text: 'Failed to load retrieval configuration' });
+        } finally {
+            setLoadingRetrievalConfig(false);
+        }
+    };
+
+    const loadRerankerModels = async () => {
+        try {
+            const response = await api.getRerankerModels();
+            setRerankerModels(response.models || []);
+        } catch (error) {
+            console.error('Error loading reranker models:', error);
+        }
+    };
+
+    const saveRetrievalConfig = async () => {
+        setSavingRetrievalConfig(true);
+        setRetrievalConfigMessage(null);
+        try {
+            const response = await api.updateRetrievalConfig(retrievalConfig);
+            
+            if (response.warnings && response.warnings.length > 0) {
+                setRetrievalConfigMessage({ 
+                    type: 'warning', 
+                    text: `Configuration saved with warnings: ${response.warnings.join(', ')}` 
+                });
+            } else {
+                setRetrievalConfigMessage({ type: 'success', text: 'Retrieval configuration saved successfully!' });
+            }
+            
+            // Clear message after 3 seconds
+            setTimeout(() => setRetrievalConfigMessage(null), 3000);
+        } catch (error) {
+            console.error('Error saving retrieval config:', error);
+            setRetrievalConfigMessage({ type: 'error', text: 'Failed to save retrieval configuration' });
+        } finally {
+            setSavingRetrievalConfig(false);
+        }
+    };
+
+    const handleRetrievalConfigChange = (field, value) => {
+        setRetrievalConfig(prev => ({
+            ...prev,
+            [field]: value
+        }));
+    };
+
+    const resetRetrievalConfig = () => {
+        if (!window.confirm('Are you sure you want to reset all retrieval settings to default values?')) {
+            return;
+        }
+        
+        setRetrievalConfig({
+            similarity_threshold: 0.2,
+            keyword_similarity_weight: 0.7,
+            reranker_enabled: false,
+            reranker_model: '',
+            max_chunks: 5,
+            search_type: 'similarity',
+            auto_merging_enabled: false,
+            auto_merging_similarity_threshold: 0.8
+        });
+        
+        setRetrievalConfigMessage({ type: 'success', text: 'Settings reset to default values. Remember to save if you want to keep these changes.' });
+        setTimeout(() => setRetrievalConfigMessage(null), 4000);
     };
 
     // File extension validation for chunking methods
@@ -1237,119 +1370,322 @@ const KnowledgeHubPage = () => {
             )}
 
             {/* Sidebar */}
-            <div className="w-64 bg-white shadow-lg">
-                <div className="p-6 border-b border-gray-200">
-                    <div className="flex items-center">
-                        <button
+            <Drawer
+                variant="permanent"
+                sx={{
+                    width: 280,
+                    flexShrink: 0,
+                    '& .MuiDrawer-paper': {
+                        width: 280,
+                        boxSizing: 'border-box',
+                        bgcolor: '#ffffff',
+                        borderRight: '1px solid #f1f5f9',
+                        boxShadow: '0px 4px 6px rgba(0, 0, 0, 0.07), 0px 2px 4px rgba(0, 0, 0, 0.06)',
+                        background: 'linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)',
+                    },
+                }}
+            >
+                <Box sx={{ p: 3 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+                        <IconButton
+                            edge="start"
                             onClick={() => navigate('/chat')}
-                            className="mr-3 p-2 text-gray-400 hover:text-gray-600"
+                            sx={{ 
+                                mr: 2,
+                                color: '#64748b',
+                                borderRadius: '10px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    color: '#2563eb',
+                                    transform: 'scale(1.05)',
+                                },
+                            }}
                         >
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                            </svg>
-                        </button>
-                        <h1 className="text-xl font-bold text-gray-900">Knowledge Hub</h1>
-                    </div>
-                </div>
-                
-                <div className="p-4">
-                    <nav className="space-y-2">
-                        <button
+                            <ArrowBack />
+                        </IconButton>
+                        <StorageIcon sx={{ 
+                            mr: 1, 
+                            color: '#2563eb',
+                            fontSize: '1.5rem',
+                        }} />
+                        <Typography variant="h6" sx={{ 
+                            fontWeight: 700,
+                            color: '#0f172a',
+                            fontSize: '1.125rem',
+                        }}>
+                            Knowledge Hub
+                        </Typography>
+                    </Box>
+                    <Divider sx={{ 
+                        mb: 3,
+                        borderColor: 'rgba(148, 163, 184, 0.2)',
+                    }} />
+                    
+                    {/* Navigation Items */}
+                    <List sx={{ p: 0 }}>
+                        <ListItemButton
+                            selected={activeTab === 'documents'}
                             onClick={() => setActiveTab('documents')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'documents' 
-                                    ? 'bg-indigo-50 text-indigo-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
+                            sx={{ 
+                                borderRadius: '12px', 
+                                mb: 1,
+                                margin: '4px 0',
+                                padding: '12px 16px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    transform: 'translateX(4px)',
+                                },
+                                '&.Mui-selected': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                    color: '#2563eb',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                    },
+                                    '& .MuiListItemIcon-root': {
+                                        color: '#2563eb',
+                                    },
+                                    '& .MuiListItemText-primary': {
+                                        color: '#2563eb',
+                                        fontWeight: 600,
+                                    },
+                                },
+                            }}
                         >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            Documents
-                        </button>
+                            <ListItemIcon sx={{ 
+                                color: activeTab === 'documents' ? '#2563eb' : '#64748b',
+                                minWidth: '40px',
+                            }}>
+                                <Description />
+                            </ListItemIcon>
+                            <ListItemText 
+                                primary="Documents" 
+                                primaryTypographyProps={{
+                                    fontSize: '0.875rem',
+                                    fontWeight: activeTab === 'documents' ? 600 : 500,
+                                    color: activeTab === 'documents' ? '#2563eb' : '#475569',
+                                }}
+                            />
+                        </ListItemButton>
 
-                        <button
+                        <ListItemButton
+                            selected={activeTab === 'chunking'}
                             onClick={() => setActiveTab('chunking')}
-                            className={`w-full flex items-center px-3 py-2 rounded-lg transition-colors ${
-                                activeTab === 'chunking' 
-                                    ? 'bg-purple-50 text-purple-700' 
-                                    : 'text-gray-700 hover:bg-gray-100'
-                            }`}
+                            sx={{ 
+                                borderRadius: '12px', 
+                                mb: 1,
+                                margin: '4px 0',
+                                padding: '12px 16px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    transform: 'translateX(4px)',
+                                },
+                                '&.Mui-selected': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                    color: '#2563eb',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                    },
+                                    '& .MuiListItemIcon-root': {
+                                        color: '#2563eb',
+                                    },
+                                    '& .MuiListItemText-primary': {
+                                        color: '#2563eb',
+                                        fontWeight: 600,
+                                    },
+                                },
+                            }}
                         >
-                            <svg className="w-5 h-5 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            Chunking Settings
-                        </button>
+                            <ListItemIcon sx={{ 
+                                color: activeTab === 'chunking' ? '#2563eb' : '#64748b',
+                                minWidth: '40px',
+                            }}>
+                                <Settings />
+                            </ListItemIcon>
+                            <ListItemText 
+                                primary="Chunking Settings" 
+                                primaryTypographyProps={{
+                                    fontSize: '0.875rem',
+                                    fontWeight: activeTab === 'chunking' ? 600 : 500,
+                                    color: activeTab === 'chunking' ? '#2563eb' : '#475569',
+                                }}
+                            />
+                        </ListItemButton>
+
+                        <ListItemButton
+                            selected={activeTab === 'retrieval'}
+                            onClick={() => setActiveTab('retrieval')}
+                            sx={{ 
+                                borderRadius: '12px', 
+                                mb: 1,
+                                margin: '4px 0',
+                                padding: '12px 16px',
+                                transition: 'all 0.2s ease-in-out',
+                                '&:hover': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                    transform: 'translateX(4px)',
+                                },
+                                '&.Mui-selected': {
+                                    backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                    color: '#2563eb',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                    },
+                                    '& .MuiListItemIcon-root': {
+                                        color: '#2563eb',
+                                    },
+                                    '& .MuiListItemText-primary': {
+                                        color: '#2563eb',
+                                        fontWeight: 600,
+                                    },
+                                },
+                            }}
+                        >
+                            <ListItemIcon sx={{ 
+                                color: activeTab === 'retrieval' ? '#2563eb' : '#64748b',
+                                minWidth: '40px',
+                            }}>
+                                <Search />
+                            </ListItemIcon>
+                            <ListItemText 
+                                primary="Retrieval Settings" 
+                                primaryTypographyProps={{
+                                    fontSize: '0.875rem',
+                                    fontWeight: activeTab === 'retrieval' ? 600 : 500,
+                                    color: activeTab === 'retrieval' ? '#2563eb' : '#475569',
+                                }}
+                            />
+                        </ListItemButton>
                         
                         {activeTab === 'documents' && (
-                            <div className="mt-4 space-y-2 pl-2 border-l border-gray-200">
-                                <label className="flex items-center px-3 py-2 text-gray-700 hover:bg-gray-100 rounded-lg cursor-pointer transition-colors">
-                                    <svg className="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                                    </svg>
+                            <Box sx={{ mt: 2, pl: 2, borderLeft: '2px solid #f1f5f9' }}>
+                                <label 
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        padding: '12px 16px',
+                                        color: '#475569',
+                                        cursor: 'pointer',
+                                        borderRadius: '12px',
+                                        transition: 'all 0.2s ease-in-out',
+                                        fontSize: '0.875rem',
+                                        fontWeight: 500,
+                                    }}
+                                    onMouseEnter={(e) => {
+                                        e.target.style.backgroundColor = 'rgba(37, 99, 235, 0.08)';
+                                        e.target.style.transform = 'translateX(4px)';
+                                    }}
+                                    onMouseLeave={(e) => {
+                                        e.target.style.backgroundColor = 'transparent';
+                                        e.target.style.transform = 'translateX(0)';
+                                    }}
+                                >
+                                    <CloudUploadIcon sx={{ width: 16, height: 16, mr: 1.5 }} />
                                     Upload Files
                                     <input
                                         type="file"
                                         multiple
                                         onChange={handleFileUpload}
-                                        className="hidden"
+                                        style={{ display: 'none' }}
                                         accept=".pdf,.doc,.docx,.txt,.md,.xlsx,.csv"
                                     />
                                 </label>
                                 
                                 {/* Chunking Method Status */}
                                 {selectedMethod && (
-                                    <div className="px-3 py-2 text-xs bg-blue-50 text-blue-700 rounded-lg">
-                                        <div className="flex items-center">
-                                            <svg className="w-3 h-3 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                            </svg>
-                                            <span className="font-medium">Chunking Method: {selectedMethod}</span>
-                                        </div>
+                                    <Box sx={{ 
+                                        px: 2, 
+                                        py: 1.5, 
+                                        fontSize: '0.75rem', 
+                                        bgcolor: 'rgba(37, 99, 235, 0.08)', 
+                                        color: '#2563eb', 
+                                        borderRadius: '8px',
+                                        mt: 1,
+                                    }}>
+                                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
+                                            <ArticleIcon sx={{ width: 12, height: 12, mr: 1 }} />
+                                            <Typography sx={{ fontWeight: 600, fontSize: '0.75rem' }}>
+                                                Chunking Method: {selectedMethod}
+                                            </Typography>
+                                        </Box>
                                         {methodsData[selectedMethod]?.supported_formats && (
-                                            <div className="mt-1 text-blue-600">
+                                            <Typography sx={{ 
+                                                fontSize: '0.7rem', 
+                                                color: '#2563eb',
+                                                opacity: 0.8,
+                                                mt: 0.5
+                                            }}>
                                                 Supports: {methodsData[selectedMethod].supported_formats.join(', ')}
-                                            </div>
+                                            </Typography>
                                         )}
-                                    </div>
+                                    </Box>
                                 )}
-                                
-                                <button 
+
+                                <Box
                                     onClick={handleShowFolderUpload}
-                                    className="flex items-center px-3 py-2 text-gray-700 hover:bg-gray-100 rounded-lg cursor-pointer transition-colors w-full text-left"
+                                    sx={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        padding: '12px 16px',
+                                        color: '#475569',
+                                        cursor: 'pointer',
+                                        borderRadius: '12px',
+                                        transition: 'all 0.2s ease-in-out',
+                                        fontSize: '0.875rem',
+                                        fontWeight: 500,
+                                        mt: 1,
+                                        '&:hover': {
+                                            backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                            transform: 'translateX(4px)',
+                                        },
+                                    }}
                                 >
-                                    <svg className="w-4 h-4 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                    </svg>
+                                    <FolderIcon sx={{ width: 16, height: 16, mr: 1.5 }} />
                                     Upload Folder
-                                </button>
-                            </div>
+                                </Box>
+                            </Box>
                         )}
-                    </nav>
+                    </List>
                     
                     {/* Stats */}
-                    <div className="mt-8 p-4 bg-gray-50 rounded-lg">
-                        <h3 className="text-sm font-medium text-gray-900 mb-2">Quick Stats</h3>
-                        <div className="text-sm text-gray-600 space-y-1">
+                    <Box sx={{ 
+                        mt: 3, 
+                        p: 2.5, 
+                        bgcolor: 'rgba(148, 163, 184, 0.05)', 
+                        borderRadius: '12px',
+                        border: '1px solid rgba(148, 163, 184, 0.1)',
+                    }}>
+                        <Typography variant="subtitle2" sx={{ 
+                            fontWeight: 600,
+                            color: '#0f172a',
+                            mb: 1.5,
+                            fontSize: '0.875rem',
+                        }}>
+                            Quick Stats
+                        </Typography>
+                        <Box sx={{ fontSize: '0.875rem', color: '#64748b' }}>
                             {activeTab === 'documents' && (
                                 <>
-                                    <div className="flex justify-between">
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
                                         <span>Files:</span>
-                                        <span className="font-medium">{files.length}</span>
-                                    </div>
-                                    <div className="flex justify-between">
+                                        <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
+                                            {files.length}
+                                        </Typography>
+                                    </Box>
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
                                         <span>Total Size:</span>
-                                        <span className="font-medium">
+                                        <Typography sx={{ fontWeight: 600, color: '#2563eb', fontSize: '0.875rem' }}>
                                             {formatFileSize(files.reduce((total, file) => total + (file.size || 0), 0))}
-                                        </span>
-                                    </div>
+                                        </Typography>
+                                    </Box>
                                 </>
                             )}
-                        </div>
-                    </div>
-                </div>
-            </div>
+                        </Box>
+                    </Box>
+                </Box>
+            </Drawer>
 
             {/* Main Content */}
             <div className="flex-1 flex flex-col">
@@ -1361,10 +1697,12 @@ const KnowledgeHubPage = () => {
                                 <h2 className="text-2xl font-bold text-gray-900">
                                     {activeTab === 'documents' && 'Your Documents'}
                                     {activeTab === 'chunking' && 'Chunking Settings'}
+                                    {activeTab === 'retrieval' && 'Retrieval Settings'}
                                 </h2>
                                 <p className="mt-1 text-sm text-gray-500">
                                     {activeTab === 'documents' && 'Manage your uploaded documents for AI conversations'}
                                     {activeTab === 'chunking' && 'Configure how documents are split into chunks for processing'}
+                                    {activeTab === 'retrieval' && 'Configure document retrieval and search parameters'}
                                 </p>
                             </div>
                             <div className="flex items-center space-x-4">
@@ -1395,6 +1733,7 @@ const KnowledgeHubPage = () => {
                                 <div className="text-sm text-gray-500">
                                     {activeTab === 'documents' && `${files.length} document${files.length !== 1 ? 's' : ''}`}
                                     {activeTab === 'chunking' && `${(chunkingMethods || []).length} method${(chunkingMethods || []).length !== 1 ? 's' : ''} available`}
+                                    {activeTab === 'retrieval' && `${rerankerModels.length} reranker model${rerankerModels.length !== 1 ? 's' : ''} available`}
                                 </div>
                             </div>
                         </div>
@@ -2066,6 +2405,237 @@ const KnowledgeHubPage = () => {
                                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                         </svg>
                                         <p>No chunking methods available</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Retrieval Settings Tab */}
+                    {activeTab === 'retrieval' && (
+                        <div className="space-y-6">
+                            {/* Loading State */}
+                            {loadingRetrievalConfig && (
+                                <div className="bg-white rounded-lg shadow p-6">
+                                    <div className="flex items-center justify-center">
+                                        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-600"></div>
+                                        <span className="ml-2 text-gray-600">Loading retrieval configuration...</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Retrieval Settings Form */}
+                            {!loadingRetrievalConfig && (
+                                <div className="bg-white rounded-lg shadow">
+                                    <div className="p-6">
+                                        <div className="flex justify-between items-center mb-6">
+                                            <h3 className="text-lg font-medium text-gray-900">Retrieval Configuration</h3>
+                                            <div className="flex space-x-3">
+                                                <button
+                                                    onClick={resetRetrievalConfig}
+                                                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-lg hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
+                                                >
+                                                    Reset to Defaults
+                                                </button>
+                                                <button
+                                                    onClick={saveRetrievalConfig}
+                                                    disabled={savingRetrievalConfig}
+                                                    className={`px-4 py-2 text-sm font-medium text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                                                        savingRetrievalConfig
+                                                            ? 'bg-gray-400 cursor-not-allowed'
+                                                            : 'bg-green-600 hover:bg-green-700 focus:ring-green-500'
+                                                    }`}
+                                                >
+                                                    {savingRetrievalConfig ? 'Saving...' : 'Save Configuration'}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Save Message */}
+                                        {retrievalConfigMessage && (
+                                            <div className={`mb-4 p-3 rounded-lg ${
+                                                retrievalConfigMessage.type === 'success' 
+                                                    ? 'bg-green-50 text-green-700 border border-green-200' 
+                                                    : retrievalConfigMessage.type === 'warning'
+                                                    ? 'bg-yellow-50 text-yellow-700 border border-yellow-200'
+                                                    : 'bg-red-50 text-red-700 border border-red-200'
+                                            }`}>
+                                                {retrievalConfigMessage.text}
+                                            </div>
+                                        )}
+
+                                        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                                            {/* Similarity Threshold */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Similarity Threshold
+                                                    <span className="text-xs text-gray-500 ml-1">(0.0 - 1.0)</span>
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="1"
+                                                    step="0.1"
+                                                    value={retrievalConfig.similarity_threshold}
+                                                    onChange={(e) => handleRetrievalConfigChange('similarity_threshold', parseFloat(e.target.value) || 0)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                />
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Minimum similarity score for retrieving chunks. Higher values are more selective.
+                                                </p>
+                                            </div>
+
+                                            {/* Keyword Similarity Weight */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Keyword Similarity Weight
+                                                    <span className="text-xs text-gray-500 ml-1">(0.0 - 1.0)</span>
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    min="0"
+                                                    max="1"
+                                                    step="0.1"
+                                                    value={retrievalConfig.keyword_similarity_weight}
+                                                    onChange={(e) => handleRetrievalConfigChange('keyword_similarity_weight', parseFloat(e.target.value) || 0)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                />
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Weight of keyword similarity vs semantic similarity (only used with Hybrid search type). 1.0 = pure keyword search, 0.0 = pure semantic search.
+                                                </p>
+                                            </div>
+
+                                            {/* Max Chunks */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Maximum Chunks
+                                                    <span className="text-xs text-gray-500 ml-1">(1 - 20)</span>
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    min="1"
+                                                    max="20"
+                                                    value={retrievalConfig.max_chunks}
+                                                    onChange={(e) => handleRetrievalConfigChange('max_chunks', parseInt(e.target.value) || 1)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                />
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Maximum number of document chunks to retrieve for answering questions.
+                                                </p>
+                                            </div>
+
+                                            {/* Search Type */}
+                                            <div>
+                                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                    Search Type
+                                                </label>
+                                                <select
+                                                    value={retrievalConfig.search_type}
+                                                    onChange={(e) => handleRetrievalConfigChange('search_type', e.target.value)}
+                                                    className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                >
+                                                    <option value="similarity">Similarity Search</option>
+                                                    <option value="mmr">Maximum Marginal Relevance (MMR)</option>
+                                                    <option value="similarity_score_threshold">Similarity with Score Threshold</option>
+                                                    <option value="hybrid">Hybrid (Semantic + Keyword)</option>
+                                                </select>
+                                                <p className="mt-1 text-xs text-gray-500">
+                                                    Search algorithm to use for document retrieval. Hybrid combines semantic similarity with keyword matching.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {/* Reranker Settings */}
+                                        <div className="mt-8 pt-6 border-t border-gray-200">
+                                            <h4 className="text-md font-medium text-gray-900 mb-4">Reranker Configuration</h4>
+                                            
+                                            <div className="space-y-4">
+                                                {/* Enable Reranker */}
+                                                <div className="flex items-center">
+                                                    <input
+                                                        id="reranker-enabled"
+                                                        type="checkbox"
+                                                        checked={retrievalConfig.reranker_enabled}
+                                                        onChange={(e) => handleRetrievalConfigChange('reranker_enabled', e.target.checked)}
+                                                        className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
+                                                    />
+                                                    <label htmlFor="reranker-enabled" className="ml-2 block text-sm text-gray-900">
+                                                        Enable Reranker Model
+                                                    </label>
+                                                </div>
+
+                                                {/* Reranker Model Selection */}
+                                                {retrievalConfig.reranker_enabled && (
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                            Reranker Model
+                                                        </label>
+                                                        <select
+                                                            value={retrievalConfig.reranker_model}
+                                                            onChange={(e) => handleRetrievalConfigChange('reranker_model', e.target.value)}
+                                                            className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
+                                                        >
+                                                            {rerankerModels.map((model) => (
+                                                                <option key={model.name} value={model.name}>
+                                                                    {model.display_name}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                        <p className="mt-1 text-xs text-gray-500">
+                                                            {rerankerModels.find(m => m.name === retrievalConfig.reranker_model)?.description || 
+                                                             'Select a reranker model to improve retrieval relevance'}
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* Auto Merging Settings */}
+                                        <div className="mt-8 pt-6 border-t border-gray-200">
+                                            <h4 className="text-md font-medium text-gray-900 mb-4">Auto Merging Retrieval</h4>
+                                            
+                                            <div className="space-y-4">
+                                                {/* Enable Auto Merging */}
+                                                <div className="flex items-center">
+                                                    <input
+                                                        id="auto-merging-enabled"
+                                                        type="checkbox"
+                                                        checked={retrievalConfig.auto_merging_enabled}
+                                                        onChange={(e) => handleRetrievalConfigChange('auto_merging_enabled', e.target.checked)}
+                                                        className="h-4 w-4 text-green-600 focus:ring-green-500 border-gray-300 rounded"
+                                                    />
+                                                    <label htmlFor="auto-merging-enabled" className="ml-2 block text-sm text-gray-900">
+                                                        Enable Auto Merging
+                                                    </label>
+                                                </div>
+                                                
+                                                <p className="text-xs text-gray-500">
+                                                    Auto merging combines similar document chunks to provide more comprehensive context. 
+                                                    Applied after reranking when both are enabled.
+                                                </p>
+
+                                                {/* Auto Merging Similarity Threshold */}
+                                                {retrievalConfig.auto_merging_enabled && (
+                                                    <div>
+                                                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                            Merging Similarity Threshold: {retrievalConfig.auto_merging_similarity_threshold}
+                                                        </label>
+                                                        <input
+                                                            type="range"
+                                                            min="0.5"
+                                                            max="1.0"
+                                                            step="0.05"
+                                                            value={retrievalConfig.auto_merging_similarity_threshold}
+                                                            onChange={(e) => handleRetrievalConfigChange('auto_merging_similarity_threshold', parseFloat(e.target.value))}
+                                                            className="mt-1 block w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer slider"
+                                                        />
+                                                        <p className="mt-1 text-xs text-gray-500">
+                                                            Higher values (0.8-1.0) merge only very similar chunks. Lower values (0.5-0.7) merge more broadly related content.
+                                                        </p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             )}

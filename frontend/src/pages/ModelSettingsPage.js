@@ -1,6 +1,25 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import {
+    Box,
+    Drawer,
+    List,
+    ListItemButton,
+    ListItemIcon,
+    ListItemText,
+    Typography,
+    IconButton,
+    Divider,
+    ThemeProvider,
+} from '@mui/material';
+import {
+    ArrowBack,
+    Computer as ComputerIcon,
+    Memory as MemoryIcon,
+    Settings as SettingsIcon,
+} from '@mui/icons-material';
+import { theme } from '../theme';
 
 const ModelSettingsPage = () => {
     const navigate = useNavigate();
@@ -415,6 +434,11 @@ const ModelSettingsPage = () => {
         return `${displayName}${parameterInfo}${sizeInfo}`;
     };
 
+    const tabs = [
+        { id: 'llm', name: 'Language Model', icon: ComputerIcon },
+        { id: 'embedding', name: 'Embedding Model', icon: MemoryIcon }
+    ];
+
     if (loading) {
         return (
             <div className="min-h-screen bg-gray-50 flex items-center justify-center">
@@ -427,108 +451,175 @@ const ModelSettingsPage = () => {
     }
 
     return (
-        <div className="min-h-screen bg-gray-50 flex">
-            {/* Sidebar */}
-            <div className="w-64 bg-white shadow-lg">
-                <div className="p-6 border-b border-gray-200">
-                    <div className="flex items-center">
-                        <button
-                            onClick={() => navigate('/chat')}
-                            className="mr-3 p-2 text-gray-400 hover:text-gray-600"
-                        >
-                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                            </svg>
-                        </button>
-                        <h1 className="text-xl font-bold text-gray-900">Model Settings</h1>
-                    </div>
-                </div>
-                
-                <nav className="mt-6">
-                    <div className="px-3 space-y-1">
-                        <button
-                            onClick={() => setActiveTab('llm')}
-                            className={`${
-                                activeTab === 'llm'
-                                    ? 'bg-indigo-100 border-indigo-500 text-indigo-700'
-                                    : 'border-transparent text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-                            } group flex items-center w-full pl-2 pr-2 py-2 border-l-4 text-sm font-medium`}
-                        >
-                            <svg className="mr-3 h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                            </svg>
-                            Language Model
-                        </button>
+        <ThemeProvider theme={theme}>
+            <Box sx={{ minHeight: '100vh', bgcolor: '#f8fafc', display: 'flex' }}>
+                {/* Sidebar */}
+                <Drawer
+                    variant="permanent"
+                    sx={{
+                        width: 280,
+                        flexShrink: 0,
+                        '& .MuiDrawer-paper': {
+                            width: 280,
+                            boxSizing: 'border-box',
+                            bgcolor: '#ffffff',
+                            borderRight: '1px solid #f1f5f9',
+                            boxShadow: '0px 4px 6px rgba(0, 0, 0, 0.07), 0px 2px 4px rgba(0, 0, 0, 0.06)',
+                            background: 'linear-gradient(180deg, #ffffff 0%, #f8fafc 100%)',
+                        },
+                    }}
+                >
+                    <Box sx={{ p: 3 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+                            <IconButton
+                                edge="start"
+                                onClick={() => navigate('/chat')}
+                                sx={{ 
+                                    mr: 2,
+                                    color: '#64748b',
+                                    borderRadius: '10px',
+                                    transition: 'all 0.2s ease-in-out',
+                                    '&:hover': {
+                                        backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                        color: '#2563eb',
+                                        transform: 'scale(1.05)',
+                                    },
+                                }}
+                            >
+                                <ArrowBack />
+                            </IconButton>
+                            <SettingsIcon sx={{ 
+                                mr: 1, 
+                                color: '#2563eb',
+                                fontSize: '1.5rem',
+                            }} />
+                            <Typography variant="h6" sx={{ 
+                                fontWeight: 700,
+                                color: '#0f172a',
+                                fontSize: '1.125rem',
+                            }}>
+                                Model Settings
+                            </Typography>
+                        </Box>
+                        <Divider sx={{ 
+                            mb: 3,
+                            borderColor: 'rgba(148, 163, 184, 0.2)',
+                        }} />
                         
-                        <button
-                            onClick={() => setActiveTab('embedding')}
-                            className={`${
-                                activeTab === 'embedding'
-                                    ? 'bg-indigo-100 border-indigo-500 text-indigo-700'
-                                    : 'border-transparent text-gray-600 hover:text-gray-900 hover:bg-gray-50'
-                            } group flex items-center w-full pl-2 pr-2 py-2 border-l-4 text-sm font-medium`}
-                        >
-                            <svg className="mr-3 h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14-7H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V6a2 2 0 00-2-2z" />
-                            </svg>
-                            Embedding Model
-                        </button>
-                    </div>
-                </nav>
-            </div>
+                        {/* Navigation Items */}
+                        <List sx={{ p: 0 }}>
+                            {tabs.map((tab) => {
+                                const IconComponent = tab.icon;
+                                return (
+                                    <ListItemButton
+                                        key={tab.id}
+                                        selected={activeTab === tab.id}
+                                        onClick={() => setActiveTab(tab.id)}
+                                        sx={{ 
+                                            borderRadius: '12px', 
+                                            mb: 1,
+                                            margin: '4px 0',
+                                            padding: '12px 16px',
+                                            transition: 'all 0.2s ease-in-out',
+                                            '&:hover': {
+                                                backgroundColor: 'rgba(37, 99, 235, 0.08)',
+                                                transform: 'translateX(4px)',
+                                            },
+                                            '&.Mui-selected': {
+                                                backgroundColor: 'rgba(37, 99, 235, 0.12)',
+                                                color: '#2563eb',
+                                                '&:hover': {
+                                                    backgroundColor: 'rgba(37, 99, 235, 0.16)',
+                                                },
+                                                '& .MuiListItemIcon-root': {
+                                                    color: '#2563eb',
+                                                },
+                                                '& .MuiListItemText-primary': {
+                                                    color: '#2563eb',
+                                                    fontWeight: 600,
+                                                },
+                                            },
+                                        }}
+                                    >
+                                        <ListItemIcon sx={{ 
+                                            color: activeTab === tab.id ? '#2563eb' : '#64748b',
+                                            minWidth: '40px',
+                                        }}>
+                                            <IconComponent />
+                                        </ListItemIcon>
+                                        <ListItemText 
+                                            primary={tab.name} 
+                                            primaryTypographyProps={{
+                                                fontSize: '0.875rem',
+                                                fontWeight: activeTab === tab.id ? 600 : 500,
+                                                color: activeTab === tab.id ? '#2563eb' : '#475569',
+                                            }}
+                                        />
+                                    </ListItemButton>
+                                );
+                            })}
+                        </List>
+                    </Box>
+                </Drawer>
 
-            {/* Main Content */}
-            <div className="flex-1 flex flex-col">
-                {/* Header */}
-                <div className="bg-white shadow-sm border-b">
-                    <div className="px-6 py-4">
-                        <div className="flex justify-between items-center">
-                            <div>
-                                <h2 className="text-2xl font-bold text-gray-900">
-                                    {activeTab === 'llm' ? 'Language Model Settings' : 'Embedding Model Settings'}
-                                </h2>
-                                <p className="mt-1 text-sm text-gray-500">
-                                    {activeTab === 'llm' ? 'Configure AI model parameters and behavior' : 'Manage embedding models for document processing'}
-                                </p>
-                            </div>
-                            <div className="flex items-center space-x-4">
-                                {activeTab === 'llm' && (
-                                    <>
-                                        <button
-                                            onClick={resetToDefaults}
-                                            className="px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-                                        >
-                                            Reset to Defaults
-                                        </button>
-                                        <button
-                                            onClick={handleSaveSettings}
-                                            disabled={saving || downloading}
-                                            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
-                                        >
-                                            {downloading ? 'Downloading...' : saving ? 'Saving...' : 'Save Settings'}
-                                        </button>
-                                    </>
-                                )}
-                                
-                                {/* Progress indicator */}
-                                {(downloading || downloadProgress) && (
-                                    <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                                        <div className="flex items-center space-x-3">
-                                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
-                                            <div>
-                                                <p className="text-sm font-medium text-blue-900">Model Download in Progress</p>
-                                                <p className="text-sm text-blue-700">{downloadProgress}</p>
+                {/* Main Content */}
+                <Box sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
+                    {/* Header */}
+                    <Box sx={{ bgcolor: 'white', borderBottom: '1px solid #f1f5f9', boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)' }}>
+                        <Box sx={{ px: 3, py: 2 }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <Box>
+                                    <Typography variant="h4" sx={{ 
+                                        fontWeight: 700, 
+                                        color: '#0f172a',
+                                        fontSize: '1.5rem',
+                                        mb: 0.5,
+                                    }}>
+                                        {activeTab === 'llm' ? 'Language Model Settings' : 'Embedding Model Settings'}
+                                    </Typography>
+                                    <Typography variant="body2" sx={{ color: '#64748b' }}>
+                                        {activeTab === 'llm' ? 'Configure AI model parameters and behavior' : 'Manage embedding models for document processing'}
+                                    </Typography>
+                                </Box>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                                    {activeTab === 'llm' && (
+                                        <>
+                                            <button
+                                                onClick={resetToDefaults}
+                                                className="px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
+                                            >
+                                                Reset to Defaults
+                                            </button>
+                                            <button
+                                                onClick={handleSaveSettings}
+                                                disabled={saving || downloading}
+                                                className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+                                            >
+                                                {downloading ? 'Downloading...' : saving ? 'Saving...' : 'Save Settings'}
+                                            </button>
+                                        </>
+                                    )}
+                                    
+                                    {/* Progress indicator */}
+                                    {(downloading || downloadProgress) && (
+                                        <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                                            <div className="flex items-center space-x-3">
+                                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600"></div>
+                                                <div>
+                                                    <p className="text-sm font-medium text-blue-900">Model Download in Progress</p>
+                                                    <p className="text-sm text-blue-700">{downloadProgress}</p>
+                                                </div>
                                             </div>
                                         </div>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                                    )}
+                                </Box>
+                            </Box>
+                        </Box>
+                    </Box>
 
-                {/* Content */}
-                <div className="flex-1 p-6">
+                    {/* Content */}
+                    <Box sx={{ flexGrow: 1, p: 3 }}>
+                        <div className="flex-1 p-6">
                     {/* LLM Settings Tab */}
                     {activeTab === 'llm' && (
                         <div className="bg-white rounded-lg shadow">
@@ -815,7 +906,8 @@ const ModelSettingsPage = () => {
                         </div>
                     )}
                 </div>
-            </div>
+                    </Box>
+                </Box>
 
             {/* GPU Compatibility Warning Dialog */}
             {showWarningDialog && warningData && (
@@ -944,7 +1036,8 @@ const ModelSettingsPage = () => {
                     </div>
                 </div>
             )}
-        </div>
+            </Box>
+        </ThemeProvider>
     );
 };
 

@@ -99,6 +99,8 @@ services:
       - /dev/nvidia-modeset:/dev/nvidia-modeset
       - /dev/nvidia-caps:/dev/nvidia-caps
     restart: unless-stopped
+    logging:
+      driver: "none"  # Suppress all logging output
 
 
 

@@ -1260,6 +1260,71 @@ export const api = {
             throw error;
         }
     },
+
+    // Retrieval Configuration API methods
+    getRetrievalConfig: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/retrieval/config`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get retrieval config');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting retrieval config:', error);
+            throw error;
+        }
+    },
+
+    // Update retrieval configuration
+    updateRetrievalConfig: async (config) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/retrieval/config`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader(),
+                },
+                body: JSON.stringify(config),
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to update retrieval config');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error updating retrieval config:', error);
+            throw error;
+        }
+    },
+
+    // Get available reranker models
+    getRerankerModels: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/retrieval/reranker-models`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get reranker models');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting reranker models:', error);
+            throw error;
+        }
+    },
 };
 
 export default api;
@@ -1315,5 +1380,291 @@ export const checkFileExists = async (filename, hash) => {
     } catch (error) {
         console.error('Error checking file existence:', error);
         throw error;
+    }
+};
+
+// ========================================
+// EVALUATION API ENDPOINTS
+// ========================================
+
+export const evaluationApi = {
+    // Get current evaluation metrics
+    getMetrics: async (timeframe = '7d') => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/metrics?timeframe=${timeframe}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get evaluation metrics: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting evaluation metrics:', error);
+            throw error;
+        }
+    },
+
+    // Get historical evaluation data
+    getHistoricalMetrics: async (days = 30) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/historical?days=${days}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get historical metrics: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting historical metrics:', error);
+            throw error;
+        }
+    },
+
+    // Get latency distribution
+    getLatencyDistribution: async (timeframe = '7d') => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/latency-distribution?timeframe=${timeframe}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get latency distribution: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting latency distribution:', error);
+            throw error;
+        }
+    },
+
+    // Get quality breakdown
+    getQualityBreakdown: async (metric = 'answer_quality') => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/quality-breakdown?metric=${metric}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get quality breakdown: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting quality breakdown:', error);
+            throw error;
+        }
+    },
+
+    // Get evaluation datasets
+    getDatasets: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get datasets: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting datasets:', error);
+            throw error;
+        }
+    },
+
+    // Create evaluation dataset
+    createDataset: async (datasetConfig) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(datasetConfig)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to create dataset: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error creating dataset:', error);
+            throw error;
+        }
+    },
+
+    // Get dataset generation progress
+    getDatasetProgress: async (datasetId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets/${datasetId}/progress`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get progress: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting dataset progress:', error);
+            throw error;
+        }
+    },
+
+    // Preview dataset creation (estimate what will be generated)
+    previewDataset: async (previewConfig) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets/preview`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(previewConfig)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to preview dataset: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error previewing dataset:', error);
+            throw error;
+        }
+    },
+
+    // Delete evaluation dataset
+    deleteDataset: async (datasetId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets/${datasetId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to delete dataset: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error deleting dataset:', error);
+            throw error;
+        }
+    },
+
+    // Get detailed information about a specific dataset
+    getDatasetDetails: async (datasetId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets/${datasetId}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get dataset details: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting dataset details:', error);
+            throw error;
+        }
+    },
+
+    // Run evaluation test case
+    runTestCase: async (datasetId, models) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/test-cases/run`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify({
+                    dataset_id: datasetId,
+                    models: models
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to run test case: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error running test case:', error);
+            throw error;
+        }
+    },
+
+    // Get evaluation results
+    getResults: async (modelFilter = null, datasetFilter = null) => {
+        try {
+            let url = `${API_BASE_URL}/api/evaluation/results`;
+            const params = new URLSearchParams();
+            
+            if (modelFilter) params.append('model_filter', modelFilter);
+            if (datasetFilter) params.append('dataset_filter', datasetFilter);
+            
+            if (params.toString()) {
+                url += `?${params.toString()}`;
+            }
+
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get evaluation results: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting evaluation results:', error);
+            throw error;
+        }
     }
 };
