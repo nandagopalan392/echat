@@ -13,6 +13,9 @@ services:
       - ./backend:/app
       - sqlite_data:/app/data/db:rw        # Persistent SQLite database
       - chroma_data:/app/data/chroma_db:rw # Persistent chroma database
+      - hf_cache:/root/.cache/huggingface:rw  # Persistent HuggingFace model cache
+      - easyocr_cache:/root/.EasyOCR:rw       # Persistent EasyOCR model cache
+      - docling_cache:/root/.cache/docling:rw # Persistent Docling model cache
     environment:
       - PYTHONUNBUFFERED=1
       - PIP_DEFAULT_TIMEOUT=100
@@ -30,6 +33,9 @@ services:
       - REQUEST_TIMEOUT=600
       - METRICS_PORT=8001
       - PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus_metrics
+      - HF_HOME=/root/.cache/huggingface        # HuggingFace cache directory
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface  # Transformers cache
+      - EASYOCR_MODULE_PATH=/root/.EasyOCR      # EasyOCR cache directory
     networks:
       - echat-network
     healthcheck:
@@ -47,6 +53,11 @@ services:
         limits:
           memory: 2G
           cpus: '1.0'
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     # Ensure the container runs with permissions to modify volume data
     user: "0:0"
 
@@ -138,4 +149,10 @@ volumes:
   minio_data:
     driver: local
   chroma_data:
+    driver: local
+  hf_cache:
+    driver: local
+  easyocr_cache:
+    driver: local
+  docling_cache:
     driver: local

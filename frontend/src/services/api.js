@@ -397,70 +397,7 @@ export const api = {
     },
 
     // Create new chat session
-    createSession: async () => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/sessions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader(),
-                },
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.detail || 'Create session failed');
-            }
-
-            return data;
-        } catch (error) {
-            console.error('Create session error:', error);
-            throw error;
-        }
-    },
-
-    // Delete chat session
-    deleteSession: async (sessionId) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, {
-                method: 'DELETE',
-                headers: getAuthHeader(),
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.detail || 'Delete session failed');
-            }
-
-            return data;
-        } catch (error) {
-            console.error('Delete session error:', error);
-            throw error;
-        }
-    },
-
     // Get chat history for a session
-    getChatHistory: async (sessionId) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/history`, {
-                headers: getAuthHeader(),
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.detail || 'Get chat history failed');
-            }
-
-            return data;
-        } catch (error) {
-            console.error('Get chat history error:', error);
-            throw error;
-        }
-    },
-
     // Get chat messages for a session
     getChatMessages: async (sessionId) => {
         try {
@@ -1108,72 +1045,6 @@ export const api = {
     },
 
     // Note: getUserStats already exists above
-
-    // Embedding model management (deprecated - use get('/api/models/available') instead)
-    getEmbeddingModels: async () => {
-        console.warn('getEmbeddingModels is deprecated. Use get("/api/models/available") instead.');
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/models/available`, {
-                method: 'GET',
-                headers: {
-                    ...getAuthHeader()
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error('Failed to fetch models');
-            }
-            
-            const data = await response.json();
-            return {
-                models: data.embedding_models || []
-            };
-        } catch (error) {
-            console.error('Get embedding models error:', error);
-            throw error;
-        }
-    },
-
-    switchEmbeddingModel: async (modelName) => {
-        console.warn('switchEmbeddingModel is deprecated. Use post("/api/models/settings") instead.');
-        try {
-            // Get current models first
-            const currentResponse = await fetch(`${API_BASE_URL}/api/models/current`, {
-                method: 'GET',
-                headers: {
-                    ...getAuthHeader()
-                }
-            });
-            
-            if (!currentResponse.ok) {
-                throw new Error('Failed to get current models');
-            }
-            
-            const currentModels = await currentResponse.json();
-            
-            // Update with new embedding model
-            const response = await fetch(`${API_BASE_URL}/api/models/settings`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                },
-                body: JSON.stringify({
-                    llm: currentModels.llm,
-                    embedding: modelName
-                })
-            });
-            
-            if (!response.ok) {
-                throw new Error('Failed to switch embedding model');
-            }
-            
-            return await response.json();
-        } catch (error) {
-            console.error('Switch embedding model error:', error);
-            throw error;
-        }
-    },
 
     // Get chunking methods and configurations
     getChunkingMethods: async () => {
