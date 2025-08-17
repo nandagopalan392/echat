@@ -48,6 +48,7 @@ tiktoken>=0.5.0
 
 # API and server
 fastapi>=0.95.0
+asgiref>=3.6.0
 uvicorn>=0.21.1
 python-multipart
 pydantic>=2.0.0
@@ -83,3 +84,10 @@ scipy>=1.10.0  # For statistical calculations in evaluation
 
 # Search and ranking
 rank-bm25>=0.2.2  # For keyword-based search in hybrid retrieval
+
+# Background task processing and real-time communication
+celery[redis]>=5.3.0  # Task queue with Redis broker
+redis>=4.5.0  # Redis client
+gevent>=22.10.0  # Async support for Celery workers
+websockets>=11.0.0  # WebSocket support
+posthog>=3.0.0  # Analytics library for ChromaDB

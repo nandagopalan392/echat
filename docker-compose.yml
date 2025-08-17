@@ -36,6 +36,9 @@ services:
       - HF_HOME=/root/.cache/huggingface        # HuggingFace cache directory
       - TRANSFORMERS_CACHE=/root/.cache/huggingface  # Transformers cache
       - EASYOCR_MODULE_PATH=/root/.EasyOCR      # EasyOCR cache directory
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379/0
     networks:
       - echat-network
     healthcheck:
@@ -48,6 +51,7 @@ services:
     depends_on:
       - ollama
       - minio
+      - redis
     deploy:
       resources:
         limits:
@@ -115,6 +119,69 @@ services:
 
 
 
+  redis:
+    image: redis:7-alpine
+    container_name: echat-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - echat-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: echat-celery-worker
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+      - sqlite_data:/app/data/db:rw
+      - chroma_data:/app/data/chroma_db:rw
+      - hf_cache:/root/.cache/huggingface:rw
+      - easyocr_cache:/root/.EasyOCR:rw
+      - docling_cache:/root/.cache/docling:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_URL=redis://redis:6379/0
+      - OLLAMA_HOST=http://ollama:11434
+      - CHROMA_DB_PATH=/app/data/chroma_db
+      - SQLITE_DB_PATH=/app/data/db/chat.db
+      - DOCUMENT_DB_PATH=/app/data/db/documents.db
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minio_user
+      - MINIO_SECRET_KEY=minio_password
+      - MINIO_SECURE=false
+      - MINIO_BUCKET=documents
+      - HF_HOME=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      - EASYOCR_MODULE_PATH=/root/.EasyOCR
+    networks:
+      - echat-network
+    depends_on:
+      - redis
+      - ollama
+      - minio
+    restart: unless-stopped
+    command: python -m celery -A celery_app worker --loglevel=info --pool=gevent --concurrency=4 --queues=celery,evaluation
+    healthcheck:
+      test: ["CMD", "python", "-m", "celery", "-A", "celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    user: "0:0"
+
   minio:
     image: quay.io/minio/minio:latest
     container_name: echat-minio
@@ -155,4 +222,6 @@ volumes:
   easyocr_cache:
     driver: local
   docling_cache:
+    driver: local
+  redis_data:
     driver: local

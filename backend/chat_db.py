@@ -187,6 +187,16 @@ class ChatDB:
                     else:
                         logger.warning(f"Could not add file_path column: {e}")
 
+                # Add question_count column to existing evaluation_datasets table if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE evaluation_datasets ADD COLUMN question_count INTEGER DEFAULT 0")
+                    logger.info("Added question_count column to evaluation_datasets table")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" in str(e).lower():
+                        logger.debug("question_count column already exists in evaluation_datasets table")
+                    else:
+                        logger.warning(f"Could not add question_count column: {e}")
+
                 # Create evaluation dataset documents mapping table
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS evaluation_dataset_documents (
@@ -217,6 +227,30 @@ class ChatDB:
                         completed_at TIMESTAMP,
                         FOREIGN KEY (dataset_id) REFERENCES evaluation_datasets (id) ON DELETE CASCADE,
                         FOREIGN KEY (run_by) REFERENCES users (username)
+                    )
+                ''')
+
+                # Create evaluation tasks table for background evaluations
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS evaluation_tasks (
+                        id TEXT PRIMARY KEY,
+                        task_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        query TEXT,
+                        response TEXT,
+                        context_chunks INTEGER,
+                        conversation_id TEXT,
+                        user_id TEXT,
+                        metadata TEXT,
+                        groundedness_score REAL,
+                        answer_relevance_score REAL,
+                        context_relevance_score REAL,
+                        overall_score REAL,
+                        evaluation_time REAL,
+                        error_message TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TIMESTAMP
                     )
                 ''')
 
@@ -1389,7 +1423,7 @@ class ChatDB:
                 if file_path and question_count is not None:
                     cursor.execute('''
                         UPDATE evaluation_datasets 
-                        SET status = ?, file_path = ?, document_count = ?, updated_at = CURRENT_TIMESTAMP
+                        SET status = ?, file_path = ?, question_count = ?, updated_at = CURRENT_TIMESTAMP
                         WHERE id = ?
                     ''', (status, file_path, question_count, dataset_id))
                 else:
@@ -1410,7 +1444,7 @@ class ChatDB:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, name, description, document_count, status, created_by, 
+                    SELECT id, name, description, document_count, question_count, status, created_by, 
                            created_at, updated_at, file_path
                     FROM evaluation_datasets 
                     ORDER BY created_at DESC
@@ -1424,11 +1458,12 @@ class ChatDB:
                         "name": row[1],
                         "description": row[2],
                         "document_count": row[3],
-                        "status": row[4],
-                        "created_by": row[5],
-                        "created_at": row[6],
-                        "updated_at": row[7],
-                        "file_path": row[8]
+                        "question_count": row[4],
+                        "status": row[5],
+                        "created_by": row[6],
+                        "created_at": row[7],
+                        "updated_at": row[8],
+                        "file_path": row[9]
                     }
                     datasets.append(dataset)
                 
@@ -1445,7 +1480,7 @@ class ChatDB:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT id, name, description, document_count, status, created_by, 
+                    SELECT id, name, description, document_count, question_count, status, created_by, 
                            created_at, updated_at, file_path
                     FROM evaluation_datasets 
                     WHERE id = ?
@@ -1458,11 +1493,12 @@ class ChatDB:
                         "name": row[1],
                         "description": row[2],
                         "document_count": row[3],
-                        "status": row[4],
-                        "created_by": row[5],
-                        "created_at": row[6],
-                        "updated_at": row[7],
-                        "file_path": row[8]
+                        "question_count": row[4],
+                        "status": row[5],
+                        "created_by": row[6],
+                        "created_at": row[7],
+                        "updated_at": row[8],
+                        "file_path": row[9]
                     }
                     return dataset
                 else:
@@ -1687,6 +1723,205 @@ class ChatDB:
         except Exception as e:
             logger.error(f"Error getting evaluation results: {e}")
             return []
+
+    def create_evaluation_task(self, task_id: str, task_type: str, query: str = None, 
+                             response: str = None, context_chunks: int = None, 
+                             conversation_id: str = None, user_id: str = None, 
+                             metadata: dict = None):
+        """Create a new evaluation task record"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO evaluation_tasks 
+                    (id, task_type, status, query, response, context_chunks, 
+                     conversation_id, user_id, metadata, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    task_id, task_type, 'PENDING', query, response, context_chunks,
+                    conversation_id, user_id, json.dumps(metadata) if metadata else None,
+                    datetime.now(), datetime.now()
+                ))
+                conn.commit()
+                logger.info(f"Created evaluation task record: {task_id}")
+        except Exception as e:
+            logger.error(f"Error creating evaluation task: {e}")
+
+    def update_evaluation_task_status(self, task_id: str, status: str, 
+                                    groundedness_score: float = None,
+                                    answer_relevance_score: float = None,
+                                    context_relevance_score: float = None,
+                                    overall_score: float = None,
+                                    evaluation_time: float = None,
+                                    error_message: str = None):
+        """Update evaluation task status and results"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                update_fields = ['status = ?', 'updated_at = ?']
+                values = [status, datetime.now()]
+                
+                if groundedness_score is not None:
+                    update_fields.append('groundedness_score = ?')
+                    values.append(groundedness_score)
+                
+                if answer_relevance_score is not None:
+                    update_fields.append('answer_relevance_score = ?')
+                    values.append(answer_relevance_score)
+                
+                if context_relevance_score is not None:
+                    update_fields.append('context_relevance_score = ?')
+                    values.append(context_relevance_score)
+                
+                if overall_score is not None:
+                    update_fields.append('overall_score = ?')
+                    values.append(overall_score)
+                
+                if evaluation_time is not None:
+                    update_fields.append('evaluation_time = ?')
+                    values.append(evaluation_time)
+                
+                if error_message is not None:
+                    update_fields.append('error_message = ?')
+                    values.append(error_message)
+                
+                if status in ['SUCCESS', 'FAILURE']:
+                    update_fields.append('completed_at = ?')
+                    values.append(datetime.now())
+                
+                values.append(task_id)
+                
+                cursor.execute(f'''
+                    UPDATE evaluation_tasks 
+                    SET {', '.join(update_fields)}
+                    WHERE id = ?
+                ''', values)
+                
+                conn.commit()
+                logger.info(f"Updated evaluation task {task_id} status to {status}")
+                
+        except Exception as e:
+            logger.error(f"Error updating evaluation task status: {e}")
+
+    def update_evaluation_task_metadata(self, task_id: str, metadata: dict):
+        """Update evaluation task metadata"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE evaluation_tasks 
+                    SET metadata = ?, updated_at = ?
+                    WHERE id = ?
+                ''', (json.dumps(metadata), datetime.now(), task_id))
+                
+                conn.commit()
+                logger.info(f"Updated evaluation task {task_id} metadata")
+                
+        except Exception as e:
+            logger.error(f"Error updating evaluation task metadata: {e}")
+
+    def get_evaluation_tasks(self, status: str = None, limit: int = 50):
+        """Get evaluation tasks with optional status filter"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                if status:
+                    cursor.execute('''
+                        SELECT id, task_type, status, query, response, context_chunks,
+                               conversation_id, user_id, metadata, groundedness_score,
+                               answer_relevance_score, context_relevance_score, overall_score,
+                               evaluation_time, error_message, created_at, updated_at, completed_at
+                        FROM evaluation_tasks 
+                        WHERE status = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    ''', (status, limit))
+                else:
+                    cursor.execute('''
+                        SELECT id, task_type, status, query, response, context_chunks,
+                               conversation_id, user_id, metadata, groundedness_score,
+                               answer_relevance_score, context_relevance_score, overall_score,
+                               evaluation_time, error_message, created_at, updated_at, completed_at
+                        FROM evaluation_tasks 
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    ''', (limit,))
+                
+                rows = cursor.fetchall()
+                
+                tasks = []
+                for row in rows:
+                    task = {
+                        'id': row[0],
+                        'task_type': row[1],
+                        'status': row[2],
+                        'query': row[3],
+                        'response': row[4],
+                        'context_chunks': row[5],
+                        'conversation_id': row[6],
+                        'user_id': row[7],
+                        'metadata': json.loads(row[8]) if row[8] else {},
+                        'groundedness_score': row[9],
+                        'answer_relevance_score': row[10],
+                        'context_relevance_score': row[11],
+                        'overall_score': row[12],
+                        'evaluation_time': row[13],
+                        'error_message': row[14],
+                        'created_at': row[15],
+                        'updated_at': row[16],
+                        'completed_at': row[17]
+                    }
+                    tasks.append(task)
+                
+                return tasks
+                
+        except Exception as e:
+            logger.error(f"Error getting evaluation tasks: {e}")
+            return []
+
+    def get_evaluation_task(self, task_id: str):
+        """Get a specific evaluation task by ID"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    SELECT id, task_type, status, query, response, context_chunks,
+                           conversation_id, user_id, metadata, groundedness_score,
+                           answer_relevance_score, context_relevance_score, overall_score,
+                           evaluation_time, error_message, created_at, updated_at, completed_at
+                    FROM evaluation_tasks 
+                    WHERE id = ?
+                ''', (task_id,))
+                
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'task_type': row[1],
+                        'status': row[2],
+                        'query': row[3],
+                        'response': row[4],
+                        'context_chunks': row[5],
+                        'conversation_id': row[6],
+                        'user_id': row[7],
+                        'metadata': json.loads(row[8]) if row[8] else {},
+                        'groundedness_score': row[9],
+                        'answer_relevance_score': row[10],
+                        'context_relevance_score': row[11],
+                        'overall_score': row[12],
+                        'evaluation_time': row[13],
+                        'error_message': row[14],
+                        'created_at': row[15],
+                        'updated_at': row[16],
+                        'completed_at': row[17]
+                    }
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting evaluation task {task_id}: {e}")
+            return None
 
 # Global instance for database access
 _chat_db_instance = None
