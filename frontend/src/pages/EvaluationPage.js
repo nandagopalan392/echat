@@ -78,6 +78,8 @@ import { useNavigate } from 'react-router-dom';
 import ReactECharts from 'echarts-for-react';
 import { theme } from '../theme';
 import { api, evaluationApi } from '../services/api';
+import webSocketService, { CONNECTION_STATUS } from '../services/websocketService';
+import useWebSocketConnection from '../hooks/useWebSocketConnection';
 
 const SIDEBAR_WIDTH = 280;
 
@@ -117,6 +119,11 @@ const EvaluationPage = () => {
     const [selectedDataset, setSelectedDataset] = useState('');
     const [selectedModels, setSelectedModels] = useState([]);
     const [selectedRetriever, setSelectedRetriever] = useState('');
+    
+    // Test case details dialog state
+    const [testCaseDetailsOpen, setTestCaseDetailsOpen] = useState(false);
+    const [selectedTestCase, setSelectedTestCase] = useState(null);
+    
     // Dialog-specific state variables
     const [selectedDatasetId, setSelectedDatasetId] = useState('');
     const [selectedModelId, setSelectedModelId] = useState('');
@@ -138,6 +145,15 @@ const EvaluationPage = () => {
     const [rerankerModels, setRerankerModels] = useState([]);
     const [runningTestCase, setRunningTestCase] = useState(null);
     const [testCaseResults, setTestCaseResults] = useState([]);
+    
+    // Background evaluation state
+    const [backgroundEvaluations, setBackgroundEvaluations] = useState(new Map());
+    const [websocketConnections, setWebsocketConnections] = useState(new Map());
+    const [evaluationProgress, setEvaluationProgress] = useState(new Map());
+    
+    // New WebSocket service state
+    const [activeConnections, setActiveConnections] = useState(new Set());
+    const [connectionStatuses, setConnectionStatuses] = useState(new Map());
     
     // Evaluation results state
     const [evaluationResults, setEvaluationResults] = useState([]);
@@ -163,15 +179,94 @@ const EvaluationPage = () => {
     const [refreshing, setRefreshing] = useState(false);
 
     useEffect(() => {
-        loadEvaluationData();
-        loadDatasets();
-        loadAvailableDocuments();
-        loadAvailableModels();
-        loadAvailableRetrievers();
-        loadRerankerModels();
-        loadEvaluationResults();
-        loadTestCaseResults();
+        // Set loading state once at the beginning
+        console.log('🚀 [DEBUG] EvaluationPage useEffect triggered with timeRange:', timeRange);
+        setLoading(true);
+        setError('');
+        
+        // Load only evaluation data on page load
+        const loadEssentialData = async () => {
+            try {
+                console.log('📊 [DEBUG] Loading essential data on page load');
+                // Only load evaluation-specific data that's visible by default
+                await Promise.all([
+                    loadEvaluationDataWithoutLoading(),
+                    loadDatasets(),
+                    loadEvaluationResults(),
+                    loadRecentBackgroundEvaluations() // Load existing completed evaluations for the table
+                ]);
+                // Set loading to false after essential data is loaded
+                setLoading(false);
+                console.log('✅ [DEBUG] Essential data loaded successfully');
+            } catch (error) {
+                console.error('❌ [DEBUG] Error loading essential data:', error);
+                setError('Failed to load evaluation data. Please try refreshing the page.');
+                setLoading(false);
+            }
+        };
+
+        // Load essential data only
+        loadEssentialData();
+        
+        // Note: loadTestCaseResults() will be populated by loadRecentBackgroundEvaluations()
+        // and then updated in real-time via WebSocket during active evaluations
+        // Note: loadAvailableModels(), loadRerankerModels(), loadAvailableRetrievers(),
+        // and loadAvailableDocuments() are loaded only when needed (on Create Test dialog open)
     }, [timeRange]);
+
+    // Load models and reranker data only when Create Test dialog is opened
+    useEffect(() => {
+        if (createTestCaseOpen) {
+            // Load data needed for creating tests
+            Promise.all([
+                loadAvailableDocuments(),
+                loadAvailableModels(),
+                loadAvailableRetrievers(),
+                loadRerankerModels()
+            ]).catch(error => {
+                console.error('Error loading test creation data:', error);
+                // Don't show error for this - user can still try to create test
+            });
+        }
+    }, [createTestCaseOpen]);
+
+    // Cleanup WebSocket connections on unmount
+    useEffect(() => {
+        return () => {
+            // Cleanup old WebSocket connections
+            websocketConnections.forEach((ws) => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.close();
+                }
+            });
+            
+            // Cleanup new WebSocket service connections
+            webSocketService.disconnectAll();
+        };
+    }, [websocketConnections]);
+
+    // Recalculate overview whenever testCaseResults changes
+    useEffect(() => {
+        if (testCaseResults && testCaseResults.length >= 0) {
+            calculateOverviewFromRealData();
+        }
+    }, [testCaseResults]);
+
+    // Refresh data when switching to Overview tab
+    useEffect(() => {
+        if (activeTab === 0) {
+            console.log('📊 Switching to Overview tab, refreshing evaluation data...');
+            // Reload recent evaluations to ensure we have the latest data
+            loadRecentBackgroundEvaluations().then(() => {
+                // After loading fresh data, recalculate overview
+                calculateOverviewFromRealData();
+            }).catch(error => {
+                console.error('Error refreshing data for Overview tab:', error);
+                // Still try to calculate with existing data
+                calculateOverviewFromRealData();
+            });
+        }
+    }, [activeTab]);
 
     // Load datasets
     const loadDatasets = async () => {
@@ -224,24 +319,49 @@ const EvaluationPage = () => {
     // Load available documents
     const loadAvailableDocuments = async () => {
         try {
+            console.log('Loading available documents...');
             const response = await api.call('/api/documents');
+            console.log('Documents API response:', response);
             setAvailableDocuments(response.documents || []);
+            console.log('Set available documents:', response.documents || []);
+            
+            // Debug: Check document structure
+            if (response.documents && response.documents.length > 0) {
+                console.log('Sample document structure:', response.documents[0]);
+                console.log('Document ID field:', response.documents[0]?.id);
+                console.log('Document keys:', Object.keys(response.documents[0] || {}));
+            }
         } catch (error) {
             console.error('Error loading documents:', error);
-            // Show empty array instead of mock data for dataset creation
-            setAvailableDocuments([]);
+            // Fallback to some sample data for testing
+            const sampleDocuments = [
+                { id: 'doc1', title: 'Sample Document 1', filename: 'sample1.pdf' },
+                { id: 'doc2', title: 'Sample Document 2', filename: 'sample2.pdf' },
+                { id: 'doc3', title: 'Sample Document 3', filename: 'sample3.pdf' }
+            ];
+            setAvailableDocuments(sampleDocuments);
+            console.log('Set fallback sample documents:', sampleDocuments);
         }
     };
 
     // Load available models
     const loadAvailableModels = async () => {
         try {
+            console.log('Loading available models...');
             const response = await api.call('/api/models/available');
+            console.log('Models API response:', response);
             setAvailableModels(response.llm_models || []);
+            console.log('Set available models:', response.llm_models || []);
         } catch (error) {
             console.error('Error loading models:', error);
-            // Show empty array instead of mock data
-            setAvailableModels([]);
+            // Fallback to some sample data for testing
+            const sampleModels = [
+                { name: 'llama3', category: 'llm', description: 'LLaMA 3 Model', source: 'local' },
+                { name: 'deepseek-r1', category: 'llm', description: 'DeepSeek R1 Model', source: 'local' },
+                { name: 'gemma3n:e2b', category: 'llm', description: 'Gemma 3N Model', source: 'local' }
+            ];
+            setAvailableModels(sampleModels);
+            console.log('Set fallback sample models:', sampleModels);
         }
     };
 
@@ -280,12 +400,16 @@ const EvaluationPage = () => {
 
     // Load evaluation results
     const loadEvaluationResults = async () => {
+        console.log('🔄 [DEBUG] loadEvaluationResults() called');
         try {
+            console.log('🌐 [DEBUG] Making API call to evaluationApi.getResults()');
             const response = await evaluationApi.getResults();
+            console.log('✅ [DEBUG] evaluationApi.getResults() response:', response);
             setEvaluationResults(response.results || []);
             setFilteredResults(response.results || []);
+            console.log('✅ [DEBUG] Evaluation results state updated with', (response.results || []).length, 'items');
         } catch (error) {
-            console.error('Error loading evaluation results:', error);
+            console.error('❌ [DEBUG] Error loading evaluation results:', error);
             // Mock evaluation results as fallback
             const mockResults = [
                 {
@@ -322,6 +446,7 @@ const EvaluationPage = () => {
                     status: "Completed"
                 }
             ];
+            console.log('⚠️ [DEBUG] API call failed, using mock evaluation results with', mockResults.length, 'items');
             setEvaluationResults(mockResults);
             setFilteredResults(mockResults);
         }
@@ -362,10 +487,48 @@ const EvaluationPage = () => {
 
     // Tab change handler
     const handleTabChange = (event, newValue) => {
+        console.log('🔄 [DEBUG] Tab changed from', activeTab, 'to', newValue);
         setActiveTab(newValue);
+        
+        // Load tab-specific data when switching to Evaluation Results tab
+        if (newValue === 2) {
+            console.log('📊 [DEBUG] Switching to Evaluation Results tab - loading data');
+            // Load evaluation results and recent background evaluations
+            Promise.all([
+                loadEvaluationResults(),
+                loadRecentBackgroundEvaluations()
+            ]).catch(error => {
+                console.error('❌ [DEBUG] Error loading evaluation tab data:', error);
+            });
+        }
     };
 
-    // Create dataset handler
+    // Test case click handler
+    const handleTestCaseClick = (testCase) => {
+        setSelectedTestCase(testCase);
+        setTestCaseDetailsOpen(true);
+    };
+
+    // Create dataset dialog open handler - loads required data
+    const handleCreateDatasetOpen = async () => {
+        console.log('Opening Create Dataset dialog...');
+        setCreateDatasetOpen(true);
+        
+        // Load models and documents when dialog opens
+        try {
+            console.log('Loading models and documents...');
+            await Promise.all([
+                loadAvailableModels(),
+                loadAvailableDocuments()
+            ]);
+            console.log('Successfully loaded models and documents');
+        } catch (error) {
+            console.error('Error loading data for Create Dataset dialog:', error);
+            setError('Failed to load models or documents');
+        }
+    };
+
+    // Create dataset handler (updated for async background tasks - no progress dialog)
     const handleCreateDataset = async () => {
         try {
             if (!newDatasetName.trim()) {
@@ -374,119 +537,94 @@ const EvaluationPage = () => {
             }
 
             if (selectedDocuments.length === 0) {
-                setError('Please select at least one document');
+                setError('Please select at least one document from the list below');
                 return;
             }
+
+            // Close the dialog immediately after validation
+            setCreateDatasetOpen(false);
+            
+            // Add a small delay to ensure state updates are processed
+            await new Promise(resolve => setTimeout(resolve, 100));
 
             if (!selectedModel) {
                 setError('Please select a model for dataset generation');
                 return;
             }
 
+            // Ensure document_ids are strings (handle strings, numbers, or objects)
+            const documentIds = selectedDocuments.map(doc => {
+                if (typeof doc === 'string') return doc;
+                if (typeof doc === 'number') return doc.toString();
+                if (doc && typeof doc === 'object' && doc.id) return doc.id.toString();
+                return null;
+            }).filter(id => id); // Remove any null/undefined values
+
+            console.log('Processed document IDs:', documentIds);
+            console.log('Original selectedDocuments:', selectedDocuments);
+
+            // Double-check we have valid document IDs after processing
+            if (documentIds.length === 0) {
+                setError('No valid document IDs found. Please reselect documents.');
+                console.error('Document processing failed. selectedDocuments:', selectedDocuments);
+                return;
+            }
+
+            // Ensure model_name is a string (extract name if object)
+            const modelName = typeof selectedModel === 'string' ? selectedModel : selectedModel.name;
+
             const datasetConfig = {
                 name: newDatasetName,
                 description: newDatasetDescription,
-                document_ids: selectedDocuments,
-                model_name: selectedModel,
+                document_ids: documentIds,
+                model_name: modelName,
                 num_questions_per_doc: numQuestionsPerDoc,
-                difficulty_levels: difficultyLevels
+                difficulty_levels: difficultyLevels,
+                user_id: 'admin'
             };
 
-            // Close creation dialog and show progress dialog IMMEDIATELY
-            setCreateDatasetOpen(false);
-            console.log('Setting showProgressDialog to true');
-            setShowProgressDialog(true);
-            setError(''); // Clear any previous errors
+            // Clear any previous errors
+            setError('');
+
+            // Start async dataset creation
+            console.log('Sending async dataset creation request:', datasetConfig);
+            console.log('Document IDs type check:', documentIds.map(id => typeof id));
+            console.log('Model name type check:', typeof modelName);
             
-            // Reset the progress state to initial
-            setDatasetGenerationProgress({
-                status: 'starting',
-                progress: 0,
-                current_document: '',
-                total_documents: selectedDocuments.length,
-                completed_documents: 0,
-                error: null
-            });
-            console.log('Progress dialog should now be visible with initial state');
-
-            // Start dataset creation
-            console.log('Sending dataset creation request:', datasetConfig);
             const response = await evaluationApi.createDataset(datasetConfig);
-            console.log('Dataset creation response:', response);
+            console.log('Dataset creation task response:', response);
 
-            if (response.dataset_id) {
-                console.log('Setting current dataset ID:', response.dataset_id);
-                setCurrentDatasetId(response.dataset_id);
+            if (response.task_id) {
+                console.log('Started background dataset creation task:', response.task_id);
                 
-                // Start polling for progress
-                pollDatasetProgress(response.dataset_id);
+                // Create WebSocket connection to listen for dataset creation updates
+                createWebSocketConnection(response.task_id);
                 
-                // Reset form
+                // Immediately refresh datasets list to show the new dataset with "running" status
+                console.log('Refreshing datasets list to show new dataset');
+                loadDatasets();
+                
+                // Reset form (dialog already closed)
                 setNewDatasetName('');
                 setNewDatasetDescription('');
                 setSelectedDocuments([]);
                 setSelectedModel('');
                 setNumQuestionsPerDoc(3);
                 setDifficultyLevels(['easy', 'medium', 'hard']);
+                
+                // Show success message briefly
+                setError('');
+                
+                // Note: WebSocket will handle showing the running dataset status
+                // The backend will publish updates via WebSocket as the dataset is created
+                
             } else {
-                // Handle case where response doesn't have dataset_id
-                setDatasetGenerationProgress(prev => ({
-                    ...prev,
-                    status: 'error',
-                    error: 'Failed to start dataset creation - no dataset ID returned'
-                }));
+                setError('Failed to start dataset creation - no task ID returned');
             }
         } catch (error) {
-            // Update progress dialog to show error instead of hiding it
-            setDatasetGenerationProgress(prev => ({
-                ...prev,
-                status: 'error',
-                error: 'Failed to create dataset: ' + (error.message || 'Unknown error')
-            }));
             console.error('Error creating dataset:', error);
+            setError('Failed to create dataset: ' + (error.message || 'Unknown error'));
         }
-    };
-
-    // Poll dataset generation progress
-    const pollDatasetProgress = async (datasetId) => {
-        console.log('Starting progress polling for dataset ID:', datasetId);
-        
-        const pollInterval = setInterval(async () => {
-            try {
-                console.log('Polling progress for dataset ID:', datasetId);
-                const progress = await evaluationApi.getDatasetProgress(datasetId);
-                console.log('Progress response:', progress);
-                setDatasetGenerationProgress(progress);
-                
-                if (progress.status === 'completed') {
-                    console.log('Dataset generation completed');
-                    clearInterval(pollInterval);
-                    // Refresh datasets list
-                    await loadDatasets();
-                    // Auto-close progress dialog after a short delay
-                    setTimeout(() => {
-                        setShowProgressDialog(false);
-                        setCurrentDatasetId(null);
-                    }, 2000);
-                } else if (progress.status === 'error') {
-                    console.log('Dataset generation failed:', progress.error);
-                    clearInterval(pollInterval);
-                    setError('Dataset generation failed: ' + (progress.error || 'Unknown error'));
-                    setTimeout(() => {
-                        setShowProgressDialog(false);
-                        setCurrentDatasetId(null);
-                    }, 3000);
-                }
-            } catch (error) {
-                console.error('Error polling progress:', error);
-                clearInterval(pollInterval);
-                setError('Failed to get progress updates');
-                setTimeout(() => {
-                    setShowProgressDialog(false);
-                    setCurrentDatasetId(null);
-                }, 3000);
-            }
-        }, 2000); // Poll every 2 seconds
     };
 
     // Run test case handler
@@ -566,52 +704,72 @@ const EvaluationPage = () => {
             setRunningTestCase(true);
             setError(null);
 
-            const testCaseData = {
-                dataset_id: selectedDatasetId,
-                models: [selectedModelId], // Convert single model to array for backend compatibility
-                retriever: 'vector_similarity', // Default retriever
-                retrieval_config: testRetrievalConfig,
-                created_at: new Date().toISOString()
-            };
-
-            const response = await fetch('/api/evaluation/test-cases', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${localStorage.getItem('token')}`
-                },
-                body: JSON.stringify(testCaseData)
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to create test case');
+            // Get dataset to extract questions/test cases
+            const selectedDataset = datasets.find(d => d.id === selectedDatasetId);
+            if (!selectedDataset) {
+                throw new Error('Selected dataset not found');
             }
 
-            const result = await response.json();
+            // TODO: For now, create a mock evaluation request. 
+            // In a real implementation, you would fetch the dataset's test questions
+            // and create evaluation requests for each question-answer pair.
             
-            // Add to test case results
+            // Send dataset evaluation request to backend
+            const datasetEvaluationData = {
+                dataset_id: selectedDatasetId,
+                dataset_name: selectedDataset.name,
+                user_id: localStorage.getItem('username'),
+                metadata: {
+                    model_id: selectedModelId,
+                    retrieval_config: testRetrievalConfig,
+                    test_type: 'dataset_evaluation'
+                }
+            };
+
+            // Start background evaluation with dataset
+            const response = await evaluationApi.startDatasetEvaluation(datasetEvaluationData);
+            
+            if (!response.task_id) {
+                throw new Error('No task ID returned from evaluation service');
+            }
+
+            console.log('Started background evaluation with task ID:', response.task_id);
+            
+            // Create test case entry with background task info
             const newTestCase = {
-                id: result.test_case_id,
-                dataset_name: datasets.find(d => d.id === selectedDatasetId)?.name || 'Unknown',
-                models: [selectedModelId], // Convert single model to array for backend compatibility
-                retriever: 'Vector Similarity', // Default retriever name
+                id: response.task_id,
+                task_id: response.task_id,
+                dataset_name: selectedDataset.name || 'Unknown',
+                models: [selectedModelId],
+                retriever: 'Vector Similarity',
                 status: 'running',
                 created_at: new Date().toISOString(),
-                retrieval_config: testRetrievalConfig
+                retrieval_config: testRetrievalConfig,
+                results: [] // Will be populated when evaluation completes
             };
 
             setTestCaseResults(prev => [newTestCase, ...prev]);
+            
+            // Create WebSocket connection for real-time updates
+            createWebSocketConnection(response.task_id);
+            
+            // Initialize progress tracking
+            setEvaluationProgress(prev => new Map(prev.set(response.task_id, {
+                status: 'PENDING',
+                progress: 0,
+                message: 'Evaluation task submitted',
+                timestamp: new Date().toISOString()
+            })));
             
             // Close dialog and reset form
             setCreateTestCaseOpen(false);
             setSelectedDatasetId('');
             setSelectedModelId('');
             
-            // Start polling for test case status
-            pollTestCaseStatus(result.test_case_id);
+            console.log('Test case created successfully with background evaluation');
 
         } catch (error) {
-            console.error('Error creating test case:', error);
+            console.error('Error creating test case with background evaluation:', error);
             setError('Failed to create test case: ' + error.message);
         } finally {
             setRunningTestCase(false);
@@ -659,37 +817,375 @@ const EvaluationPage = () => {
         }
     };
 
-    const pollTestCaseStatus = async (testCaseId) => {
-        const poll = async () => {
-            try {
-                const response = await fetch(`/api/evaluation/test-cases/${testCaseId}`, {
-                    headers: {
-                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+    // Load recent background evaluations
+    const loadRecentBackgroundEvaluations = async () => {
+        console.log('🔄 [DEBUG] loadRecentBackgroundEvaluations() called');
+        try {
+            console.log('🌐 [DEBUG] Making API call to evaluationApi.getRecentResults(50)');
+            const response = await evaluationApi.getRecentResults(50);
+            console.log('✅ [DEBUG] evaluationApi.getRecentResults() response:', response);
+            const recentEvals = response.results || [];
+            console.log('✅ [DEBUG] Processing', recentEvals.length, 'recent evaluations');
+            
+            // Convert to Map for easier lookup
+            const evalMap = new Map();
+            recentEvals.forEach(evaluation => {
+                evalMap.set(evaluation.task_id, evaluation);
+            });
+            
+            setBackgroundEvaluations(evalMap);
+            console.log('✅ [DEBUG] Background evaluations state updated with', evalMap.size, 'items');
+            
+            // Convert evaluations to testCaseResults format for the table
+            const testCaseData = recentEvals.map(evaluation => {
+                const metadata = evaluation.metadata || {};
+                const isRunning = evaluation.status === 'STARTED' || evaluation.status === 'PENDING';
+                
+                return {
+                    id: evaluation.task_id,
+                    task_id: evaluation.task_id,
+                    dataset_name: metadata.dataset_name || `Dataset ${metadata.dataset_id || 'Unknown'}`,
+                    models: [metadata.model_name || metadata.model_id || 'Unknown Model'],
+                    status: isRunning ? 'running' : 'completed',
+                    results: (evaluation.status === 'SUCCESS' && evaluation.results) ? [{
+                        groundedness: evaluation.results.groundedness?.score || 0,
+                        context_relevance: evaluation.results.context_relevance?.score || 0,
+                        answer_quality: evaluation.results.answer_relevance?.score || 0,
+                        avg_latency: evaluation.results.evaluation_time_seconds || 0
+                    }] : [],
+                    total_questions: metadata.total_questions || 1,
+                    run_by: evaluation.user_id || 'system',
+                    run_date: evaluation.completed_at ? 
+                        new Date(evaluation.completed_at).toLocaleDateString('en-US', {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric'
+                        }) : 
+                        (evaluation.timestamp ? 
+                            new Date(evaluation.timestamp).toLocaleDateString('en-US', {
+                                year: 'numeric',
+                                month: 'short',
+                                day: 'numeric'
+                            }) : 
+                            'Unknown'
+                        ),
+                    started_at: evaluation.timestamp,
+                    completed_at: evaluation.completed_at
+                };
+            });
+            
+            setTestCaseResults(testCaseData);
+            console.log('✅ [DEBUG] TestCaseResults updated with', testCaseData.length, 'evaluations');
+            
+            // Restore WebSocket connections for running evaluations
+            const runningEvaluations = recentEvals.filter(evaluation => 
+                evaluation.status === 'STARTED' || evaluation.status === 'PENDING'
+            );
+            
+            if (runningEvaluations.length > 0) {
+                console.log('🔄 [DEBUG] Restoring WebSocket connections for', runningEvaluations.length, 'running evaluations');
+                runningEvaluations.forEach(evaluation => {
+                    const taskId = evaluation.task_id;
+                    if (!activeConnections.has(taskId)) {
+                        console.log('🔌 [DEBUG] Restoring WebSocket for task:', taskId);
+                        createWebSocketConnection(taskId);
+                        
+                        // Also restore progress state for running evaluations
+                        setEvaluationProgress(prev => new Map(prev.set(taskId, {
+                            status: 'STARTED',
+                            progress: 0.5, // Default to 50% if we don't know exact progress
+                            message: 'Running...',
+                            timestamp: new Date().toISOString(),
+                            source: 'restored'
+                        })));
                     }
                 });
+            }
+            
+            // Overview will be automatically calculated by useEffect watching testCaseResults
+            
+        } catch (error) {
+            console.error('❌ [DEBUG] Error loading recent background evaluations:', error);
+        }
+    };
 
-                if (response.ok) {
-                    const testCase = await response.json();
-                    
-                    setTestCaseResults(prev => 
-                        prev.map(tc => 
-                            tc.id === testCaseId 
-                                ? { ...tc, ...testCase }
-                                : tc
-                        )
-                    );
+    // Create WebSocket connection for real-time updates using new WebSocket service
+    const createWebSocketConnection = (taskId) => {
+        // Check if we already have an active connection
+        if (activeConnections.has(taskId)) {
+            console.log(`🔄 Connection already exists for task ${taskId}`);
+            return null;
+        }
 
-                    // Continue polling if still running
-                    if (testCase.status === 'running') {
-                        setTimeout(poll, 2000); // Poll every 2 seconds
-                    }
+        console.log(`🔌 Creating new WebSocket connection for task ${taskId}`);
+
+        // Add to active connections
+        setActiveConnections(prev => new Set(prev).add(taskId));
+
+        // Create connection using WebSocket service
+        const connection = webSocketService.connect(taskId, {
+            onMessage: (message) => {
+                handleWebSocketMessage(taskId, message);
+            },
+            onError: (error) => {
+                console.error(`❌ WebSocket error for task ${taskId}:`, error);
+                handleWebSocketError(taskId, error);
+            },
+            onClose: (event) => {
+                console.log(`🔒 WebSocket closed for task ${taskId}:`, event.code, event.reason);
+                handleWebSocketClose(taskId, event);
+            },
+            onStatusChange: (status, oldStatus) => {
+                console.log(`🔄 Connection status changed for task ${taskId}: ${oldStatus} → ${status}`);
+                setConnectionStatuses(prev => new Map(prev).set(taskId, status));
+            },
+            pollCallback: async (taskId) => {
+                // Custom polling logic for this task
+                const status = await evaluationApi.getDetailedTaskStatus(taskId);
+                
+                // Convert polling response to WebSocket message format
+                let progressValue = 0;
+                
+                if (status.progress !== undefined && status.progress !== null && !isNaN(status.progress)) {
+                    // Use backend progress if it's a valid number
+                    progressValue = status.progress > 1 ? status.progress / 100 : status.progress;
+                } else {
+                    // Calculate progress from status
+                    progressValue = calculateProgressFromStatus(status);
                 }
+                
+                const message = {
+                    type: 'evaluation_update',
+                    status: status.status,
+                    data: {
+                        ...status,
+                        progress: progressValue,
+                        message: getStatusMessage(status)
+                    },
+                    timestamp: new Date().toISOString(),
+                    source: 'polling'
+                };
+                
+                handleWebSocketMessage(taskId, message);
+                return status;
+            },
+            enablePolling: true
+        });
+
+        return connection;
+    };
+
+    // Handle WebSocket messages with improved logic
+    const handleWebSocketMessage = (taskId, message) => {
+        console.log(`📨 WebSocket message for task ${taskId}:`, message);
+
+        // Check if this is a dataset creation task
+        const isDatasetTask = message.data?.task_type === 'dataset_creation' || 
+                            message.data?.action === 'dataset_created' ||
+                            message.message?.includes('dataset') ||
+                            message.message?.includes('Dataset') ||
+                            message.data?.name || // dataset has name
+                            message.data?.question_count; // dataset has question_count
+
+        if (message.type === 'evaluation_update') {
+            // Update evaluation progress
+            setEvaluationProgress(prev => new Map(prev.set(taskId, {
+                status: message.status,
+                progress: message.data?.progress || 0,
+                message: message.data?.message || getStatusMessage(message.data) || '',
+                timestamp: message.timestamp,
+                source: message.source || 'websocket'
+            })));
+
+            // Handle task completion
+            if (message.status === 'SUCCESS') {
+                if (isDatasetTask) {
+                    handleDatasetCreationSuccess(taskId, message);
+                } else {
+                    handleEvaluationSuccess(taskId, message);
+                }
+            } else if (message.status === 'FAILURE') {
+                handleTaskFailure(taskId, message);
+            } else if (isDatasetTask) {
+                // For dataset tasks, refresh list on any status change
+                console.log('📊 Dataset task update, refreshing datasets list');
+                loadDatasets();
+            }
+        }
+    };
+
+    // Handle WebSocket errors
+    const handleWebSocketError = (taskId, error) => {
+        console.error(`❌ WebSocket error for task ${taskId}:`, error);
+        // Error handling is managed by WebSocket service with auto-reconnection
+        // Just update UI state if needed
+    };
+
+    // Handle WebSocket close
+    const handleWebSocketClose = (taskId, event) => {
+        console.log(`🔒 WebSocket closed for task ${taskId}`);
+        // Remove from active connections
+        setActiveConnections(prev => {
+            const updated = new Set(prev);
+            updated.delete(taskId);
+            return updated;
+        });
+        
+        // Clear connection status
+        setConnectionStatuses(prev => {
+            const updated = new Map(prev);
+            updated.delete(taskId);
+            return updated;
+        });
+    };
+
+    // Handle dataset creation success
+    const handleDatasetCreationSuccess = (taskId, message) => {
+        console.log('✅ Dataset created successfully:', message);
+        
+        // Refresh datasets list multiple times to ensure we get the latest data
+        const refreshDatasets = async () => {
+            await loadDatasets();
+            // Refresh again after a short delay to ensure backend DB is updated
+            setTimeout(async () => {
+                await loadDatasets();
+            }, 1000);
+        };
+        refreshDatasets();
+
+        // Show success message
+        setError(''); // Clear any previous errors
+
+        // Disconnect WebSocket after short delay
+        setTimeout(() => {
+            webSocketService.disconnect(taskId);
+        }, 2000);
+    };
+
+    // Handle evaluation success
+    const handleEvaluationSuccess = (taskId, message) => {
+        console.log('✅ Evaluation completed successfully:', message);
+
+        // Update background evaluations
+        setBackgroundEvaluations(prev => {
+            const updated = new Map(prev);
+            if (updated.has(taskId)) {
+                updated.set(taskId, {
+                    ...updated.get(taskId),
+                    status: 'SUCCESS',
+                    results: message.data
+                });
+            }
+            return updated;
+        });
+
+        // Update test case results table
+        setTestCaseResults(prev => 
+            prev.map(testCase => 
+                testCase.task_id === taskId 
+                    ? { 
+                        ...testCase, 
+                        status: 'completed',
+                        run_date: new Date().toLocaleDateString('en-US', {
+                            year: 'numeric',
+                            month: 'short',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit'
+                        }),
+                        completed_at: new Date().toISOString(),
+                        results: [{
+                            groundedness: message.data?.results?.groundedness?.score || 0,
+                            context_relevance: message.data?.results?.context_relevance?.score || 0,
+                            answer_quality: message.data?.results?.answer_relevance?.score || 0,
+                            avg_latency: message.data?.evaluation_time || 0
+                        }]
+                    }
+                    : testCase
+            )
+        );
+
+        // Reload evaluation results from backend
+        const reloadData = async () => {
+            try {
+                // Load evaluation results and recent background evaluations in parallel
+                await Promise.all([
+                    loadEvaluationResults(),
+                    loadRecentBackgroundEvaluations(),
+                    loadEvaluationDataWithoutLoading()
+                ]);
+                
             } catch (error) {
-                console.error('Error polling test case status:', error);
+                console.error('Error reloading evaluation data:', error);
             }
         };
+        
+        // Execute the reload asynchronously without blocking
+        reloadData();
 
-        poll();
+        // Disconnect WebSocket after short delay
+        setTimeout(() => {
+            webSocketService.disconnect(taskId);
+        }, 2000);
+    };
+
+    // Handle task failure
+    const handleTaskFailure = (taskId, message) => {
+        console.error('❌ Task failed:', message);
+
+        // Update test case results to show failure
+        setTestCaseResults(prev => 
+            prev.map(testCase => 
+                testCase.task_id === taskId 
+                    ? { ...testCase, status: 'failed' }
+                    : testCase
+            )
+        );
+
+        // Disconnect WebSocket after short delay
+        setTimeout(() => {
+            webSocketService.disconnect(taskId);
+        }, 2000);
+    };
+
+    // Calculate progress from status data
+    const calculateProgressFromStatus = (status) => {
+        if (status.status === 'SUCCESS') return 1.0;
+        if (status.status === 'FAILURE') return 0;
+        if (status.status === 'PROGRESS') return (status.progress || 50) / 100;
+        if (status.status === 'STARTED') return 0.1;
+        return 0;
+    };
+
+    // Get user-friendly status message
+    const getStatusMessage = (data) => {
+        if (!data) return '';
+        
+        if (data.message) return data.message;
+        
+        // Generate message based on status and data
+        if (data.status === 'STARTED') {
+            if (data.task_type === 'dataset_creation') {
+                return 'Creating dataset...';
+            }
+            return 'Starting evaluation...';
+        }
+        
+        if (data.status === 'PROGRESS') {
+            if (data.question_count) {
+                return `Processing questions (${data.question_count} total)`;
+            }
+            return 'Processing...';
+        }
+        
+        if (data.status === 'SUCCESS') {
+            if (data.task_type === 'dataset_creation') {
+                return `Dataset created with ${data.question_count || 0} questions`;
+            }
+            return 'Evaluation completed successfully';
+        }
+        
+        return '';
     };
 
     // Filter evaluation results
@@ -716,6 +1212,164 @@ const EvaluationPage = () => {
             setLoading(true);
             setError('');
             
+            // Calculate overview data from real evaluation results instead of API
+            calculateOverviewFromRealData();
+            
+        } catch (error) {
+            console.error('Error loading evaluation data:', error);
+            setError('Failed to load evaluation data. Please try again.');
+            
+            // Use empty data as fallback instead of mock data
+            const emptyData = {
+                overall: {
+                    groundedness: 0,
+                    contextRelevance: 0,
+                    answerQuality: 0,
+                    averageLatency: 0,
+                    totalQueries: 0
+                },
+                historical: [],
+                latencyDistribution: [],
+                detailed: []
+            };
+            setEvaluationData(emptyData);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // Calculate overview statistics from real evaluation data
+    const calculateOverviewFromRealData = () => {
+        try {
+            console.log('🧮 [DEBUG] Calculating overview from real data');
+            console.log('🧮 [DEBUG] testCaseResults length:', testCaseResults.length);
+            console.log('🧮 [DEBUG] testCaseResults:', testCaseResults);
+            
+            // Get completed evaluations from testCaseResults (same data that evaluation tab shows)
+            const completedEvaluations = testCaseResults.filter(testCase => 
+                testCase.status === 'completed' && testCase.results && testCase.results.length > 0
+            );
+            
+            console.log('🧮 [DEBUG] completedEvaluations length:', completedEvaluations.length);
+            
+            if (completedEvaluations.length === 0) {
+                // No evaluations yet, show empty state
+                console.log('🧮 [DEBUG] No completed evaluations, showing empty state');
+                setEvaluationData({
+                    overall: {
+                        groundedness: 0,
+                        contextRelevance: 0,
+                        answerQuality: 0,
+                        averageLatency: 0,
+                        totalQueries: 0
+                    },
+                    historical: [],
+                    latencyDistribution: [],
+                    detailed: []
+                });
+                return;
+            }
+
+            // Calculate averages from real data
+            const totalEvaluations = completedEvaluations.length;
+            const avgGroundedness = completedEvaluations.reduce((sum, testCase) => 
+                sum + (testCase.results[0].groundedness || 0), 0) / totalEvaluations;
+            const avgContextRelevance = completedEvaluations.reduce((sum, testCase) => 
+                sum + (testCase.results[0].context_relevance || 0), 0) / totalEvaluations;
+            const avgAnswerQuality = completedEvaluations.reduce((sum, testCase) => 
+                sum + (testCase.results[0].answer_quality || 0), 0) / totalEvaluations;
+            const avgLatency = completedEvaluations.reduce((sum, testCase) => 
+                sum + (testCase.results[0].avg_latency || 0), 0) / totalEvaluations;
+
+            console.log('🧮 [DEBUG] Calculated averages:', {
+                avgGroundedness, avgContextRelevance, avgAnswerQuality, avgLatency, totalEvaluations
+            });
+
+            // Create latency distribution
+            const latencyBuckets = [
+                { range: "0-1s", count: 0 },
+                { range: "1-3s", count: 0 },
+                { range: "3-5s", count: 0 },
+                { range: "5-10s", count: 0 },
+                { range: "10s+", count: 0 }
+            ];
+            
+            completedEvaluations.forEach(testCase => {
+                const latency = testCase.results[0].avg_latency || 0;
+                if (latency < 1) latencyBuckets[0].count++;
+                else if (latency < 3) latencyBuckets[1].count++;
+                else if (latency < 5) latencyBuckets[2].count++;
+                else if (latency < 10) latencyBuckets[3].count++;
+                else latencyBuckets[4].count++;
+            });
+
+            // Create historical data (group by date)
+            const historical = {};
+            completedEvaluations.forEach(testCase => {
+                const date = testCase.run_date || 'Unknown';
+                
+                if (!historical[date]) {
+                    historical[date] = {
+                        date,
+                        groundedness: [],
+                        contextRelevance: [],
+                        answerQuality: [],
+                        latency: [],
+                        queries: 0
+                    };
+                }
+                
+                historical[date].groundedness.push(testCase.results[0].groundedness || 0);
+                historical[date].contextRelevance.push(testCase.results[0].context_relevance || 0);
+                historical[date].answerQuality.push(testCase.results[0].answer_quality || 0);
+                historical[date].latency.push(testCase.results[0].avg_latency || 0);
+                historical[date].queries++;
+            });
+
+            // Convert historical data to array with averages
+            const historicalArray = Object.values(historical).map(day => ({
+                date: day.date,
+                groundedness: day.groundedness.reduce((a, b) => a + b, 0) / day.groundedness.length,
+                contextRelevance: day.contextRelevance.reduce((a, b) => a + b, 0) / day.contextRelevance.length,
+                answerQuality: day.answerQuality.reduce((a, b) => a + b, 0) / day.answerQuality.length,
+                latency: day.latency.reduce((a, b) => a + b, 0) / day.latency.length,
+                queries: day.queries
+            })).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+            // Set the calculated overview data
+            const overviewData = {
+                overall: {
+                    groundedness: avgGroundedness,
+                    contextRelevance: avgContextRelevance,
+                    answerQuality: avgAnswerQuality,
+                    averageLatency: avgLatency,
+                    totalQueries: totalEvaluations
+                },
+                historical: historicalArray,
+                latencyDistribution: latencyBuckets,
+                detailed: completedEvaluations.map(testCase => ({
+                    query: 'Dataset evaluation',
+                    groundedness: testCase.results[0].groundedness || 0,
+                    contextRelevance: testCase.results[0].context_relevance || 0,
+                    answerQuality: testCase.results[0].answer_quality || 0,
+                    latency: testCase.results[0].avg_latency || 0,
+                    timestamp: testCase.completed_at || testCase.started_at || new Date().toISOString(),
+                    model: testCase.models?.[0] || 'Unknown',
+                    dataset: testCase.dataset_name || 'Unknown'
+                }))
+            };
+            
+            console.log('🧮 [DEBUG] Setting overview data:', overviewData);
+            setEvaluationData(overviewData);
+            
+        } catch (error) {
+            console.error('❌ [DEBUG] Error calculating overview from real data:', error);
+        }
+    };
+
+    // Version of loadEvaluationData without loading state management
+    const loadEvaluationDataWithoutLoading = async () => {
+        try {
             // Load real evaluation overview data from new API endpoint
             const response = await api.call(`/api/evaluation/overview?time_range=${timeRange}`);
             
@@ -741,7 +1395,7 @@ const EvaluationPage = () => {
                     count: item.count
                 })),
                 detailed: response.detailed.map(item => ({
-                    query: item.query,
+                    query: item.question,
                     groundedness: item.groundedness,
                     contextRelevance: item.contextRelevance,
                     answerQuality: item.answerQuality,
@@ -756,24 +1410,7 @@ const EvaluationPage = () => {
             
         } catch (error) {
             console.error('Error loading evaluation data:', error);
-            setError('Failed to load evaluation data. Please try again.');
-            
-            // Use empty data as fallback instead of mock data
-            const emptyData = {
-                overall: {
-                    groundedness: 0,
-                    contextRelevance: 0,
-                    answerQuality: 0,
-                    averageLatency: 0,
-                    totalQueries: 0
-                },
-                historical: [],
-                latencyDistribution: [],
-                detailed: []
-            };
-            setEvaluationData(emptyData);
-        } finally {
-            setLoading(false);
+            throw error; // Re-throw so the caller can handle it
         }
     };
 
@@ -1607,7 +2244,7 @@ const EvaluationPage = () => {
                                 <Button
                                     variant="contained"
                                     startIcon={<Add />}
-                                    onClick={() => setCreateDatasetOpen(true)}
+                                    onClick={handleCreateDatasetOpen}
                                 >
                                     Create Dataset
                                 </Button>
@@ -1619,7 +2256,7 @@ const EvaluationPage = () => {
                                 </Alert>
                             )}
                             
-                            <Box sx={{ display: 'flex', gap: 2, height: 'calc(100vh - 200px)', minHeight: '600px' }}>
+                            <Box sx={{ display: 'flex', gap: 2, height: 'calc(100vh - 300px)', minHeight: '500px' }}>
                                 {/* Dataset List (Master) */}
                                 <Card sx={{ 
                                     flex: selectedDatasetForDetail ? '0 0 400px' : 1, 
@@ -1634,6 +2271,7 @@ const EvaluationPage = () => {
                                         <TableContainer sx={{ 
                                             flex: 1,
                                             overflow: 'auto',
+                                            maxHeight: '400px',
                                             '&::-webkit-scrollbar': {
                                                 width: '8px',
                                             },
@@ -1695,15 +2333,20 @@ const EvaluationPage = () => {
                                                                     {dataset?.documentCount || 0}
                                                                 </TableCell>
                                                                 <TableCell onClick={() => handleDatasetClick(dataset)}>
-                                                                    <Chip 
-                                                                        label={dataset?.status || 'Unknown'}
-                                                                        color={
-                                                                            dataset?.status === "Ready" ? "success" : 
-                                                                            dataset?.status === "Processing" ? "warning" :
-                                                                            dataset?.status === "Error" ? "error" : "default"
-                                                                        }
-                                                                        size="small"
-                                                                    />
+                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                        <Chip 
+                                                                            label={dataset?.status || 'Unknown'}
+                                                                            color={
+                                                                                dataset?.status === "Ready" ? "success" : 
+                                                                                dataset?.status === "Processing" ? "warning" :
+                                                                                dataset?.status === "Error" ? "error" : "default"
+                                                                            }
+                                                                            size="small"
+                                                                        />
+                                                                        {dataset?.status === "Processing" && (
+                                                                            <CircularProgress size={16} />
+                                                                        )}
+                                                                    </Box>
                                                                 </TableCell>
                                                                 <TableCell>
                                                                     <IconButton 
@@ -1796,15 +2439,20 @@ const EvaluationPage = () => {
                                                         </Grid>
                                                         <Grid item xs={6}>
                                                             <Typography variant="body2" color="text.secondary">Status</Typography>
-                                                            <Chip 
-                                                                label={datasetDetails.status}
-                                                                color={
-                                                                    datasetDetails.status === "Ready" ? "success" : 
-                                                                    datasetDetails.status === "Processing" ? "warning" :
-                                                                    datasetDetails.status === "Error" ? "error" : "default"
-                                                                }
-                                                                size="small"
-                                                            />
+                                                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                <Chip 
+                                                                    label={datasetDetails.status}
+                                                                    color={
+                                                                        datasetDetails.status === "Ready" ? "success" : 
+                                                                        datasetDetails.status === "Processing" ? "warning" :
+                                                                        datasetDetails.status === "Error" ? "error" : "default"
+                                                                    }
+                                                                    size="small"
+                                                                />
+                                                                {datasetDetails.status === "Processing" && (
+                                                                    <CircularProgress size={16} />
+                                                                )}
+                                                            </Box>
                                                         </Grid>
                                                         <Grid item xs={6}>
                                                             <Typography variant="body2" color="text.secondary">Documents</Typography>
@@ -2006,12 +2654,12 @@ const EvaluationPage = () => {
                                                                                                     lineHeight: 1.6,
                                                                                                     fontSize: '0.875rem'
                                                                                                 }}>
-                                                                                                    {item.query || 'No query available'}
+                                                                                                    {item.question || 'No question available'}
                                                                                                 </Typography>
                                                                                             </Box>
                                                                                         </Box>
                                                                                         
-                                                                                        {item.expected_response && (
+                                                                                        {item.answer && (
                                                                                             <Box sx={{ mb: 3 }}>
                                                                                                 <Typography variant="body2" sx={{ 
                                                                                                     fontWeight: 600, 
@@ -2043,7 +2691,7 @@ const EvaluationPage = () => {
                                                                                                         lineHeight: 1.6,
                                                                                                         fontSize: '0.875rem'
                                                                                                     }}>
-                                                                                                        {item.expected_response}
+                                                                                                        {item.answer}
                                                                                                     </Typography>
                                                                                                 </Box>
                                                                                             </Box>
@@ -2151,11 +2799,11 @@ const EvaluationPage = () => {
                                                                                 Question {index + 1}
                                                                             </Typography>
                                                                             <Typography variant="body2" paragraph>
-                                                                                <strong>Query:</strong> {item.query}
+                                                                                <strong>Query:</strong> {item.question}
                                                                             </Typography>
-                                                                            {item.expected_response && (
+                                                                            {item.answer && (
                                                                                 <Typography variant="body2" paragraph>
-                                                                                    <strong>Expected Response:</strong> {item.expected_response}
+                                                                                    <strong>Expected Response:</strong> {item.answer}
                                                                                 </Typography>
                                                                             )}
                                                                             {item.expected_chunks && item.expected_chunks.length > 0 && (
@@ -2240,115 +2888,161 @@ const EvaluationPage = () => {
                                                         </TableCell>
                                                     </TableRow>
                                                 ) : (
-                                                    testCaseResults.map((testCase) => (
-                                                        <TableRow key={testCase.id}>
-                                                            <TableCell>#{testCase.id}</TableCell>
-                                                            <TableCell>{testCase.dataset_name}</TableCell>
-                                                            <TableCell>
-                                                                <Chip 
-                                                                    label={testCase.models && testCase.models.length > 0 ? testCase.models[0] : 'N/A'} 
-                                                                    size="small" 
-                                                                    variant="outlined"
-                                                                />
-                                                            </TableCell>
-                                                            <TableCell>
-                                                                {testCase.results && testCase.results.length > 0 ? (
-                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                                                        <Typography variant="body2" fontWeight="bold">
-                                                                            {(testCase.results[0].groundedness * 100).toFixed(1)}%
-                                                                        </Typography>
-                                                                        <LinearProgress 
-                                                                            variant="determinate" 
-                                                                            value={testCase.results[0].groundedness * 100}
-                                                                            sx={{ 
-                                                                                width: 60, 
-                                                                                height: 6,
-                                                                                '& .MuiLinearProgress-bar': {
-                                                                                    backgroundColor: testCase.results[0].groundedness >= 0.8 ? theme.palette.success.main :
-                                                                                                   testCase.results[0].groundedness >= 0.6 ? theme.palette.warning.main :
-                                                                                                   theme.palette.error.main
-                                                                                }
-                                                                            }}
-                                                                        />
-                                                                    </Box>
-                                                                ) : '-'}
-                                                            </TableCell>
-                                                            <TableCell>
-                                                                {testCase.results && testCase.results.length > 0 ? (
-                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                                                        <Typography variant="body2" fontWeight="bold">
-                                                                            {(testCase.results[0].context_relevance * 100).toFixed(1)}%
-                                                                        </Typography>
-                                                                        <LinearProgress 
-                                                                            variant="determinate" 
-                                                                            value={testCase.results[0].context_relevance * 100}
-                                                                            sx={{ 
-                                                                                width: 60, 
-                                                                                height: 6,
-                                                                                '& .MuiLinearProgress-bar': {
-                                                                                    backgroundColor: testCase.results[0].context_relevance >= 0.8 ? theme.palette.success.main :
-                                                                                                   testCase.results[0].context_relevance >= 0.6 ? theme.palette.warning.main :
-                                                                                                   theme.palette.error.main
-                                                                                }
-                                                                            }}
-                                                                        />
-                                                                    </Box>
-                                                                ) : '-'}
-                                                            </TableCell>
-                                                            <TableCell>
-                                                                {testCase.results && testCase.results.length > 0 ? (
-                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                                                        <Typography variant="body2" fontWeight="bold">
-                                                                            {(testCase.results[0].answer_quality * 100).toFixed(1)}%
-                                                                        </Typography>
-                                                                        <LinearProgress 
-                                                                            variant="determinate" 
-                                                                            value={testCase.results[0].answer_quality * 100}
-                                                                            sx={{ 
-                                                                                width: 60, 
-                                                                                height: 6,
-                                                                                '& .MuiLinearProgress-bar': {
-                                                                                    backgroundColor: testCase.results[0].answer_quality >= 0.8 ? theme.palette.success.main :
-                                                                                                   testCase.results[0].answer_quality >= 0.6 ? theme.palette.warning.main :
-                                                                                                   theme.palette.error.main
-                                                                                }
-                                                                            }}
-                                                                        />
-                                                                    </Box>
-                                                                ) : '-'}
-                                                            </TableCell>
-                                                            <TableCell>
-                                                                {testCase.results && testCase.results.length > 0 ? (
-                                                                    <Typography 
-                                                                        variant="body2" 
-                                                                        fontWeight="bold"
-                                                                        color={
-                                                                            testCase.results[0].avg_latency < 1 ? theme.palette.success.main :
-                                                                            testCase.results[0].avg_latency < 2 ? theme.palette.warning.main :
-                                                                            theme.palette.error.main
-                                                                        }
+                                                    testCaseResults.map((testCase, index) => {
+                                                        const progress = evaluationProgress.get(testCase.task_id);
+                                                        const isRunning = testCase.status === 'running';
+                                                        
+                                                        return (
+                                                            <TableRow key={testCase.id || testCase.task_id}>
+                                                                <TableCell>
+                                                                    <Button
+                                                                        variant="text"
+                                                                        onClick={() => handleTestCaseClick(testCase)}
+                                                                        sx={{ textTransform: 'none' }}
                                                                     >
-                                                                        {testCase.results[0].avg_latency.toFixed(2)}s
-                                                                    </Typography>
-                                                                ) : '-'}
-                                                            </TableCell>
-                                                            <TableCell>
-                                                                {new Date(testCase.created_at).toLocaleDateString()}
-                                                            </TableCell>
-                                                            <TableCell>
-                                                                <Chip 
-                                                                    label={testCase.status}
-                                                                    color={
-                                                                        testCase.status === "completed" ? "success" : 
-                                                                        testCase.status === "running" ? "warning" :
-                                                                        testCase.status === "failed" ? "error" : "default"
-                                                                    }
-                                                                    size="small"
-                                                                    icon={testCase.status === "running" ? <CircularProgress size={12} /> : undefined}
-                                                                />
-                                                            </TableCell>
-                                                        </TableRow>
-                                                    ))
+                                                                        #{testCaseResults.length - index}
+                                                                    </Button>
+                                                                </TableCell>
+                                                                <TableCell>{testCase.dataset_name}</TableCell>
+                                                                <TableCell>
+                                                                    <Chip 
+                                                                        label={testCase.models && testCase.models.length > 0 ? testCase.models[0] : 'N/A'} 
+                                                                        size="small" 
+                                                                        variant="outlined"
+                                                                    />
+                                                                </TableCell>
+                                                                <TableCell>
+                                                                    {isRunning ? (
+                                                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                            <CircularProgress size={16} />
+                                                                            <Box>
+                                                                                <Typography variant="body2">
+                                                                                    Processing...
+                                                                                </Typography>
+                                                                            </Box>
+                                                                        </Box>
+                                                                    ) : testCase.results && testCase.results.length > 0 ? (
+                                                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                            <Typography variant="body2" fontWeight="bold">
+                                                                                {(testCase.results[0].groundedness * 100).toFixed(1)}%
+                                                                            </Typography>
+                                                                            <LinearProgress 
+                                                                                variant="determinate" 
+                                                                                value={testCase.results[0].groundedness * 100}
+                                                                                sx={{ 
+                                                                                    width: 60, 
+                                                                                    height: 6,
+                                                                                    '& .MuiLinearProgress-bar': {
+                                                                                        backgroundColor: testCase.results[0].groundedness >= 0.8 ? theme.palette.success.main :
+                                                                                                       testCase.results[0].groundedness >= 0.6 ? theme.palette.warning.main :
+                                                                                                       theme.palette.error.main
+                                                                                    }
+                                                                                }}
+                                                                            />
+                                                                        </Box>
+                                                                    ) : '-'}
+                                                                </TableCell>
+                                                                <TableCell>
+                                                                    {isRunning ? (
+                                                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                            <CircularProgress size={16} />
+                                                                            <Typography variant="body2">
+                                                                                Processing...
+                                                                            </Typography>
+                                                                        </Box>
+                                                                    ) : testCase.results && testCase.results.length > 0 ? (
+                                                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                            <Typography variant="body2" fontWeight="bold">
+                                                                                {(testCase.results[0].context_relevance * 100).toFixed(1)}%
+                                                                            </Typography>
+                                                                            <LinearProgress 
+                                                                                variant="determinate" 
+                                                                                value={testCase.results[0].context_relevance * 100}
+                                                                                sx={{ 
+                                                                                    width: 60, 
+                                                                                    height: 6,
+                                                                                    '& .MuiLinearProgress-bar': {
+                                                                                        backgroundColor: testCase.results[0].context_relevance >= 0.8 ? theme.palette.success.main :
+                                                                                                       testCase.results[0].context_relevance >= 0.6 ? theme.palette.warning.main :
+                                                                                                       theme.palette.error.main
+                                                                                    }
+                                                                                }}
+                                                                            />
+                                                                        </Box>
+                                                                    ) : '-'}
+                                                                </TableCell>
+                                                                <TableCell>
+                                                                    {isRunning ? (
+                                                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                            <CircularProgress size={16} />
+                                                                            <Typography variant="body2">
+                                                                                Processing...
+                                                                            </Typography>
+                                                                        </Box>
+                                                                    ) : testCase.results && testCase.results.length > 0 ? (
+                                                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                            <Typography variant="body2" fontWeight="bold">
+                                                                                {(testCase.results[0].answer_quality * 100).toFixed(1)}%
+                                                                            </Typography>
+                                                                            <LinearProgress 
+                                                                                variant="determinate" 
+                                                                                value={testCase.results[0].answer_quality * 100}
+                                                                                sx={{ 
+                                                                                    width: 60, 
+                                                                                    height: 6,
+                                                                                    '& .MuiLinearProgress-bar': {
+                                                                                        backgroundColor: testCase.results[0].answer_quality >= 0.8 ? theme.palette.success.main :
+                                                                                                       testCase.results[0].answer_quality >= 0.6 ? theme.palette.warning.main :
+                                                                                                       theme.palette.error.main
+                                                                                    }
+                                                                                }}
+                                                                            />
+                                                                        </Box>
+                                                                    ) : '-'}
+                                                                </TableCell>
+                                                                <TableCell>
+                                                                    {isRunning ? (
+                                                                        <Typography variant="body2" color="text.secondary">
+                                                                            -
+                                                                        </Typography>
+                                                                    ) : testCase.results && testCase.results.length > 0 ? (
+                                                                        <Typography 
+                                                                            variant="body2" 
+                                                                            fontWeight="bold"
+                                                                            color={
+                                                                                testCase.results[0].avg_latency < 1 ? theme.palette.success.main :
+                                                                                testCase.results[0].avg_latency < 2 ? theme.palette.warning.main :
+                                                                                theme.palette.error.main
+                                                                            }
+                                                                        >
+                                                                            {testCase.results[0].avg_latency.toFixed(2)}s
+                                                                        </Typography>
+                                                                    ) : '-'}
+                                                                </TableCell>
+                                                                <TableCell>
+                                                                    {testCase.run_date}
+                                                                </TableCell>
+                                                                <TableCell>
+                                                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                                                        <Chip 
+                                                                            label={
+                                                                                isRunning 
+                                                                                    ? "Running..."
+                                                                                    : testCase.status
+                                                                            }
+                                                                            color={
+                                                                                testCase.status === "completed" ? "success" : 
+                                                                                testCase.status === "running" ? "warning" :
+                                                                                testCase.status === "failed" ? "error" : "default"
+                                                                            }
+                                                                            size="small"
+                                                                            icon={isRunning ? <CircularProgress size={12} /> : undefined}
+                                                                        />
+                                                                    </Box>
+                                                                </TableCell>
+                                                            </TableRow>
+                                                        );
+                                                    })
                                                 )}
                                             </TableBody>
                                         </Table>
@@ -2508,10 +3202,19 @@ const EvaluationPage = () => {
                                                         checked={selectedDocuments.includes(doc?.id || 'unknown')}
                                                         onChange={(e) => {
                                                             const docId = doc?.id || 'unknown';
+                                                            console.log('Checkbox clicked for document:', doc);
+                                                            console.log('Document ID:', docId);
+                                                            console.log('Checked:', e.target.checked);
+                                                            console.log('Current selectedDocuments:', selectedDocuments);
+                                                            
                                                             if (e.target.checked) {
-                                                                setSelectedDocuments([...selectedDocuments, docId]);
+                                                                const newSelection = [...selectedDocuments, docId];
+                                                                console.log('Adding document, new selection:', newSelection);
+                                                                setSelectedDocuments(newSelection);
                                                             } else {
-                                                                setSelectedDocuments(selectedDocuments.filter(id => id !== docId));
+                                                                const newSelection = selectedDocuments.filter(id => id !== docId);
+                                                                console.log('Removing document, new selection:', newSelection);
+                                                                setSelectedDocuments(newSelection);
                                                             }
                                                         }}
                                                     />
@@ -2623,6 +3326,14 @@ const EvaluationPage = () => {
                         </DialogTitle>
                         <DialogContent>
                             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3, mt: 2 }}>
+                                {/* Info about background evaluation */}
+                                <Alert severity="info" sx={{ mb: 2 }}>
+                                    <Typography variant="body2">
+                                        Evaluations run in the background using our async processing system. 
+                                        You can close this dialog and monitor progress in real-time in the evaluations table.
+                                    </Typography>
+                                </Alert>
+
                                 {/* Dataset Selector */}
                                 <FormControl fullWidth>
                                     <InputLabel>Select Dataset</InputLabel>
@@ -2906,7 +3617,135 @@ const EvaluationPage = () => {
                                 disabled={!selectedDatasetId || !selectedModelId || runningTestCase}
                                 startIcon={runningTestCase ? <CircularProgress size={20} /> : <PlayArrow />}
                             >
-                                {runningTestCase ? 'Running Test...' : 'Run Evaluation'}
+                                {runningTestCase ? 'Starting Evaluation...' : 'Start Background Evaluation'}
+                            </Button>
+                        </DialogActions>
+                    </Dialog>
+
+                    {/* Test Case Details Dialog */}
+                    <Dialog 
+                        open={testCaseDetailsOpen} 
+                        onClose={() => setTestCaseDetailsOpen(false)}
+                        maxWidth="md"
+                        fullWidth
+                    >
+                        <DialogTitle>
+                            Evaluation Details - Test #{testCaseResults.length - testCaseResults.findIndex(tc => tc.task_id === selectedTestCase?.task_id)}
+                        </DialogTitle>
+                        <DialogContent>
+                            {selectedTestCase && (
+                                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                    {/* Basic Information */}
+                                    <Card>
+                                        <CardContent>
+                                            <Typography variant="h6" gutterBottom>Basic Information</Typography>
+                                            <Grid container spacing={2}>
+                                                <Grid item xs={6}>
+                                                    <Typography variant="body2" color="text.secondary">Task ID</Typography>
+                                                    <Typography variant="body1">{selectedTestCase.task_id}</Typography>
+                                                </Grid>
+                                                <Grid item xs={6}>
+                                                    <Typography variant="body2" color="text.secondary">Dataset</Typography>
+                                                    <Typography variant="body1">{selectedTestCase.dataset_name}</Typography>
+                                                </Grid>
+                                                <Grid item xs={6}>
+                                                    <Typography variant="body2" color="text.secondary">Status</Typography>
+                                                    <Chip 
+                                                        label={selectedTestCase.status} 
+                                                        color={selectedTestCase.status === 'completed' ? 'success' : selectedTestCase.status === 'running' ? 'warning' : 'error'}
+                                                        size="small"
+                                                    />
+                                                </Grid>
+                                                <Grid item xs={6}>
+                                                    <Typography variant="body2" color="text.secondary">Run Date</Typography>
+                                                    <Typography variant="body1">{selectedTestCase.run_date}</Typography>
+                                                </Grid>
+                                            </Grid>
+                                        </CardContent>
+                                    </Card>
+
+                                    {/* Model and Configuration */}
+                                    <Card>
+                                        <CardContent>
+                                            <Typography variant="h6" gutterBottom>Model Configuration</Typography>
+                                            <Grid container spacing={2}>
+                                                <Grid item xs={12}>
+                                                    <Typography variant="body2" color="text.secondary">LLM Model</Typography>
+                                                    <Typography variant="body1">{selectedTestCase.models?.[0] || 'N/A'}</Typography>
+                                                </Grid>
+                                                {/* Show retrieval settings if available */}
+                                                {backgroundEvaluations.get(selectedTestCase.task_id)?.metadata && (
+                                                    <>
+                                                        <Grid item xs={6}>
+                                                            <Typography variant="body2" color="text.secondary">Similarity Threshold</Typography>
+                                                            <Typography variant="body1">
+                                                                {backgroundEvaluations.get(selectedTestCase.task_id).metadata.retrieval_config?.similarity_threshold || 'N/A'}
+                                                            </Typography>
+                                                        </Grid>
+                                                        <Grid item xs={6}>
+                                                            <Typography variant="body2" color="text.secondary">Max Chunks</Typography>
+                                                            <Typography variant="body1">
+                                                                {backgroundEvaluations.get(selectedTestCase.task_id).metadata.retrieval_config?.max_chunks || 'N/A'}
+                                                            </Typography>
+                                                        </Grid>
+                                                        <Grid item xs={6}>
+                                                            <Typography variant="body2" color="text.secondary">Search Type</Typography>
+                                                            <Typography variant="body1">
+                                                                {backgroundEvaluations.get(selectedTestCase.task_id).metadata.retrieval_config?.search_type || 'N/A'}
+                                                            </Typography>
+                                                        </Grid>
+                                                        <Grid item xs={6}>
+                                                            <Typography variant="body2" color="text.secondary">Reranker Enabled</Typography>
+                                                            <Typography variant="body1">
+                                                                {backgroundEvaluations.get(selectedTestCase.task_id).metadata.retrieval_config?.reranker_enabled ? 'Yes' : 'No'}
+                                                            </Typography>
+                                                        </Grid>
+                                                    </>
+                                                )}
+                                            </Grid>
+                                        </CardContent>
+                                    </Card>
+
+                                    {/* Results */}
+                                    {selectedTestCase.results && selectedTestCase.results.length > 0 && (
+                                        <Card>
+                                            <CardContent>
+                                                <Typography variant="h6" gutterBottom>Evaluation Results</Typography>
+                                                <Grid container spacing={2}>
+                                                    <Grid item xs={3}>
+                                                        <Typography variant="body2" color="text.secondary">Groundedness</Typography>
+                                                        <Typography variant="h6" color="primary">
+                                                            {(selectedTestCase.results[0].groundedness * 100).toFixed(1)}%
+                                                        </Typography>
+                                                    </Grid>
+                                                    <Grid item xs={3}>
+                                                        <Typography variant="body2" color="text.secondary">Context Relevance</Typography>
+                                                        <Typography variant="h6" color="primary">
+                                                            {(selectedTestCase.results[0].context_relevance * 100).toFixed(1)}%
+                                                        </Typography>
+                                                    </Grid>
+                                                    <Grid item xs={3}>
+                                                        <Typography variant="body2" color="text.secondary">Answer Quality</Typography>
+                                                        <Typography variant="h6" color="primary">
+                                                            {(selectedTestCase.results[0].answer_quality * 100).toFixed(1)}%
+                                                        </Typography>
+                                                    </Grid>
+                                                    <Grid item xs={3}>
+                                                        <Typography variant="body2" color="text.secondary">Avg Latency</Typography>
+                                                        <Typography variant="h6" color="primary">
+                                                            {selectedTestCase.results[0].avg_latency.toFixed(2)}s
+                                                        </Typography>
+                                                    </Grid>
+                                                </Grid>
+                                            </CardContent>
+                                        </Card>
+                                    )}
+                                </Box>
+                            )}
+                        </DialogContent>
+                        <DialogActions>
+                            <Button onClick={() => setTestCaseDetailsOpen(false)}>
+                                Close
                             </Button>
                         </DialogActions>
                     </Dialog>

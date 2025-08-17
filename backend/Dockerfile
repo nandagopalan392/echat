@@ -24,9 +24,7 @@ COPY requirements.txt .
 # Install dependencies with retry mechanism
 RUN pip install --upgrade pip && \
     pip install wheel setuptools && \
-    for i in 1 2 3; do pip install -r requirements.txt && break || sleep 15; done && \
-    # Explicitly uninstall posthog to avoid compatibility issues with Python 3.8
-    pip uninstall -y posthog || true
+    for i in 1 2 3; do pip install -r requirements.txt && break || sleep 15; done
 
 # Final stage
 FROM python:3.10-slim

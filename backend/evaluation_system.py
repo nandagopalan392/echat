@@ -364,15 +364,21 @@ class TruLensEvaluator:
         Returns:
             RAGTriadResult containing all three evaluations
         """
+        print(f"🚀 TruLensEvaluator: Starting rag_triad for question: {question[:50]}...")
+        logger.info(f"🚀 TruLensEvaluator: Starting rag_triad for question: {question[:50]}...")
         start_time = time.time()
         
         try:
             # Evaluate groundedness
+            print(f"🚀 TruLensEvaluator: Starting groundedness evaluation")
+            logger.info(f"🚀 TruLensEvaluator: Starting groundedness evaluation")
             groundedness_score, groundedness_reasons = self.groundedness_measure_with_cot_reasons(
                 source=context,
                 statement=answer,
                 temperature=temperature
             )
+            print(f"🚀 TruLensEvaluator: Groundedness score: {groundedness_score}")
+            logger.info(f"🚀 TruLensEvaluator: Groundedness score: {groundedness_score}")
             
             groundedness_result = EvaluationResult(
                 metric=EvaluationMetric.GROUNDEDNESS,
@@ -637,3 +643,56 @@ def get_recent_evaluation_stats(last_n: int = 100) -> Dict[str, Any]:
     """
     manager = get_evaluation_manager()
     return manager.get_evaluation_statistics(last_n=last_n)
+
+# RAGEvaluator class for compatibility with Celery tasks
+class RAGEvaluator:
+    """
+    Simplified RAG evaluator class for use in background tasks.
+    
+    This class provides a simplified interface that's compatible with
+    the Celery task system while reusing the core TruLensEvaluator logic.
+    """
+    
+    def __init__(self, llm_provider: Optional[LLMProvider] = None):
+        print("🚀 RAGEvaluator: Initializing RAGEvaluator")
+        logger.info("🚀 RAGEvaluator: Initializing RAGEvaluator")
+        if llm_provider is None:
+            print("🚀 RAGEvaluator: Creating OllamaProvider")
+            logger.info("🚀 RAGEvaluator: Creating OllamaProvider")
+            llm_provider = OllamaProvider()
+        print("🚀 RAGEvaluator: Creating TruLensEvaluator")
+        logger.info("🚀 RAGEvaluator: Creating TruLensEvaluator")
+        self.evaluator = TruLensEvaluator(llm_provider)
+        print("🚀 RAGEvaluator: RAGEvaluator initialization complete")
+        logger.info("🚀 RAGEvaluator: RAGEvaluator initialization complete")
+    
+    def evaluate_rag_triad(
+        self,
+        query: str,
+        response: str,
+        context: str,
+        temperature: float = 0.0
+    ) -> RAGTriadResult:
+        """
+        Evaluate a RAG interaction using the three core metrics.
+        
+        Args:
+            query: User's query/question
+            response: System's response/answer
+            context: Retrieved context
+            temperature: LLM temperature for generation
+            
+        Returns:
+            RAGTriadResult containing all three evaluations
+        """
+        print(f"🚀 RAGEvaluator: Starting rag_triad evaluation for query: {query[:50]}...")
+        logger.info(f"🚀 RAGEvaluator: Starting rag_triad evaluation for query: {query[:50]}...")
+        result = self.evaluator.rag_triad(
+            question=query,
+            answer=response,
+            context=context,
+            temperature=temperature
+        )
+        print(f"🚀 RAGEvaluator: Completed rag_triad evaluation with overall score: {result.overall_score}")
+        logger.info(f"🚀 RAGEvaluator: Completed rag_triad evaluation with overall score: {result.overall_score}")
+        return result

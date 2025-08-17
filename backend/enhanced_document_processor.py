@@ -5,6 +5,9 @@ Handles different document types and chunking strategies with advanced document 
 
 import os
 import logging
+import time
+import traceback
+
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import json
@@ -20,19 +23,19 @@ from table_extraction import (
     create_table_chunk_metadata, create_adaptive_table_chunks, 
     create_contextual_table_chunks
 )
+from gpu_utils import configure_docling_device, is_cuda_memory_error, clear_gpu_memory
 
 logger = logging.getLogger(__name__)
 
 # Try to import Docling for advanced document processing
 try:
     from docling.document_converter import DocumentConverter
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.datamodel.pipeline_options import PipelineOptions
     from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     DOCLING_AVAILABLE = True
     logger.info("Docling available for advanced document processing")
-except ImportError:
-    logger.warning("Docling not available. Falling back to basic document loaders.")
+except ImportError as e:
+    logger.warning(f"Docling not available. Falling back to basic document loaders. Error: {e}")
     DOCLING_AVAILABLE = False
 
 # Fallback document loaders
@@ -78,33 +81,70 @@ class DoclingDocumentProcessor:
     
     def __init__(self):
         if DOCLING_AVAILABLE:
-            # Configure Docling converter with PDF pipeline options
-            self.pipeline_options = PdfPipelineOptions()
-            self.pipeline_options.do_ocr = True  # Enable OCR for better text extraction
-            self.pipeline_options.do_table_structure = True  # Enable table structure detection
-            
-            self.converter = DocumentConverter(
-                format_options={
-                    InputFormat.PDF: self.pipeline_options,
-                }
-            )
-            
-            # Supported formats by Docling
-            self.docling_formats = {
-                '.pdf': InputFormat.PDF,
-                '.docx': InputFormat.DOCX,
-                '.pptx': InputFormat.PPTX,
-                '.html': InputFormat.HTML,
-                '.md': InputFormat.MD,
-                '.txt': InputFormat.TXT
-            }
+            try:
+                start_time = time.time()
+                logger.info("🚀 DEBUG: Starting Docling DocumentConverter initialization...")
+                
+                # Smart GPU/CPU configuration based on memory availability
+                use_gpu, device_status = configure_docling_device()
+                logger.info(f"🚀 DEBUG: Device configuration: {device_status}")
+                
+                # Create DocumentConverter with appropriate configuration
+                logger.info("🚀 DEBUG: Creating DocumentConverter...")
+                init_start = time.time()
+                
+                try:
+                    # For Docling 2.43.0, use simple initialization
+                    # VLM pipeline has CUDA device issues, so we'll use standard pipeline
+                    # Images will fall back to OCR which works reliably
+                    if not use_gpu:
+                        # Force CPU if GPU memory is insufficient
+                        import os
+                        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+                        logger.info("🚀 DEBUG: Forcing CPU mode via environment variables")
+                    else:
+                        logger.info("🚀 DEBUG: Using GPU acceleration for standard pipeline")
+                    
+                    logger.info("🚀 DEBUG: Creating DocumentConverter with standard pipeline...")
+                    self.converter = DocumentConverter()
+                    device_type = "GPU" if use_gpu else "CPU"
+                    logger.info(f"🚀 DEBUG: DocumentConverter created with standard pipeline ({device_type})")
+                    
+                except ImportError:
+                    # Fallback to simple initialization if VLM imports fail
+                    logger.info("🚀 DEBUG: VLM configuration not available, using simple initialization...")
+                    if not use_gpu:
+                        import os
+                        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+                        logger.info("🚀 DEBUG: Forcing CPU mode via environment variables")
+                    
+                    self.converter = DocumentConverter()
+                    device_type = "GPU" if use_gpu else "CPU"
+                    logger.info(f"🚀 DEBUG: DocumentConverter created with default settings ({device_type})")
+                
+                init_time = time.time() - init_start
+                logger.info(f"🚀 DEBUG: DocumentConverter created in {init_time:.2f} seconds")
+                
+                # Supported formats by Docling (new API uses file extensions directly)
+                # Excluding image formats due to VLM CUDA device issues - images will use OCR fallback
+                self.docling_formats = {'.pdf', '.docx', '.pptx', '.html', '.md', '.txt'}
+                
+                total_time = time.time() - start_time
+                device_type = "GPU" if use_gpu else "CPU"
+                logger.info(f"Docling DocumentConverter initialized with {device_type} in {total_time:.2f} seconds")
+                
+            except Exception as e:
+                logger.warning(f"Failed to initialize Docling converter: {e}")
+                logger.warning(f"🚀 DEBUG: Full traceback: {traceback.format_exc()}")
+                self.converter = None
+                self.docling_formats = set()
         else:
             self.converter = None
-            self.docling_formats = {}
+            self.docling_formats = set()
     
     def can_process(self, file_path: str) -> bool:
         """Check if Docling can process this file format"""
-        if not DOCLING_AVAILABLE:
+        if not DOCLING_AVAILABLE or not self.converter:
             return False
         
         ext = Path(file_path).suffix.lower()
@@ -112,34 +152,135 @@ class DoclingDocumentProcessor:
     
     def process_document(self, file_path: str) -> List[Document]:
         """Process document using Docling for comprehensive content extraction"""
+        
         if not self.can_process(file_path):
             raise ValueError(f"Cannot process {file_path} with Docling")
         
+        logger.info(f"🚀 DEBUG: Starting Docling processing for: {file_path}")
+        total_start = time.time()
+        
+        # First attempt with current configuration
         try:
-            # Convert document using Docling
-            result = self.converter.convert(file_path)
+            return self._process_document_internal(file_path, total_start)
+        except Exception as e:
+            # Check if it's a CUDA memory error
+            if is_cuda_memory_error(e):
+                logger.warning(f"🔄 CUDA memory error detected, switching to CPU-only mode: {e}")
+                
+                # Clear GPU memory cache
+                clear_gpu_memory()
+                
+                # Force CPU mode and reinitialize converter
+                self._switch_to_cpu_mode()
+                
+                # Retry with CPU
+                try:
+                    return self._process_document_internal(file_path, total_start, retry=True)
+                except Exception as retry_error:
+                    total_time = time.time() - total_start
+                    logger.error(f"🚀 DEBUG: Docling processing failed even with CPU mode after {total_time:.2f} seconds: {retry_error}")
+                    raise retry_error
+            else:
+                # Re-raise non-memory errors
+                raise e
+    
+    def _switch_to_cpu_mode(self):
+        """Switch Docling converter to CPU-only mode"""
+        try:
+            logger.info("🔄 Switching Docling to CPU-only mode...")
+            
+            # Force CPU configuration
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            
+            # Reinitialize converter with CPU settings
+            init_start = time.time()
+            
+            try:
+                # Simple CPU-only reinitialization (avoiding VLM CUDA device issues)
+                logger.info("🔄 Reinitializing DocumentConverter with CPU-only mode...")
+                self.converter = DocumentConverter()
+                logger.info("🔄 DocumentConverter reinitialized with standard pipeline (CPU-only)")
+                
+                init_time = time.time() - init_start
+                logger.info(f"🔄 CPU-only converter ready in {init_time:.2f} seconds")
+                
+            except Exception as reinit_error:
+                logger.error(f"Failed to reinitialize converter in CPU mode: {reinit_error}")
+                raise
+            
+        except Exception as e:
+            logger.error(f"Failed to switch to CPU mode: {e}")
+            raise
+    
+    def _process_document_internal(self, file_path: str, total_start: float, retry: bool = False) -> List[Document]:
+        """Internal document processing logic"""
+        
+        try:
+            # Convert document using Docling (v2.43.0 simplified API)
+            logger.info("🚀 DEBUG: Starting document conversion...")
+            convert_start = time.time()
+            conversion_results = list(self.converter.convert(file_path))
+            convert_time = time.time() - convert_start
+            logger.info(f"🚀 DEBUG: Document conversion completed in {convert_time:.2f} seconds")
+            
+            if not conversion_results:
+                raise ValueError(f"No conversion results for {file_path}")
+            
+            # Get the first (and typically only) result
+            logger.info("🚀 DEBUG: Extracting conversion result...")
+            result_start = time.time()
             documents = []
             
-            # Extract content from Docling result
-            doc_content = result.document
+            # Extract content from Docling result (v2.43.0 returns tuples)
+            # Find the document tuple in the results
+            doc_content = None
+            for result_tuple in conversion_results:
+                if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                    key, value = result_tuple
+                    if key == 'document':
+                        doc_content = value
+                        break
+            
+            if not doc_content:
+                raise ValueError("Document content not found in conversion results")
+            
+            result_time = time.time() - result_start
+            logger.info(f"🚀 DEBUG: Result extraction completed in {result_time:.2f} seconds")
             
             # Process tables first (if any)
+            logger.info("🚀 DEBUG: Starting table extraction...")
+            table_start = time.time()
             table_docs = self._extract_tables_from_docling(doc_content, file_path)
+            table_time = time.time() - table_start
+            logger.info(f"🚀 DEBUG: Table extraction completed in {table_time:.2f} seconds, found {len(table_docs)} tables")
             documents.extend(table_docs)
             
             # Process text content
+            logger.info("🚀 DEBUG: Starting text extraction...")
+            text_start = time.time()
             text_docs = self._extract_text_from_docling(doc_content, file_path)
+            text_time = time.time() - text_start
+            logger.info(f"🚀 DEBUG: Text extraction completed in {text_time:.2f} seconds, found {len(text_docs)} text sections")
             documents.extend(text_docs)
             
             # Process images with OCR (if any)
+            logger.info("🚀 DEBUG: Starting image extraction...")
+            image_start = time.time()
             image_docs = self._extract_images_from_docling(doc_content, file_path)
+            image_time = time.time() - image_start
+            logger.info(f"🚀 DEBUG: Image extraction completed in {image_time:.2f} seconds, found {len(image_docs)} image sections")
             documents.extend(image_docs)
             
+            total_time = time.time() - total_start
+            logger.info(f"🚀 DEBUG: Total processing time: {total_time:.2f} seconds")
+            logger.info(f"🚀 DEBUG: Breakdown - Convert: {convert_time:.2f}s, Extract: {result_time:.2f}s, Tables: {table_time:.2f}s, Text: {text_time:.2f}s, Images: {image_time:.2f}s")
             logger.info(f"Docling processed {file_path}: {len(documents)} document sections extracted")
             return documents
             
         except Exception as e:
-            logger.error(f"Docling processing failed for {file_path}: {e}")
+            total_time = time.time() - total_start
+            logger.error(f"🚀 DEBUG: Docling processing failed after {total_time:.2f} seconds for {file_path}: {e}")
+            logger.error(f"🚀 DEBUG: Full processing traceback: {traceback.format_exc()}")
             raise
     
     def _extract_tables_from_docling(self, doc_content, file_path: str) -> List[Document]:
@@ -147,14 +288,13 @@ class DoclingDocumentProcessor:
         documents = []
         
         try:
-            # Access tables from Docling document structure
+            # Access tables from Docling document structure (v2.43.0)
             if hasattr(doc_content, 'tables') and doc_content.tables:
                 for i, table in enumerate(doc_content.tables):
-                    # Convert Docling table to pandas DataFrame
-                    if hasattr(table, 'data') and table.data:
-                        try:
-                            # Create DataFrame from table data
-                            df = pd.DataFrame(table.data) if PANDAS_AVAILABLE else None
+                    try:
+                        # Use export_to_dataframe method for Docling v2.43.0
+                        if hasattr(table, 'export_to_dataframe'):
+                            df = table.export_to_dataframe()
                             
                             if df is not None and not df.empty:
                                 # Create table document with enhanced metadata
@@ -162,8 +302,6 @@ class DoclingDocumentProcessor:
                                 
                                 # Add table context and structure information
                                 context_info = f"Table {i+1} from document"
-                                if hasattr(table, 'caption') and table.caption:
-                                    context_info += f": {table.caption}"
                                 
                                 metadata = {
                                     'source': Path(file_path).name,
@@ -173,8 +311,9 @@ class DoclingDocumentProcessor:
                                     'table_rows': len(df),
                                     'table_cols': len(df.columns),
                                     'context_info': context_info,
-                                    'extraction_method': 'docling_advanced',
-                                    'confidence_score': 0.95  # High confidence for Docling extraction
+                                    'extraction_method': 'docling_v2.43.0',
+                                    'confidence_score': 0.95,  # High confidence for Docling extraction
+                                    'docling_version': '2.43.0'
                                 }
                                 
                                 doc = Document(
@@ -183,9 +322,30 @@ class DoclingDocumentProcessor:
                                 )
                                 documents.append(doc)
                                 
-                        except Exception as e:
-                            logger.warning(f"Failed to process table {i} from Docling: {e}")
+                        # Fallback: use text representation if available
+                        elif hasattr(table, 'text') and table.text:
+                            table_content = table.text
                             
+                            metadata = {
+                                'source': Path(file_path).name,
+                                'content_type': 'table',
+                                'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
+                                'table_index': i,
+                                'context_info': f"Table {i+1} from document (text format)",
+                                'extraction_method': 'docling_v2.43.0_text',
+                                'confidence_score': 0.8,
+                                'docling_version': '2.43.0'
+                            }
+                            
+                            doc = Document(
+                                page_content=table_content,
+                                metadata=metadata
+                            )
+                            documents.append(doc)
+                            
+                    except Exception as e:
+                        logger.warning(f"Failed to process table {i} from Docling: {e}")
+                        
         except Exception as e:
             logger.warning(f"Table extraction from Docling failed: {e}")
         
@@ -196,41 +356,53 @@ class DoclingDocumentProcessor:
         documents = []
         
         try:
-            # Get main text content
-            if hasattr(doc_content, 'main_text') and doc_content.main_text:
-                text_content = doc_content.main_text
-                
-                metadata = {
-                    'source': Path(file_path).name,
-                    'content_type': 'text',
-                    'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
-                    'extraction_method': 'docling_text',
-                    'page_count': getattr(doc_content, 'page_count', 1)
-                }
-                
-                doc = Document(
-                    page_content=text_content,
-                    metadata=metadata
-                )
-                documents.append(doc)
-                
-            # Also extract from pages if available (for page-by-page processing)
-            elif hasattr(doc_content, 'pages') and doc_content.pages:
-                for i, page in enumerate(doc_content.pages):
-                    if hasattr(page, 'text') and page.text:
+            # Use export_to_markdown for full document text (Docling v2.43.0)
+            if hasattr(doc_content, 'export_to_markdown'):
+                try:
+                    text_content = doc_content.export_to_markdown()
+                    
+                    if text_content and text_content.strip():
                         metadata = {
                             'source': Path(file_path).name,
                             'content_type': 'text',
                             'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
-                            'extraction_method': 'docling_page',
-                            'page_number': i + 1
+                            'extraction_method': 'docling_markdown',
+                            'docling_version': '2.43.0'
                         }
                         
                         doc = Document(
-                            page_content=page.text,
+                            page_content=text_content,
                             metadata=metadata
                         )
                         documents.append(doc)
+                        
+                except Exception as e:
+                    logger.warning(f"Markdown export failed: {e}")
+            
+            # Fallback: Extract from main_text list (Docling v2.43.0 structure)
+            elif hasattr(doc_content, 'main_text') and doc_content.main_text:
+                text_parts = []
+                for text_obj in doc_content.main_text:
+                    if hasattr(text_obj, 'text') and text_obj.text:
+                        text_parts.append(text_obj.text)
+                
+                if text_parts:
+                    text_content = '\n'.join(text_parts)
+                    
+                    metadata = {
+                        'source': Path(file_path).name,
+                        'content_type': 'text',
+                        'extracted_from': f'docling_{Path(file_path).suffix[1:]}',
+                        'extraction_method': 'docling_main_text',
+                        'docling_version': '2.43.0',
+                        'text_segments': len(text_parts)
+                    }
+                    
+                    doc = Document(
+                        page_content=text_content,
+                        metadata=metadata
+                    )
+                    documents.append(doc)
                         
         except Exception as e:
             logger.warning(f"Text extraction from Docling failed: {e}")
@@ -305,7 +477,7 @@ class EnhancedDocumentProcessor:
         # All supported extensions (Docling + fallback)
         self.supported_extensions = set(self.fallback_processors.keys())
         if DOCLING_AVAILABLE:
-            self.supported_extensions.update(self.docling_processor.docling_formats.keys())
+            self.supported_extensions.update(self.docling_processor.docling_formats)
     
     def process_document(self, file_path: str, method: ChunkingMethod = None, 
                         config: ChunkingConfig = None, user_id: str = None, 

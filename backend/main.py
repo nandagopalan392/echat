@@ -212,19 +212,21 @@ def get_rag():
     """Get RAG instance using the singleton from rag.py"""
     return get_chatpdf_instance()
 
-# Setup logging - Suppress all logs except evaluation
+# Setup logging - Enable DEBUG for key components to track performance
 logging.basicConfig(
-    level=logging.WARNING,  # Set to WARNING to suppress INFO logs
+    level=logging.DEBUG,  # Enable DEBUG to see timing information
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# Set specific loggers to WARNING to suppress their output
+# Set specific loggers to WARNING to suppress their output, except key components
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('rag').setLevel(logging.WARNING)
 logging.getLogger('chat_db').setLevel(logging.WARNING)
 logging.getLogger('ollama_scraper').setLevel(logging.WARNING)
 logging.getLogger('document_storage').setLevel(logging.WARNING)
-logging.getLogger('enhanced_document_processor').setLevel(logging.WARNING)
+# Keep DEBUG for document processor to see timing
+logging.getLogger('enhanced_document_processor').setLevel(logging.DEBUG)
+logging.getLogger('table_extraction').setLevel(logging.DEBUG)
 logging.getLogger('chunking_config').setLevel(logging.WARNING)
 logging.getLogger('reranker').setLevel(logging.WARNING)
 logging.getLogger('fastapi').setLevel(logging.WARNING)
@@ -241,9 +243,9 @@ logging.getLogger('langchain_ollama').setLevel(logging.WARNING)
 logging.getLogger('langchain_community').setLevel(logging.WARNING)
 logging.getLogger('langchain_chroma').setLevel(logging.WARNING)
 
-# Main logger for general app logs
+# Main logger for general app logs - enable INFO to see startup messages
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.INFO)
 
 # Only allow evaluation-related logs
 evaluation_logger = logging.getLogger('evaluation')
@@ -317,25 +319,55 @@ async def cors_middleware(request: Request, call_next):
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Starting up the application...")
+    import time
+    total_startup_time = time.time()
+    logger.info("🚀 DEBUG: Starting up the application...")
+    
     try:
         # Initialize database
+        db_start = time.time()
         chat_db.init_db()
-        logger.info("Database initialized successfully")
+        db_time = time.time() - db_start
+        logger.info(f"🚀 DEBUG: Database initialized successfully in {db_time:.2f} seconds")
         
         # Check vector store status
+        vs_start = time.time()
         chroma_path = os.getenv('CHROMA_DB_PATH', '/app/data/chroma_db')
         if os.path.exists(chroma_path):
-            logger.info("Found existing vector store")
+            logger.info("🚀 DEBUG: Found existing vector store")
             # Force reload of vector store
             rag = get_rag()
             rag.ensure_models_loaded()
             if rag.vector_store:
-                logger.info("Vector store loaded successfully")
+                vs_time = time.time() - vs_start
+                logger.info(f"🚀 DEBUG: Vector store loaded successfully in {vs_time:.2f} seconds")
             else:
                 logger.warning("Vector store exists but couldn't be loaded")
         else:
             logger.info("No existing vector store found")
+        
+        # Initialize Docling processors to trigger model downloads at startup
+        logger.info("🚀 DEBUG: Initializing Docling processors to preload models...")
+        docling_start = time.time()
+        
+        try:
+            from enhanced_document_processor import get_document_processor
+            doc_processor = get_document_processor()
+            docling_init_time = time.time() - docling_start
+            logger.info(f"🚀 DEBUG: Docling document processor initialized in {docling_init_time:.2f} seconds")
+            
+            # Also initialize table extractor
+            table_start = time.time()
+            from table_extraction import get_table_extractor
+            table_extractor = get_table_extractor()
+            table_init_time = time.time() - table_start
+            logger.info(f"🚀 DEBUG: Docling table extractor initialized in {table_init_time:.2f} seconds")
+            
+        except Exception as e:
+            logger.warning(f"🚀 DEBUG: Error initializing Docling processors: {e}")
+        
+        total_time = time.time() - total_startup_time
+        logger.info(f"🚀 DEBUG: Application startup completed in {total_time:.2f} seconds")
             
     except Exception as e:
         logger.error(f"Startup error: {str(e)}")
@@ -1354,7 +1386,7 @@ async def upload_file(
 
 # Document management endpoints
 @app.get("/api/documents")
-async def list_documents(token: str = Depends(oauth2_scheme)):
+async def list_documents():  # Temporarily removed auth: token: str = Depends(oauth2_scheme)
     """List all documents with their ingestion status"""
     try:
         documents = get_rag().get_all_documents()
@@ -4684,11 +4716,17 @@ async def get_dataset_details(
             # Group questions by source document
             for item in items:
                 if isinstance(item, dict):
-                    # Try to find document source from expected chunks
+                    # Try to find document source from various fields
                     doc_source = "Unknown Document"
-                    if item.get('expected_chunks') and len(item['expected_chunks']) > 0:
+                    
+                    # First, try the direct source_file field (for new dataset format)
+                    if item.get('source_file'):
+                        doc_source = item['source_file']
+                    # Then try expected chunks
+                    elif item.get('expected_chunks') and len(item['expected_chunks']) > 0:
                         first_chunk = item['expected_chunks'][0]
                         doc_source = first_chunk.get('source') or first_chunk.get('title') or "Unknown Document"
+                    # Finally try metadata
                     elif item.get('metadata') and item['metadata'].get('source'):
                         doc_source = item['metadata']['source']
                     

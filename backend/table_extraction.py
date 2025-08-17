@@ -2,9 +2,11 @@
 Table Extraction and Processing for Document Chunking
 Handles table detection and extraction from various document formats using Docling
 """
+import os
 import pandas as pd
 import re
 import logging
+
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from collections import Counter
@@ -14,13 +16,11 @@ logger = logging.getLogger(__name__)
 # Try to import Docling for advanced document parsing
 try:
     from docling.document_converter import DocumentConverter
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import PdfFormatOption
+    from docling.datamodel.pipeline_options import PipelineOptions
     DOCLING_AVAILABLE = True
     logger.info("Docling is available for advanced document parsing")
-except ImportError:
-    logger.warning("Docling not available. Falling back to basic extraction methods.")
+except ImportError as e:
+    logger.warning(f"Docling not available. Falling back to basic extraction methods. Error: {e}")
     DOCLING_AVAILABLE = False
 
 # Fallback libraries for non-PDF formats
@@ -51,24 +51,64 @@ class DoclingTableExtractor:
     """Extract tables using Docling's advanced document parsing capabilities"""
     
     def __init__(self):
+        import time
+        start_time = time.time()
+        logger.info("🚀 DEBUG: Starting DoclingTableExtractor initialization...")
+        
         self.converter = None
         if DOCLING_AVAILABLE:
-            # Initialize Docling converter with optimized settings
-            self.converter = DocumentConverter(
-                format_options={
-                    InputFormat.PDF: PdfFormatOption(
-                        pipeline_options=PdfPipelineOptions(
-                            do_ocr=True,  # Enable OCR for scanned documents
-                            do_table_structure=True,  # Enable table structure recognition
-                            table_structure_options={
-                                "do_cell_matching": True,
-                                "mode": "accurate"  # Use accurate mode for better table detection
-                            }
-                        )
-                    )
-                }
-            )
-            logger.info("Docling DocumentConverter initialized with table structure recognition")
+            try:
+                # Import GPU check utility
+                from gpu_utils import configure_docling_device
+                
+                # Smart GPU/CPU configuration based on memory availability
+                use_gpu, device_status = configure_docling_device()
+                logger.info(f"🚀 DEBUG: Table extractor device configuration: {device_status}")
+                
+                # Initialize Docling converter with appropriate configuration
+                logger.info("🚀 DEBUG: Creating DocumentConverter for table extraction...")
+                converter_start = time.time()
+                
+                try:
+                    # For Docling 2.43.0, use simple initialization for table extraction
+                    # GPU/CPU control is handled via environment variables
+                    if not use_gpu:
+                        # Force CPU if GPU memory is insufficient
+                        import os
+                        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+                        logger.info("🚀 DEBUG: Table extractor forcing CPU mode via environment variables")
+                    else:
+                        logger.info("🚀 DEBUG: Table extractor using GPU acceleration (if available)")
+                    
+                    logger.info("🚀 DEBUG: Creating DocumentConverter for table extraction with simple initialization...")
+                    self.converter = DocumentConverter()
+                    device_type = "GPU" if use_gpu else "CPU"
+                    logger.info(f"🚀 DEBUG: Table DocumentConverter created with default settings ({device_type})")
+                    
+                except ImportError:
+                    # Fallback to simple initialization if any imports fail
+                    logger.info("🚀 DEBUG: Advanced configuration not available, using simple initialization...")
+                    if not use_gpu:
+                        import os
+                        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+                        logger.info("🚀 DEBUG: Table extractor forcing CPU mode via environment variables")
+                    
+                    self.converter = DocumentConverter()
+                    device_type = "GPU" if use_gpu else "CPU"
+                    logger.info(f"🚀 DEBUG: Table DocumentConverter created with default settings ({device_type})")
+                
+                converter_time = time.time() - converter_start
+                logger.info(f"🚀 DEBUG: DocumentConverter for tables created in {converter_time:.2f} seconds")
+                
+                total_time = time.time() - start_time
+                device_type = "GPU" if use_gpu else "CPU"
+                logger.info(f"Docling DocumentConverter for tables initialized with {device_type} in {total_time:.2f} seconds")
+                
+            except Exception as e:
+                logger.warning(f"Failed to initialize Docling table extractor: {e}")
+                import traceback
+                logger.warning(f"🚀 DEBUG: Full table extractor traceback: {traceback.format_exc()}")
+                self.converter = None
     
     def extract_tables_from_document(self, file_path: str) -> List[Dict[str, Any]]:
         """
@@ -80,45 +120,113 @@ class DoclingTableExtractor:
             print("🚀 DEBUG: Docling not available, falling back to legacy methods")
             return []
         
+        # First attempt with current configuration
+        try:
+            return self._extract_tables_internal(file_path)
+        except Exception as e:
+            # Check if it's a CUDA memory error
+            from gpu_utils import is_cuda_memory_error, clear_gpu_memory
+            
+            if is_cuda_memory_error(e):
+                logger.warning(f"🔄 CUDA memory error in table extraction, switching to CPU-only mode: {e}")
+                
+                # Clear GPU memory cache
+                clear_gpu_memory()
+                
+                # Force CPU mode and reinitialize converter
+                self._switch_to_cpu_mode()
+                
+                # Retry with CPU
+                try:
+                    return self._extract_tables_internal(file_path, retry=True)
+                except Exception as retry_error:
+                    logger.error(f"🚀 DEBUG: Table extraction failed even with CPU mode: {retry_error}")
+                    return []  # Return empty list instead of raising
+            else:
+                logger.error(f"🚀 DEBUG: Docling extraction failed: {e}")
+                return []
+    
+    def _switch_to_cpu_mode(self):
+        """Switch table extractor to CPU-only mode"""
+        try:
+            logger.info("🔄 Switching table extractor to CPU-only mode...")
+            
+            # Force CPU configuration
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            
+            # Reinitialize converter with CPU settings
+            try:
+                # Simple CPU-only reinitialization for table extractor
+                logger.info("🔄 Reinitializing Table DocumentConverter with CPU-only mode...")
+                self.converter = DocumentConverter()
+                logger.info("🔄 Table DocumentConverter reinitialized with CPU-only settings")
+                
+            except Exception as reinit_error:
+                logger.error(f"Failed to reinitialize table converter in CPU mode: {reinit_error}")
+                raise
+        except Exception as e:
+            logger.error(f"Failed to switch table extractor to CPU mode: {e}")
+            raise
+    
+    def _extract_tables_internal(self, file_path: str, retry: bool = False) -> List[Dict[str, Any]]:
+        """Internal table extraction logic"""
         tables = []
         
         try:
-            # Convert document using Docling
+            # Convert document using Docling (v2.43.0 simplified API)
             print("🚀 DEBUG: Converting document with Docling...")
-            result = self.converter.convert(file_path)
-            document = result.document
+            conversion_results = list(self.converter.convert(file_path))
+            
+            if not conversion_results:
+                print("🚀 DEBUG: No conversion results")
+                return []
+            
+            # Get the document from conversion results (v2.43.0 returns tuples)
+            document = None
+            for result_tuple in conversion_results:
+                if isinstance(result_tuple, tuple) and len(result_tuple) == 2:
+                    key, value = result_tuple
+                    if key == 'document':
+                        document = value
+                        break
+            
+            if not document:
+                print("🚀 DEBUG: Document not found in conversion results")
+                return []
             
             print(f"🚀 DEBUG: Document converted successfully")
-            print(f"  Pages: {len(document.pages) if hasattr(document, 'pages') else 'N/A'}")
-            print(f"  Elements: {len(document.body.elements) if hasattr(document, 'body') and hasattr(document.body, 'elements') else 'N/A'}")
+            print(f"  Document type: {type(document)}")
+            print(f"  Tables: {len(document.tables) if hasattr(document, 'tables') else 'N/A'}")
+            print(f"  Main text segments: {len(document.main_text) if hasattr(document, 'main_text') else 'N/A'}")
             
-            # Extract tables from document structure
-            for element_idx, element in enumerate(document.body.elements):
-                print(f"🚀 DEBUG: Processing element {element_idx}: {type(element).__name__}")
+            # Extract tables directly from document.tables (Docling v2.43.0)
+            if hasattr(document, 'tables') and document.tables:
+                print(f"🚀 DEBUG: Found {len(document.tables)} tables in document")
                 
-                # Check if element is a table
-                if hasattr(element, 'element_type') and 'table' in str(element.element_type).lower():
-                    print(f"🚀 DEBUG: Found table element {element_idx}")
+                for table_idx, table in enumerate(document.tables):
+                    print(f"🚀 DEBUG: Processing table {table_idx}: {type(table).__name__}")
                     
-                    # Extract table data from Docling element
-                    table_data = self._extract_docling_table_data(element, element_idx + 1)
+                    # Extract table data using Docling v2.43.0 API
+                    table_data = self._extract_docling_table_data_v2(table, table_idx + 1)
                     
                     if table_data:
-                        print(f"🚀 DEBUG: Successfully extracted table {element_idx + 1}")
+                        print(f"🚀 DEBUG: Successfully extracted table {table_idx + 1}")
                         tables.append(table_data)
                     else:
-                        print(f"🚀 DEBUG: Failed to extract data from table {element_idx + 1}")
-                
-                # Also check for table-like structures in text elements
-                elif hasattr(element, 'text') and element.text:
-                    if self._detect_table_in_text(element.text):
-                        print(f"🚀 DEBUG: Found table-like text in element {element_idx}")
-                        
-                        # Try to parse table from text
-                        table_data = self._parse_table_from_text(element.text, element_idx + 1)
-                        if table_data:
-                            print(f"🚀 DEBUG: Successfully parsed table from text element {element_idx + 1}")
-                            tables.append(table_data)
+                        print(f"🚀 DEBUG: Failed to extract data from table {table_idx + 1}")
+            
+            # Also check main_text for table-like structures
+            if hasattr(document, 'main_text') and document.main_text:
+                for text_idx, text_obj in enumerate(document.main_text):
+                    if hasattr(text_obj, 'text') and text_obj.text:
+                        if self._detect_table_in_text(text_obj.text):
+                            print(f"🚀 DEBUG: Found table-like text in segment {text_idx}")
+                            
+                            # Try to parse table from text
+                            table_data = self._parse_table_from_text(text_obj.text, len(tables) + 1)
+                            if table_data:
+                                print(f"🚀 DEBUG: Successfully parsed table from text element {text_idx + 1}")
+                                tables.append(table_data)
             
             print(f"🚀 DEBUG: Docling extraction completed. Found {len(tables)} tables")
             return tables
@@ -406,6 +514,62 @@ class DoclingTableExtractor:
             return False
         
         return True
+    
+    def _extract_docling_table_data_v2(self, table, table_number: int) -> Optional[Dict[str, Any]]:
+        """Extract table data from Docling v2.43.0 Table object"""
+        print(f"\n🚀 DEBUG: _extract_docling_table_data_v2 for table {table_number}")
+        
+        try:
+            # Use the export_to_dataframe method from Docling v2.43.0
+            if hasattr(table, 'export_to_dataframe'):
+                print("🚀 DEBUG: Using export_to_dataframe method")
+                df = table.export_to_dataframe()
+                
+                if df is not None and not df.empty:
+                    print(f"🚀 DEBUG: Successfully got DataFrame with shape {df.shape}")
+                    
+                    # Clean the DataFrame
+                    df = self._clean_docling_dataframe(df)
+                    
+                    if df.empty or not self._validate_dataframe_structure(df):
+                        print("🚀 DEBUG: DataFrame validation failed")
+                        return None
+                    
+                    result = {
+                        'data': df,
+                        'page_number': None,  # Docling v2.43.0 provides page info separately
+                        'slide_number': None,
+                        'table_number': table_number,
+                        'bbox': None,
+                        'extraction_method': 'docling_v2.43.0',
+                        'confidence': 0.95,  # High confidence for Docling extraction
+                        'docling_version': '2.43.0'
+                    }
+                    
+                    print(f"🚀 DEBUG: Successfully extracted table {table_number} with Docling v2.43.0")
+                    return result
+                else:
+                    print("🚀 DEBUG: export_to_dataframe returned empty DataFrame")
+            
+            # Fallback: use text representation if available
+            elif hasattr(table, 'text') and table.text:
+                print("🚀 DEBUG: Fallback to text parsing")
+                table_data = self._parse_table_text(table.text)
+                
+                if table_data and self._validate_docling_table(table_data):
+                    processed_table = self._process_docling_table(table_data, table_number)
+                    if processed_table:
+                        processed_table['extraction_method'] = 'docling_v2.43.0_text'
+                        processed_table['docling_version'] = '2.43.0'
+                        return processed_table
+            
+            print("🚀 DEBUG: No extractable table data found")
+            return None
+            
+        except Exception as e:
+            print(f"🚀 DEBUG: Error extracting Docling v2.43.0 table data: {e}")
+            logger.warning(f"Failed to extract Docling v2.43.0 table data: {e}")
+            return None
     
     def _detect_table_in_text(self, text: str) -> bool:
         """Detect if text contains table-like structures"""

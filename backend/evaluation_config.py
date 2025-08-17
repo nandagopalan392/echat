@@ -40,6 +40,22 @@ class EvaluationConfig:
     ENABLE_BACKGROUND_EVALUATION = os.getenv("ENABLE_BACKGROUND_EVALUATION", "true").lower() == "true"
     MAX_EVALUATION_HISTORY = int(os.getenv("MAX_EVALUATION_HISTORY", "1000"))
     
+    # Celery and Redis settings
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/1")
+    
+    # WebSocket settings
+    WEBSOCKET_TIMEOUT = int(os.getenv("WEBSOCKET_TIMEOUT", "300"))  # 5 minutes
+    WEBSOCKET_PING_INTERVAL = int(os.getenv("WEBSOCKET_PING_INTERVAL", "30"))  # 30 seconds
+    
+    # Task execution settings
+    EVALUATION_TASK_TIMEOUT = int(os.getenv("EVALUATION_TASK_TIMEOUT", "600"))  # 10 minutes
+    BATCH_EVALUATION_MAX_SIZE = int(os.getenv("BATCH_EVALUATION_MAX_SIZE", "100"))
+    
+    # Result caching settings
+    RESULT_CACHE_TIMEOUT = int(os.getenv("RESULT_CACHE_TIMEOUT", "3600"))  # 1 hour
+    
     # Evaluation prompts customization
     CUSTOM_PROMPTS_ENABLED = os.getenv("CUSTOM_PROMPTS_ENABLED", "false").lower() == "true"
     
@@ -58,7 +74,15 @@ class EvaluationConfig:
             "quality_thresholds": cls.QUALITY_THRESHOLDS,
             "enable_background_evaluation": cls.ENABLE_BACKGROUND_EVALUATION,
             "max_evaluation_history": cls.MAX_EVALUATION_HISTORY,
-            "custom_prompts_enabled": cls.CUSTOM_PROMPTS_ENABLED
+            "custom_prompts_enabled": cls.CUSTOM_PROMPTS_ENABLED,
+            "celery_broker_url": cls.CELERY_BROKER_URL,
+            "celery_result_backend": cls.CELERY_RESULT_BACKEND,
+            "redis_url": cls.REDIS_URL,
+            "websocket_timeout": cls.WEBSOCKET_TIMEOUT,
+            "websocket_ping_interval": cls.WEBSOCKET_PING_INTERVAL,
+            "evaluation_task_timeout": cls.EVALUATION_TASK_TIMEOUT,
+            "batch_evaluation_max_size": cls.BATCH_EVALUATION_MAX_SIZE,
+            "result_cache_timeout": cls.RESULT_CACHE_TIMEOUT
         }
     
     @classmethod

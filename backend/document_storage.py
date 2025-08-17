@@ -141,7 +141,15 @@ class DocumentStorageService:
                 processor = get_document_processor()
                 
                 # Extract text using enhanced document processor
-                documents = processor.process_document(temp_file_path)
+                result = processor.process_document(temp_file_path)
+                
+                # Handle ChunkingResult or direct documents list
+                if hasattr(result, 'chunks'):
+                    documents = result.chunks
+                elif hasattr(result, '__iter__'):
+                    documents = result
+                else:
+                    documents = [result]  # Single document case
                 
                 # Combine all text content
                 combined_text = []

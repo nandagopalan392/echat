@@ -397,70 +397,7 @@ export const api = {
     },
 
     // Create new chat session
-    createSession: async () => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/sessions`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader(),
-                },
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.detail || 'Create session failed');
-            }
-
-            return data;
-        } catch (error) {
-            console.error('Create session error:', error);
-            throw error;
-        }
-    },
-
-    // Delete chat session
-    deleteSession: async (sessionId) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, {
-                method: 'DELETE',
-                headers: getAuthHeader(),
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.detail || 'Delete session failed');
-            }
-
-            return data;
-        } catch (error) {
-            console.error('Delete session error:', error);
-            throw error;
-        }
-    },
-
     // Get chat history for a session
-    getChatHistory: async (sessionId) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}/history`, {
-                headers: getAuthHeader(),
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.detail || 'Get chat history failed');
-            }
-
-            return data;
-        } catch (error) {
-            console.error('Get chat history error:', error);
-            throw error;
-        }
-    },
-
     // Get chat messages for a session
     getChatMessages: async (sessionId) => {
         try {
@@ -1109,72 +1046,6 @@ export const api = {
 
     // Note: getUserStats already exists above
 
-    // Embedding model management (deprecated - use get('/api/models/available') instead)
-    getEmbeddingModels: async () => {
-        console.warn('getEmbeddingModels is deprecated. Use get("/api/models/available") instead.');
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/models/available`, {
-                method: 'GET',
-                headers: {
-                    ...getAuthHeader()
-                }
-            });
-            
-            if (!response.ok) {
-                throw new Error('Failed to fetch models');
-            }
-            
-            const data = await response.json();
-            return {
-                models: data.embedding_models || []
-            };
-        } catch (error) {
-            console.error('Get embedding models error:', error);
-            throw error;
-        }
-    },
-
-    switchEmbeddingModel: async (modelName) => {
-        console.warn('switchEmbeddingModel is deprecated. Use post("/api/models/settings") instead.');
-        try {
-            // Get current models first
-            const currentResponse = await fetch(`${API_BASE_URL}/api/models/current`, {
-                method: 'GET',
-                headers: {
-                    ...getAuthHeader()
-                }
-            });
-            
-            if (!currentResponse.ok) {
-                throw new Error('Failed to get current models');
-            }
-            
-            const currentModels = await currentResponse.json();
-            
-            // Update with new embedding model
-            const response = await fetch(`${API_BASE_URL}/api/models/settings`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                },
-                body: JSON.stringify({
-                    llm: currentModels.llm,
-                    embedding: modelName
-                })
-            });
-            
-            if (!response.ok) {
-                throw new Error('Failed to switch embedding model');
-            }
-            
-            return await response.json();
-        } catch (error) {
-            console.error('Switch embedding model error:', error);
-            throw error;
-        }
-    },
-
     // Get chunking methods and configurations
     getChunkingMethods: async () => {
         try {
@@ -1388,6 +1259,231 @@ export const checkFileExists = async (filename, hash) => {
 // ========================================
 
 export const evaluationApi = {
+    // ========================================
+    // BACKGROUND EVALUATION API ENDPOINTS
+    // ========================================
+    
+    // Start async evaluation
+    startAsyncEvaluation: async (evaluationData) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/async`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(evaluationData)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to start async evaluation: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error starting async evaluation:', error);
+            throw error;
+        }
+    },
+
+    // Start dataset evaluation (new method)
+    startDatasetEvaluation: async (datasetEvaluationData) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/dataset`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(datasetEvaluationData)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to start dataset evaluation: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error starting dataset evaluation:', error);
+            throw error;
+        }
+    },
+
+    // Start batch evaluation
+    startBatchEvaluation: async (batchData) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/batch`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(batchData)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to start batch evaluation: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error starting batch evaluation:', error);
+            throw error;
+        }
+    },
+
+    // Get task status
+    getTaskStatus: async (taskId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/status/${taskId}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get task status: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting task status:', error);
+            throw error;
+        }
+    },
+
+    // Cancel evaluation task
+    cancelTask: async (taskId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/task/${taskId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to cancel task: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error canceling task:', error);
+            throw error;
+        }
+    },
+
+    // Get queue status
+    getQueueStatus: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/queue/status`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get queue status: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting queue status:', error);
+            throw error;
+        }
+    },
+
+    // Get recent evaluation results
+    getRecentResults: async (limit = 10, taskType = null) => {
+        console.log('🌐 [DEBUG] evaluationApi.getRecentResults() called with limit:', limit, 'taskType:', taskType);
+        try {
+            let url = `${API_BASE_URL}/api/evaluation/evaluate/results/recent?limit=${limit}`;
+            if (taskType) {
+                url += `&task_type=${taskType}`;
+            }
+            
+            console.log('🌐 [DEBUG] Making fetch request to:', url);
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            console.log('🌐 [DEBUG] Response status:', response.status, response.ok);
+            if (!response.ok) {
+                throw new Error(`Failed to get recent results: ${response.status}`);
+            }
+
+            const data = await response.json();
+            console.log('✅ [DEBUG] evaluationApi.getRecentResults() successful, data:', data);
+            return data;
+        } catch (error) {
+            console.error('❌ [DEBUG] Error in evaluationApi.getRecentResults():', error);
+            throw error;
+        }
+    },
+
+    // Get detailed task status (for polling fallback)
+    getDetailedTaskStatus: async (taskId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/status/${taskId}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to get detailed task status: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting detailed task status:', error);
+            throw error;
+        }
+    },
+
+    // Create WebSocket connection for real-time updates (Legacy - use WebSocketService instead)
+    createWebSocketConnection: (taskId, onMessage, onError, onClose) => {
+        const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/api/evaluation/ws/evaluation/${taskId}`;
+        const ws = new WebSocket(wsUrl);
+        
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                onMessage(data);
+            } catch (error) {
+                console.error('Error parsing WebSocket message:', error);
+                onError(error);
+            }
+        };
+        
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            onError(error);
+        };
+        
+        ws.onclose = () => {
+            console.log('WebSocket connection closed');
+            onClose();
+        };
+        
+        return ws;
+    },
+
+    // ========================================
+    // LEGACY EVALUATION API ENDPOINTS
+    // ========================================
+
     // Get current evaluation metrics
     getMetrics: async (timeframe = '7d') => {
         try {
@@ -1498,20 +1594,57 @@ export const evaluationApi = {
         }
     },
 
-    // Create evaluation dataset
+    // Create evaluation dataset using background task
     createDataset: async (datasetConfig) => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets`, {
+            console.log('Creating dataset with config:', datasetConfig);
+            
+            const requestBody = {
+                name: datasetConfig.name,
+                description: datasetConfig.description,
+                document_ids: datasetConfig.document_ids,
+                num_questions_per_doc: datasetConfig.num_questions_per_doc || 3,
+                model_name: datasetConfig.model_name || 'llama3',
+                difficulty_levels: datasetConfig.difficulty_levels || ['easy', 'medium', 'hard'],
+                user_id: datasetConfig.user_id || 'admin'
+            };
+            
+            console.log('Request body:', requestBody);
+            console.log('Request body types:', {
+                name: typeof requestBody.name,
+                description: typeof requestBody.description,
+                document_ids: Array.isArray(requestBody.document_ids) ? 'array' : typeof requestBody.document_ids,
+                document_ids_content: requestBody.document_ids,
+                num_questions_per_doc: typeof requestBody.num_questions_per_doc,
+                model_name: typeof requestBody.model_name,
+                difficulty_levels: Array.isArray(requestBody.difficulty_levels) ? 'array' : typeof requestBody.difficulty_levels,
+                user_id: typeof requestBody.user_id
+            });
+            
+            const response = await fetch(`${API_BASE_URL}/api/evaluation/create/dataset`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     ...getAuthHeader()
                 },
-                body: JSON.stringify(datasetConfig)
+                body: JSON.stringify(requestBody)
             });
 
             if (!response.ok) {
-                throw new Error(`Failed to create dataset: ${response.status}`);
+                // Get detailed error information for 422 errors
+                let errorDetail = `Failed to create dataset: ${response.status}`;
+                try {
+                    const errorData = await response.json();
+                    console.error('API error response:', errorData);
+                    if (errorData.detail) {
+                        errorDetail = Array.isArray(errorData.detail) 
+                            ? errorData.detail.map(e => e.msg || e.message || e).join(', ')
+                            : errorData.detail;
+                    }
+                } catch (e) {
+                    console.error('Error parsing error response:', e);
+                }
+                throw new Error(errorDetail);
             }
 
             return await response.json();
@@ -1638,6 +1771,7 @@ export const evaluationApi = {
 
     // Get evaluation results
     getResults: async (modelFilter = null, datasetFilter = null) => {
+        console.log('🌐 [DEBUG] evaluationApi.getResults() called with filters:', { modelFilter, datasetFilter });
         try {
             let url = `${API_BASE_URL}/api/evaluation/results`;
             const params = new URLSearchParams();
@@ -1649,6 +1783,7 @@ export const evaluationApi = {
                 url += `?${params.toString()}`;
             }
 
+            console.log('🌐 [DEBUG] Making fetch request to:', url);
             const response = await fetch(url, {
                 method: 'GET',
                 headers: {
@@ -1657,13 +1792,16 @@ export const evaluationApi = {
                 }
             });
 
+            console.log('🌐 [DEBUG] Response status:', response.status, response.ok);
             if (!response.ok) {
                 throw new Error(`Failed to get evaluation results: ${response.status}`);
             }
 
-            return await response.json();
+            const data = await response.json();
+            console.log('✅ [DEBUG] evaluationApi.getResults() successful, data:', data);
+            return data;
         } catch (error) {
-            console.error('Error getting evaluation results:', error);
+            console.error('❌ [DEBUG] Error in evaluationApi.getResults():', error);
             throw error;
         }
     }
