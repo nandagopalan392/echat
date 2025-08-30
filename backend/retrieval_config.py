@@ -20,6 +20,7 @@ class RetrievalConfig:
     keyword_similarity_weight: float = 0.7  # Weight of keyword similarity (0.0-1.0)
     reranker_enabled: bool = False  # Whether to use reranker model
     reranker_model: str = ""  # Name of the reranker model
+    reranker_provider: str = "ollama"  # Provider for the reranker model (ollama, huggingface)
     max_chunks: int = 5  # Maximum number of chunks to retrieve
     search_type: str = "similarity"  # Type of search (similarity, mmr, etc.)
     auto_merging_enabled: bool = False  # Whether to enable auto merging retrieval
@@ -32,6 +33,7 @@ class RetrievalConfig:
             'keyword_similarity_weight': self.keyword_similarity_weight,
             'reranker_enabled': self.reranker_enabled,
             'reranker_model': self.reranker_model,
+            'reranker_provider': self.reranker_provider,
             'max_chunks': self.max_chunks,
             'search_type': self.search_type,
             'auto_merging_enabled': self.auto_merging_enabled,
@@ -88,10 +90,21 @@ class RetrievalConfig:
                         validated_data[field] = bool(value)
         
         # Validate string fields
-        string_fields = ['reranker_model', 'search_type']
+        string_fields = ['reranker_model', 'reranker_provider', 'search_type']
         for field in string_fields:
             if field in validated_data and not isinstance(validated_data[field], str):
                 validated_data[field] = str(validated_data[field]) if validated_data[field] is not None else ""
+        
+        # Set default for reranker_provider if not provided
+        if 'reranker_provider' not in validated_data or not validated_data['reranker_provider']:
+            validated_data['reranker_provider'] = 'ollama'
+        
+        # Validate reranker_provider against allowed values
+        valid_providers = ['ollama', 'huggingface']
+        if 'reranker_provider' in validated_data:
+            if validated_data['reranker_provider'] not in valid_providers:
+                logger.warning(f"Invalid reranker_provider: {validated_data['reranker_provider']}, defaulting to 'ollama'")
+                validated_data['reranker_provider'] = 'ollama'
         
         # Validate search_type against allowed values
         valid_search_types = ['similarity', 'mmr', 'similarity_score_threshold', 'hybrid']
@@ -124,6 +137,7 @@ class RetrievalConfigManager:
             keyword_similarity_weight=0.7,
             reranker_enabled=False,
             reranker_model="",
+            reranker_provider="ollama",
             max_chunks=5,
             search_type="similarity",
             auto_merging_enabled=False,

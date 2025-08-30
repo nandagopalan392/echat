@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import GatedModelDialog from '../components/GatedModelDialog';
 import {
     Box,
     Drawer,
@@ -12,14 +13,41 @@ import {
     IconButton,
     Divider,
     ThemeProvider,
+    Card,
+    CardContent,
+    Grid,
+    Chip,
+    CircularProgress,
+    Avatar,
+    FormControl,
+    InputLabel,
+    Select,
+    MenuItem,
+    FormControlLabel,
+    Switch,
+    TextField,
+    Slider,
+    Button,
+    Dialog,
+    DialogTitle,
+    DialogContent,
+    DialogActions,
+    Alert,
+    AlertTitle
 } from '@mui/material';
 import {
     ArrowBack,
     Computer as ComputerIcon,
     Memory as MemoryIcon,
     Settings as SettingsIcon,
+    CloudDownload as CloudDownloadIcon,
+    Hub as HubIcon,
+    CheckCircle as CheckCircleIcon,
+    EmojiObjects as EmojiObjectsIcon
 } from '@mui/icons-material';
 import { theme } from '../theme';
+import ollamaIcon from '../assets/ollama.svg';
+import huggingfaceIcon from '../assets/huggingface.svg';
 
 const ModelSettingsPage = () => {
     const navigate = useNavigate();
@@ -38,11 +66,21 @@ const ModelSettingsPage = () => {
     const [showEmbeddingWarning, setShowEmbeddingWarning] = useState(false);
     const [embeddingWarningData, setEmbeddingWarningData] = useState(null);
     
+    // Gated model dialog state
+    const [showGatedModelDialog, setShowGatedModelDialog] = useState(false);
+    const [gatedModelInfo, setGatedModelInfo] = useState(null);
+    
     // Model data
     const [availableModels, setAvailableModels] = useState([]);
     const [embeddingModels, setEmbeddingModels] = useState([]);
     const [currentEmbeddingModel, setCurrentEmbeddingModel] = useState('');
     const [currentLLMModel, setCurrentLLMModel] = useState('');
+    
+    // Provider state
+    const [providers, setProviders] = useState({});
+    const [selectedProvider, setSelectedProvider] = useState('ollama');
+    const [selectedEmbeddingProvider, setSelectedEmbeddingProvider] = useState('ollama');
+    const [isLoadingProviders, setIsLoadingProviders] = useState(false);
     
     // Settings state
     const [settings, setSettings] = useState({
@@ -56,10 +94,63 @@ const ModelSettingsPage = () => {
     });
 
     useEffect(() => {
+        console.log('🔄 ModelSettingsPage useEffect triggered');
+        loadProviders();
         loadModelSettings();
         loadAvailableModels();
         loadEmbeddingModels();
     }, []);
+
+    // Reload models when provider changes
+    useEffect(() => {
+        if (selectedProvider) {
+            console.log(`🔄 Provider changed to: ${selectedProvider}, reloading models...`);
+            // Clear current selections when switching providers
+            setSettings(prev => ({ ...prev, model: '' }));
+            setCurrentLLMModel('');
+            setCurrentEmbeddingModel('');
+            // Reload embedding models with new provider filter
+            loadEmbeddingModels();
+        }
+    }, [selectedProvider]);
+
+    // Reload embedding models when embedding provider changes
+    useEffect(() => {
+        if (selectedEmbeddingProvider) {
+            console.log(`🔄 Embedding provider changed to: ${selectedEmbeddingProvider}, reloading embedding models...`);
+            // Clear current embedding model selection when switching providers
+            setCurrentEmbeddingModel('');
+            // Reload embedding models with new provider filter
+            loadEmbeddingModels();
+        }
+    }, [selectedEmbeddingProvider]);
+
+    const loadProviders = async () => {
+        setIsLoadingProviders(true);
+        try {
+            console.log('🔄 Loading providers...');
+            const response = await api.get('/api/models/providers');
+            console.log('📡 Providers API response:', response);
+            
+            if (response && response.providers) {
+                console.log('✅ Setting providers:', response.providers);
+                setProviders(response.providers);
+                
+                // Only set default provider if none selected (let loadModelSettings handle DB provider)
+                if (!selectedProvider && Object.keys(response.providers).length > 0) {
+                    console.log('🔄 Setting default provider to first available');
+                    setSelectedProvider(Object.keys(response.providers)[0]);
+                }
+            } else {
+                console.log('❌ No providers in response:', response);
+            }
+        } catch (err) {
+            console.error('❌ Error loading providers:', err);
+            console.log('❌ Provider loading error details:', err.response || err);
+        } finally {
+            setIsLoadingProviders(false);
+        }
+    };
 
     const loadModelSettings = async () => {
         try {
@@ -67,6 +158,23 @@ const ModelSettingsPage = () => {
             if (response) {
                 setCurrentEmbeddingModel(response.embedding);
                 setCurrentLLMModel(response.llm);
+                
+                // Set provider from the database response
+                if (response.provider) {
+                    console.log(`🔄 Setting provider from model settings: ${response.provider}`);
+                    setSelectedProvider(response.provider);
+                }
+                
+                // Set embedding provider from the database response or detect from embedding model
+                if (response.embedding_provider) {
+                    console.log(`🔄 Setting embedding provider from model settings: ${response.embedding_provider}`);
+                    setSelectedEmbeddingProvider(response.embedding_provider);
+                } else if (response.embedding) {
+                    // Auto-detect embedding provider from model name
+                    const detectedProvider = response.embedding.includes('/') ? 'huggingface' : 'ollama';
+                    console.log(`🔄 Auto-detected embedding provider from model name: ${detectedProvider}`);
+                    setSelectedEmbeddingProvider(detectedProvider);
+                }
                 
                 // Load parameters if available
                 if (response.parameters) {
@@ -110,15 +218,106 @@ const ModelSettingsPage = () => {
         }
     };
 
+    // Filter models by provider and type
+    const getFilteredModels = (type = 'llm', providerKey = null) => {
+        // Use providerKey parameter, or default to selected provider for LLM or selectedEmbeddingProvider for embedding
+        const targetProvider = providerKey || (type === 'embedding' ? selectedEmbeddingProvider : selectedProvider);
+        
+        if (targetProvider && providers[targetProvider] && providers[targetProvider].models) {
+            console.log(`🔍 Filtering ${type} models for provider ${targetProvider}:`, providers[targetProvider].models);
+            
+            const providerModels = providers[targetProvider].models;
+            
+            // Add defensive check for providerModels
+            if (!Array.isArray(providerModels)) {
+                console.error('⚠️ Provider models is not an array:', providerModels);
+                return [];
+            }
+            
+            return providerModels.filter(model => {
+                // Add defensive check for model
+                if (!model) {
+                    console.warn('⚠️ Found null/undefined model in provider models');
+                    return false;
+                }
+                
+                // Handle both string format (old) and object format (new)
+                const modelName = typeof model === 'string' ? model : model.name;
+                const modelType = typeof model === 'object' && model.type ? model.type : null;
+                
+                if (!modelName) {
+                    console.warn('⚠️ Model has no name:', model);
+                    return false;
+                }
+                
+                // If model has explicit type metadata, use it
+                if (modelType) {
+                    return modelType === type;
+                }
+                
+                // Fallback to name-based detection for backward compatibility
+                const name = modelName.toLowerCase();
+                
+                // Enhanced embedding model detection
+                const isEmbeddingModel = name.includes('embed') || 
+                                       name.includes('bge') ||
+                                       name.includes('minilm') ||
+                                       name.includes('all-minilm') ||
+                                       name.includes('nomic') ||
+                                       name.includes('e5-') ||
+                                       name.includes('sentence') ||
+                                       name.includes('text-embedding') ||
+                                       name.includes('rerank');
+                
+                if (type === 'llm') {
+                    return !isEmbeddingModel;
+                } else if (type === 'embedding') {
+                    return isEmbeddingModel;
+                }
+                return true;
+            }).map(model => {
+                // Handle both string and object formats
+                const modelName = typeof model === 'string' ? model : model.name;
+                return {
+                    name: modelName,
+                    category: type,
+                    provider: targetProvider,
+                    size: typeof model === 'object' ? model.size || 'Unknown' : 'Unknown',
+                    source: 'provider',
+                    downloads: typeof model === 'object' ? model.downloads : undefined
+                };
+            });
+        }
+        
+        // Fallback to original logic
+        return (availableModels || []).filter(model => {
+            if (model.category) {
+                return model.category === type;
+            }
+            
+            const name = model.name.toLowerCase();
+            const isEmbeddingModel = name.includes('embed') || 
+                                   name.includes('bge') ||
+                                   name.includes('minilm') ||
+                                   name.includes('all-minilm') ||
+                                   name.includes('nomic') ||
+                                   name.includes('e5-') ||
+                                   name.includes('sentence') ||
+                                   name.includes('text-embedding');
+            
+            if (type === 'llm') {
+                return !isEmbeddingModel && !name.includes('rerank');
+            } else if (type === 'embedding') {
+                return isEmbeddingModel;
+            }
+            return true;
+        });
+    };
+
     const loadEmbeddingModels = async () => {
         try {
-            const response = await api.get('/api/models/available');
-            console.log('Full models response:', response);
-            
-            // Filter embedding models from the unified response
-            const embeddingModels = (response.models || []).filter(model => 
-                model.category === 'embedding'
-            );
+            // Use filtered models based on provider selection
+            const embeddingModels = getFilteredModels('embedding');
             
             console.log('Filtered embedding models:', embeddingModels);
             setEmbeddingModels(embeddingModels);
@@ -143,6 +342,7 @@ const ModelSettingsPage = () => {
             const payload = {
                 llm: settings.model,
                 embedding: currentEmbeddingModel,
+                provider: selectedProvider, // Include provider information
                 // Include language model parameters
                 parameters: {
                     temperature: settings.temperature,
@@ -225,6 +425,63 @@ const ModelSettingsPage = () => {
             // Use the simpler endpoint that doesn't require complex validation
             const response = await api.post('/api/models/simple-settings', payload);
             
+            console.log('🔍 SAVE SETTINGS RESPONSE:', response);
+            
+            // Check if the response contains a gated model error (even in success response)
+            if (response && typeof response === 'object') {
+                // Check all string values in the response for gated model errors
+                const responseStr = JSON.stringify(response);
+                console.log('🔍 RESPONSE STRING:', responseStr);
+                if (responseStr.includes('GATED_MODEL_ERROR:')) {
+                    try {
+                        // Find the start of the JSON after "GATED_MODEL_ERROR:"
+                        const startMarker = 'GATED_MODEL_ERROR:';
+                        const startIndex = responseStr.indexOf(startMarker) + startMarker.length;
+                        
+                        // Find the matching closing brace by counting braces
+                        let braceCount = 0;
+                        let endIndex = startIndex;
+                        let foundStart = false;
+                        
+                        for (let i = startIndex; i < responseStr.length; i++) {
+                            if (responseStr[i] === '{') {
+                                if (!foundStart) foundStart = true;
+                                braceCount++;
+                            } else if (responseStr[i] === '}') {
+                                braceCount--;
+                                if (foundStart && braceCount === 0) {
+                                    endIndex = i + 1;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (foundStart && braceCount === 0) {
+                            let jsonString = responseStr.substring(startIndex, endIndex);
+                            console.log('🔍 EXTRACTED JSON STRING:', jsonString);
+                            
+                            // Replace escaped quotes with regular quotes - handle double escaping
+                            jsonString = jsonString.replace(/\\\\"/g, '"').replace(/\\"/g, '"');
+                            console.log('🔍 UNESCAPED JSON STRING:', jsonString);
+                            
+                            const gatedModelData = JSON.parse(jsonString);
+                            
+                            console.log('🚨 Gated model error detected in success response:', gatedModelData);
+                            
+                            // Show gated model dialog
+                            setGatedModelInfo(gatedModelData);
+                            setShowGatedModelDialog(true);
+                            setDownloading(false);
+                            setDownloadProgress('');
+                            return;
+                        }
+                    } catch (parseError) {
+                        console.error('Failed to parse gated model error from success response:', parseError);
+                        // Fall through to regular success handling
+                    }
+                }
+            }
+            
             // Update current model states
             setCurrentLLMModel(payload.llm);
             setCurrentEmbeddingModel(payload.embedding);
@@ -255,6 +512,24 @@ const ModelSettingsPage = () => {
                 
                 if (typeof errorDetail === 'string') {
                     errorMessage = errorDetail;
+                    
+                    // Check for gated model error
+                    if (errorMessage.includes('GATED_MODEL_ERROR:')) {
+                        try {
+                            const gatedErrorJson = errorMessage.split('GATED_MODEL_ERROR:')[1];
+                            const gatedModelData = JSON.parse(gatedErrorJson);
+                            
+                            console.log('Gated model error detected:', gatedModelData);
+                            
+                            // Show gated model dialog
+                            setGatedModelInfo(gatedModelData);
+                            setShowGatedModelDialog(true);
+                            return;
+                        } catch (parseError) {
+                            console.error('Failed to parse gated model error:', parseError);
+                            // Fall through to regular error handling
+                        }
+                    }
                 } else {
                     errorMessage = JSON.stringify(errorDetail);
                 }
@@ -283,6 +558,79 @@ const ModelSettingsPage = () => {
             console.log('Calling /api/models/simple-settings with payload:', payload);
             const response = await api.post('/api/models/simple-settings', payload);
             
+            // Check if the response contains a gated model error (even in success response)
+            if (response && typeof response === 'object') {
+                // Check all string values in the response for gated model errors
+                const responseStr = JSON.stringify(response);
+                if (responseStr.includes('GATED_MODEL_ERROR:')) {
+                    try {
+                        // Find the start of the JSON after GATED_MODEL_ERROR:
+                        const startIndex = responseStr.indexOf('GATED_MODEL_ERROR:') + 'GATED_MODEL_ERROR:'.length;
+                        const jsonStart = responseStr.indexOf('{', startIndex);
+                        
+                        if (jsonStart !== -1) {
+                            // Parse JSON by counting braces to find the end
+                            let braceCount = 0;
+                            let jsonEnd = jsonStart;
+                            let inString = false;
+                            let escaped = false;
+                            
+                            for (let i = jsonStart; i < responseStr.length; i++) {
+                                const char = responseStr[i];
+                                
+                                if (escaped) {
+                                    escaped = false;
+                                    continue;
+                                }
+                                
+                                if (char === '\\') {
+                                    escaped = true;
+                                    continue;
+                                }
+                                
+                                if (char === '"') {
+                                    inString = !inString;
+                                    continue;
+                                }
+                                
+                                if (!inString) {
+                                    if (char === '{') {
+                                        braceCount++;
+                                    } else if (char === '}') {
+                                        braceCount--;
+                                        if (braceCount === 0) {
+                                            jsonEnd = i + 1;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            let jsonString = responseStr.substring(jsonStart, jsonEnd);
+                            console.log('🔍 EXTRACTED JSON STRING (proceedWithDownload):', jsonString);
+                            
+                            // Handle double-escaped JSON strings
+                            jsonString = jsonString.replace(/\\"/g, '"').replace(/\\\\"/g, '\\"');
+                            console.log('🔍 UNESCAPED JSON STRING (proceedWithDownload):', jsonString);
+                            
+                            const gatedModelData = JSON.parse(jsonString);
+                            
+                            console.log('Gated model error detected in proceedWithDownload success response:', gatedModelData);
+                            
+                            // Show gated model dialog
+                            setGatedModelInfo(gatedModelData);
+                            setShowGatedModelDialog(true);
+                            setDownloading(false);
+                            setDownloadProgress('');
+                            return;
+                        }
+                    } catch (parseError) {
+                        console.error('Failed to parse gated model error from proceedWithDownload success response:', parseError);
+                        // Fall through to regular success handling
+                    }
+                }
+            }
+            
             if (response && response.success) {
                 setCurrentLLMModel(payload.llm);
                 setCurrentEmbeddingModel(payload.embedding);
@@ -308,6 +656,24 @@ const ModelSettingsPage = () => {
                 
                 if (typeof errorDetail === 'string') {
                     errorMessage = errorDetail;
+                    
+                    // Check for gated model error
+                    if (errorMessage.includes('GATED_MODEL_ERROR:')) {
+                        try {
+                            const gatedErrorJson = errorMessage.split('GATED_MODEL_ERROR:')[1];
+                            const gatedModelData = JSON.parse(gatedErrorJson);
+                            
+                            console.log('Gated model error detected in proceedWithDownload:', gatedModelData);
+                            
+                            // Show gated model dialog
+                            setGatedModelInfo(gatedModelData);
+                            setShowGatedModelDialog(true);
+                            return;
+                        } catch (parseError) {
+                            console.error('Failed to parse gated model error:', parseError);
+                            // Fall through to regular error handling
+                        }
+                    }
                 } else {
                     errorMessage = JSON.stringify(errorDetail);
                 }
@@ -321,6 +687,8 @@ const ModelSettingsPage = () => {
             setDownloadProgress('');
         }
     };
+
+
 
     const handleInputChange = (field, value) => {
         setSettings(prev => ({
@@ -362,7 +730,9 @@ const ModelSettingsPage = () => {
             // Update both models using the unified API
             await api.post('/api/models/settings', {
                 llm: currentLLM,
-                embedding: modelName
+                embedding: modelName,
+                provider: selectedProvider, // Include provider for LLM
+                embedding_provider: selectedEmbeddingProvider // Include provider for embedding
             });
             
             setCurrentEmbeddingModel(modelName);
@@ -379,8 +749,8 @@ const ModelSettingsPage = () => {
     // Helper function to extract model name from both string and object formats
     const getModelName = (model) => {
         if (typeof model === 'string') return model;
-        if (typeof model === 'object' && model && model.name) return model.name;
-        return '';
+        if (typeof model === 'object' && model && model.name) return String(model.name);
+        return 'unknown';
     };
 
     // Helper function to format model display name with size and parameters
@@ -431,7 +801,7 @@ const ModelSettingsPage = () => {
             }
         }
         
-        return `${displayName}${parameterInfo}${sizeInfo}`;
+        return `${displayName}${parameterInfo}${sizeInfo}` || 'Unknown Model';
     };
 
     const tabs = [
@@ -619,112 +989,187 @@ const ModelSettingsPage = () => {
 
                     {/* Content */}
                     <Box sx={{ flexGrow: 1, p: 3 }}>
-                        <div className="flex-1 p-6">
-                    {/* LLM Settings Tab */}
-                    {activeTab === 'llm' && (
+                        {/* LLM Settings Tab */}
+                        {activeTab === 'llm' && (
                         <div className="bg-white rounded-lg shadow">
+                            <div className="px-6 py-4 border-b border-gray-200">
+                                <h3 className="text-lg font-medium text-gray-900">Language Model Configuration</h3>
+                                <p className="mt-1 text-sm text-gray-500">Choose and configure the language model for chat responses</p>
+                            </div>
                             <div className="p-6">
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    {/* Model Selection */}
-                                    <div className="md:col-span-2">
-                                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                                            AI Model
-                                        </label>
-                                        
-                                        {/* Current Model Display */}
-                                        {currentLLMModel && (
-                                            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-                                                <h4 className="text-sm font-medium text-blue-900 mb-2">Currently Selected Model</h4>
-                                                <div className="flex items-center">
-                                                    <div className="flex-grow">
-                                                        <p className="text-lg font-semibold text-blue-800">{currentLLMModel}</p>
-                                                    </div>
+                                <div className="space-y-6">
+                                    {/* Current Model Display */}
+                                    {currentLLMModel && (
+                                        <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
+                                            <h4 className="text-sm font-medium text-blue-900 mb-2">Currently Selected Model</h4>
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <p className="text-lg font-semibold text-blue-800">{currentLLMModel}</p>
+                                                    <p className="text-sm text-blue-600">Active language model for chat responses</p>
                                                 </div>
+                                                <span className="inline-flex px-3 py-1 text-sm font-semibold rounded-full bg-green-100 text-green-800">
+                                                    Active
+                                                </span>
                                             </div>
-                                        )}
-                                        
-                                        <select
-                                            value={settings.model || ''}
-                                            onChange={(e) => handleInputChange('model', e.target.value)}
-                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                                        >
-                                            <option value="">Select a model</option>
-                                            {Array.isArray(availableModels) && availableModels
-                                                .filter(model => {
-                                                    if (typeof model === 'string') return true;
-                                                    return model && typeof model === 'object' && (!model.category || model.category !== 'embedding');
-                                                })
-                                                .map((model, index) => {
+                                        </div>
+                                    )}
+                                    
+                                    {/* Provider Selection for LLM Models */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-3">
+                                            Model Provider
+                                        </label>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            {/* Ollama Provider */}
+                                            <Card 
+                                                className={`cursor-pointer transition-all duration-200 ${
+                                                    selectedProvider === 'ollama' 
+                                                        ? 'ring-2 ring-indigo-500 bg-indigo-50' 
+                                                        : 'hover:shadow-md'
+                                                }`}
+                                                onClick={() => setSelectedProvider('ollama')}
+                                            >
+                                                <CardContent className="p-4">
+                                                    <div className="flex items-center space-x-3">
+                                                        <Avatar className="h-8 w-8">
+                                                            <img 
+                                                                src={ollamaIcon} 
+                                                                alt="Ollama" 
+                                                                className="h-8 w-8"
+                                                            />
+                                                        </Avatar>
+                                                        <div className="flex-1">
+                                                            <h3 className="text-sm font-medium text-gray-900">Ollama</h3>
+                                                            <p className="text-xs text-gray-500">Local models</p>
+                                                        </div>
+                                                        {selectedProvider === 'ollama' && (
+                                                            <CheckCircleIcon className="h-5 w-5 text-indigo-600" />
+                                                        )}
+                                                    </div>
+                                                </CardContent>
+                                            </Card>
+
+                                            {/* HuggingFace Provider */}
+                                            <Card 
+                                                className={`cursor-pointer transition-all duration-200 ${
+                                                    selectedProvider === 'huggingface' 
+                                                        ? 'ring-2 ring-indigo-500 bg-indigo-50' 
+                                                        : 'hover:shadow-md'
+                                                }`}
+                                                onClick={() => setSelectedProvider('huggingface')}
+                                            >
+                                                <CardContent className="p-4">
+                                                    <div className="flex items-center space-x-3">
+                                                        <Avatar className="h-8 w-8">
+                                                            <img 
+                                                                src={huggingfaceIcon} 
+                                                                alt="HuggingFace" 
+                                                                className="h-8 w-8"
+                                                            />
+                                                        </Avatar>
+                                                        <div className="flex-1">
+                                                            <h3 className="text-sm font-medium text-gray-900">HuggingFace</h3>
+                                                            <p className="text-xs text-gray-500">Cloud models</p>
+                                                        </div>
+                                                        {selectedProvider === 'huggingface' && (
+                                                            <CheckCircleIcon className="h-5 w-5 text-indigo-600" />
+                                                        )}
+                                                    </div>
+                                                </CardContent>
+                                            </Card>
+                                        </div>
+                                        <p className="mt-2 text-sm text-gray-500">
+                                            Select the provider for language models
+                                        </p>
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-3">
+                                            Language Model Selection
+                                        </label>
+                                        <FormControl fullWidth variant="outlined">
+                                            <Select
+                                                value={settings.model || ''}
+                                                onChange={(e) => handleInputChange('model', e.target.value)}
+                                                displayEmpty
+                                                className="bg-white"
+                                            >
+                                                <MenuItem value="">Select a model</MenuItem>
+                                                {getFilteredModels('llm', selectedProvider).map((model, index) => {
                                                     const modelName = getModelName(model);
                                                     const key = modelName || `model-${index}`;
                                                     return (
-                                                        <option key={key} value={modelName}>
-                                                            {formatModelDisplayName(model)} {currentLLMModel === modelName ? ' (Current)' : ''}
-                                                        </option>
+                                                        <MenuItem key={key} value={modelName}>
+                                                            {String(formatModelDisplayName(model))} {currentLLMModel === modelName ? ' (Current)' : ''}
+                                                            {model.provider && model.provider !== 'ollama' ? ` [${model.provider}]` : ''}
+                                                        </MenuItem>
                                                     );
                                                 })}
-                                        </select>
+                                            </Select>
+                                        </FormControl>
                                         <p className="mt-1 text-sm text-gray-500">
-                                            Choose the AI model for generating responses
+                                            Choose the language model for generating responses
                                         </p>
                                     </div>
 
-                                    {/* Temperature */}
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                                            Temperature: {settings.temperature}
-                                        </label>
-                                        <input
-                                            type="range"
-                                            min="0"
-                                            max="2"
-                                            step="0.1"
-                                            value={settings.temperature || 0.7}
-                                            onChange={(e) => handleInputChange('temperature', parseFloat(e.target.value))}
-                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                        />
-                                        <div className="flex justify-between text-xs text-gray-500 mt-1">
-                                            <span>More Focused</span>
-                                            <span>More Creative</span>
+                                    {/* Model Parameters */}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        {/* Temperature */}
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                Temperature: {settings.temperature}
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max="2"
+                                                step="0.1"
+                                                value={settings.temperature || 0.7}
+                                                onChange={(e) => handleInputChange('temperature', parseFloat(e.target.value))}
+                                                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                                            />
+                                            <div className="flex justify-between text-xs text-gray-500 mt-1">
+                                                <span>More Focused</span>
+                                                <span>More Creative</span>
+                                            </div>
                                         </div>
-                                    </div>
 
-                                    {/* Max Tokens */}
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                                            Max Tokens
-                                        </label>
-                                        <input
-                                            type="number"
-                                            min="100"
-                                            max="8192"
-                                            value={settings.max_tokens || 2048}
-                                            onChange={(e) => handleInputChange('max_tokens', parseInt(e.target.value))}
-                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                                        />
-                                        <p className="mt-1 text-sm text-gray-500">
-                                            Maximum length of the response
-                                        </p>
-                                    </div>
+                                        {/* Max Tokens */}
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                Max Tokens
+                                            </label>
+                                            <input
+                                                type="number"
+                                                min="100"
+                                                max="8192"
+                                                value={settings.max_tokens || 2048}
+                                                onChange={(e) => handleInputChange('max_tokens', parseInt(e.target.value))}
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                                            />
+                                            <p className="mt-1 text-sm text-gray-500">
+                                                Maximum length of the response
+                                            </p>
+                                        </div>
 
-                                    {/* Top P */}
-                                    <div>
-                                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                                            Top P: {settings.top_p}
-                                        </label>
-                                        <input
-                                            type="range"
-                                            min="0"
-                                            max="2"
-                                            step="0.05"
-                                            value={settings.top_p || 0.9}
-                                            onChange={(e) => handleInputChange('top_p', parseFloat(e.target.value))}
-                                            className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                                        />
-                                        <p className="mt-1 text-sm text-gray-500">
-                                            Controls diversity via nucleus sampling
-                                        </p>
-                                    </div>
+                                        {/* Top P */}
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                Top P: {settings.top_p}
+                                            </label>
+                                            <input
+                                                type="range"
+                                                min="0"
+                                                max="1"
+                                                step="0.05"
+                                                value={settings.top_p || 0.9}
+                                                onChange={(e) => handleInputChange('top_p', parseFloat(e.target.value))}
+                                                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                                            />
+                                            <p className="mt-1 text-sm text-gray-500">
+                                                Controls diversity via nucleus sampling
+                                            </p>
+                                        </div>
 
                                     {/* Frequency Penalty */}
                                     <div>
@@ -795,6 +1240,7 @@ const ModelSettingsPage = () => {
                                 )}
                             </div>
                         </div>
+                    </div>
                     )}
 
                     {/* Embedding Settings Tab */}
@@ -822,26 +1268,99 @@ const ModelSettingsPage = () => {
                                         </div>
                                     )}
                                     
+                                    {/* Provider Selection for Embedding Models */}
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-3">
+                                            Model Provider
+                                        </label>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            {/* Ollama Provider */}
+                                            <Card 
+                                                className={`cursor-pointer transition-all duration-200 ${
+                                                    selectedEmbeddingProvider === 'ollama' 
+                                                        ? 'ring-2 ring-indigo-500 bg-indigo-50' 
+                                                        : 'hover:shadow-md'
+                                                }`}
+                                                onClick={() => setSelectedEmbeddingProvider('ollama')}
+                                            >
+                                                <CardContent className="p-4">
+                                                    <div className="flex items-center space-x-3">
+                                                        <Avatar className="h-8 w-8">
+                                                            <img 
+                                                                src={ollamaIcon} 
+                                                                alt="Ollama" 
+                                                                className="h-8 w-8"
+                                                            />
+                                                        </Avatar>
+                                                        <div className="flex-1">
+                                                            <h3 className="text-sm font-medium text-gray-900">Ollama</h3>
+                                                            <p className="text-xs text-gray-500">Local models</p>
+                                                        </div>
+                                                        {selectedEmbeddingProvider === 'ollama' && (
+                                                            <CheckCircleIcon className="h-5 w-5 text-indigo-600" />
+                                                        )}
+                                                    </div>
+                                                </CardContent>
+                                            </Card>
+
+                                            {/* HuggingFace Provider */}
+                                            <Card 
+                                                className={`cursor-pointer transition-all duration-200 ${
+                                                    selectedEmbeddingProvider === 'huggingface' 
+                                                        ? 'ring-2 ring-indigo-500 bg-indigo-50' 
+                                                        : 'hover:shadow-md'
+                                                }`}
+                                                onClick={() => setSelectedEmbeddingProvider('huggingface')}
+                                            >
+                                                <CardContent className="p-4">
+                                                    <div className="flex items-center space-x-3">
+                                                        <Avatar className="h-8 w-8">
+                                                            <img 
+                                                                src={huggingfaceIcon} 
+                                                                alt="HuggingFace" 
+                                                                className="h-8 w-8"
+                                                            />
+                                                        </Avatar>
+                                                        <div className="flex-1">
+                                                            <h3 className="text-sm font-medium text-gray-900">HuggingFace</h3>
+                                                            <p className="text-xs text-gray-500">Cloud models</p>
+                                                        </div>
+                                                        {selectedEmbeddingProvider === 'huggingface' && (
+                                                            <CheckCircleIcon className="h-5 w-5 text-indigo-600" />
+                                                        )}
+                                                    </div>
+                                                </CardContent>
+                                            </Card>
+                                        </div>
+                                        <p className="mt-2 text-sm text-gray-500">
+                                            Select the provider for embedding models
+                                        </p>
+                                    </div>
+                                    
                                     <div>
                                         <label className="block text-sm font-medium text-gray-700 mb-3">
                                             Embedding Model Selection
                                         </label>
-                                        <select
-                                            value={currentEmbeddingModel || ''}
-                                            onChange={(e) => handleEmbeddingModelChange(e.target.value)}
-                                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                                        >
-                                            <option value="">Select an embedding model</option>
-                                            {Array.isArray(embeddingModels) && embeddingModels.map((model, index) => {
-                                                const modelName = getModelName(model);
-                                                const key = modelName || `embedding-${index}`;
-                                                return (
-                                                    <option key={key} value={modelName}>
-                                                        {formatModelDisplayName(model)}
-                                                    </option>
-                                                );
-                                            })}
-                                        </select>
+                                        <FormControl fullWidth variant="outlined">
+                                            <Select
+                                                value={currentEmbeddingModel || ''}
+                                                onChange={(e) => handleEmbeddingModelChange(e.target.value)}
+                                                displayEmpty
+                                                className="bg-white"
+                                            >
+                                                <MenuItem value="">Select an embedding model</MenuItem>
+                                                {getFilteredModels('embedding', selectedEmbeddingProvider).map((model, index) => {
+                                                    const modelName = getModelName(model);
+                                                    const key = modelName || `embedding-${index}`;
+                                                    return (
+                                                        <MenuItem key={key} value={modelName}>
+                                                            {String(formatModelDisplayName(model))}
+                                                            {model.provider && model.provider !== 'ollama' ? ` [${model.provider}]` : ''}
+                                                        </MenuItem>
+                                                    );
+                                                })}
+                                            </Select>
+                                        </FormControl>
                                         <p className="mt-1 text-sm text-gray-500">
                                             Choose the embedding model for document processing and semantic search
                                         </p>
@@ -905,7 +1424,6 @@ const ModelSettingsPage = () => {
                             </div>
                         </div>
                     )}
-                </div>
                     </Box>
                 </Box>
 
@@ -1036,6 +1554,16 @@ const ModelSettingsPage = () => {
                     </div>
                 </div>
             )}
+
+            {/* Gated Model Dialog */}
+            <GatedModelDialog
+                isOpen={showGatedModelDialog}
+                onClose={() => {
+                    setShowGatedModelDialog(false);
+                    setGatedModelInfo(null);
+                }}
+                gatedModelInfo={gatedModelInfo}
+            />
             </Box>
         </ThemeProvider>
     );

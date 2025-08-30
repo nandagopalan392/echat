@@ -1177,9 +1177,14 @@ export const api = {
     },
 
     // Get available reranker models
-    getRerankerModels: async () => {
+    getRerankerModels: async (provider = null) => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/retrieval/reranker-models`, {
+            let url = `${API_BASE_URL}/api/retrieval/reranker-models`;
+            if (provider) {
+                url += `?provider=${encodeURIComponent(provider)}`;
+            }
+            
+            const response = await fetch(url, {
                 method: 'GET',
                 headers: {
                     ...getAuthHeader(),
@@ -1193,6 +1198,27 @@ export const api = {
             return await response.json();
         } catch (error) {
             console.error('Error getting reranker models:', error);
+            throw error;
+        }
+    },
+
+    // Get reranker model download status
+    getRerankerDownloadStatus: async (modelName) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/retrieval/reranker-download-status?model_name=${encodeURIComponent(modelName)}`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader(),
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to get download status');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting download status:', error);
             throw error;
         }
     },

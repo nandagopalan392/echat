@@ -1,4 +1,5 @@
 # rag.py
+
 from langchain_core.globals import set_verbose, set_debug
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain.schema.output_parser import StrOutputParser
@@ -13,7 +14,38 @@ import httpx
 import requests
 import traceback
 import sqlite3
+import json
 from typing import List
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# Hugging Face imports
+try:
+    from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings
+    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+    HUGGINGFACE_AVAILABLE = True
+except ImportError:
+    HUGGINGFACE_AVAILABLE = False
+    logger.warning("Hugging Face libraries not available. Only Ollama models will be supported.")
+
+# Set up some reasonable defaults for ChromaDB
+os.environ["CHROMA_SERVER_NOFILE"] = "65536"
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema.runnable import RunnablePassthrough
+# Set up logging first
+logger = logging.getLogger(__name__)
+
+# Hugging Face imports
+try:
+    from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings
+    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+    HUGGINGFACE_AVAILABLE = True
+except ImportError:
+    HUGGINGFACE_AVAILABLE = False
+    logger.warning("Hugging Face libraries not available. Only Ollama models will be supported.")
 # Set up some reasonable defaults for ChromaDB
 os.environ["CHROMA_SERVER_NOFILE"] = "65536"
 from langchain_community.document_loaders import PyPDFLoader
@@ -22,7 +54,6 @@ from langchain.schema.runnable import RunnablePassthrough
 from langchain_community.vectorstores.utils import filter_complex_metadata
 from langchain_core.prompts import ChatPromptTemplate
 from typing import Optional, List, Dict, Tuple
-import logging
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -64,7 +95,6 @@ set_debug(False)
 set_verbose(False)
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 def estimate_query_complexity(query):
     """Estimate the complexity of a user query"""
@@ -99,6 +129,677 @@ def estimate_hallucination(response, context_docs):
     
     return hallucination_score
 
+class LLMProvider:
+    """Abstract base class for LLM providers"""
+    def __init__(self, model_name: str, parameters: dict = None):
+        self.model_name = model_name
+        self.parameters = parameters or {}
+        self.model = None
+    
+    def create_model(self):
+        """Create and return the LLM model instance"""
+        raise NotImplementedError
+    
+    def get_model(self):
+        """Get the model instance, creating it if necessary"""
+        if self.model is None:
+            self.model = self.create_model()
+        return self.model
+
+class OllamaProvider(LLMProvider):
+    """Ollama LLM provider"""
+    def create_model(self):
+        logger.info(f"Creating Ollama model: {self.model_name}")
+        model_kwargs = {
+            'model': self.model_name,
+            'base_url': os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        }
+        
+        # Add supported parameters
+        if 'temperature' in self.parameters:
+            model_kwargs['temperature'] = self.parameters['temperature']
+        if 'max_tokens' in self.parameters:
+            model_kwargs['num_predict'] = self.parameters['max_tokens']
+        if 'top_p' in self.parameters:
+            model_kwargs['top_p'] = self.parameters['top_p']
+        
+        # Save model selection to database
+        self._save_model_selection_to_db(self.model_name, 'ollama')
+        
+        return ChatOllama(**model_kwargs)
+    
+    def _save_model_selection_to_db(self, model_name: str, provider: str):
+        """Save the selected model and provider to database"""
+        try:
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            
+            # Get current settings or create new ones
+            current_settings = chat_db.get_latest_model_settings() or {}
+            
+            # Update with new model selection
+            current_settings['llm'] = model_name
+            current_settings['provider'] = provider
+            
+            # Save updated settings
+            chat_db.save_model_settings(
+                llm=current_settings.get('llm', model_name),
+                embedding=current_settings.get('embedding', 'bge-m3'),
+                provider=current_settings.get('provider', provider),
+                parameters=current_settings.get('parameters', self.parameters)
+            )
+            
+            logger.info(f"Saved model selection to database: {model_name} ({provider})")
+            
+        except Exception as e:
+            logger.warning(f"Could not save model selection to database: {e}")
+
+class HuggingFaceProvider(LLMProvider):
+    """Hugging Face LLM provider"""
+    
+    def _check_model_downloaded(self, model_name: str, hf_token: str = None) -> bool:
+        """Check if model is already downloaded locally"""
+        try:
+            from huggingface_hub import snapshot_download, model_info
+            from transformers import AutoConfig
+            import tempfile
+            import shutil
+            
+            # Try to load config to check if model exists locally
+            try:
+                config = AutoConfig.from_pretrained(model_name, local_files_only=True)
+                logger.info(f"Model {model_name} found locally")
+                return True
+            except:
+                logger.info(f"Model {model_name} not found locally, needs to be downloaded")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Could not check local model availability: {e}")
+            return False
+    
+    def _check_gpu_memory(self) -> dict:
+        """Check GPU capabilities based on total memory size"""
+        gpu_info = {
+            'has_gpu': False,
+            'total_memory_gb': 0,
+            'gpu_name': 'Unknown'
+        }
+        
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_info['has_gpu'] = True
+                # Get total GPU memory (hardware spec, not current usage)
+                total_memory = torch.cuda.get_device_properties(0).total_memory
+                gpu_info['total_memory_gb'] = total_memory / (1024**3)  # Convert to GB
+                gpu_info['gpu_name'] = torch.cuda.get_device_name(0)
+                
+                logger.info(f"GPU detected: {gpu_info['gpu_name']}, Total Memory: {gpu_info['total_memory_gb']:.1f}GB")
+            else:
+                logger.info("No GPU available, will use CPU")
+        except ImportError:
+            logger.warning("PyTorch not available, cannot check GPU")
+        except Exception as e:
+            logger.warning(f"Error checking GPU: {e}")
+        
+        return gpu_info
+    
+    def _can_load_model_on_gpu(self, model_name: str, gpu_info: dict) -> bool:
+        """Estimate if model can fit on GPU based on total GPU memory and model size"""
+        if not gpu_info['has_gpu']:
+            return False
+        
+        # Rough model size estimates (in GB) - these are approximate
+        model_size_estimates = {
+            'google/gemma-1.1-2b-it': 4.0,  # 2B parameters ≈ 4GB
+            'google/gemma-7b-it': 14.0,      # 7B parameters ≈ 14GB
+            'google/gemma-2b': 4.0,          # 2B parameters ≈ 4GB
+            'microsoft/DialoGPT-medium': 0.7, # 345M parameters ≈ 0.7GB
+            'distilbert/distilgpt2': 0.3,    # 82M parameters ≈ 0.3GB
+            'Qwen/Qwen2-0.5B': 1.0,         # 0.5B parameters ≈ 1GB
+            'Qwen/Qwen2-1.5B': 3.0,         # 1.5B parameters ≈ 3GB
+            'TinyLlama/TinyLlama-1.1B-Chat-v1.0': 2.2  # 1.1B parameters ≈ 2.2GB
+        }
+        
+        estimated_size = model_size_estimates.get(model_name, 8.0)  # Default 8GB for unknown models
+        
+        # Use 80% of total GPU memory as safe threshold (leave 20% for system and operations)
+        usable_memory = gpu_info['total_memory_gb'] * 0.8
+        
+        can_fit = usable_memory >= estimated_size
+        logger.info(f"Model {model_name} estimated size: {estimated_size:.1f}GB")
+        logger.info(f"GPU usable memory (80% of {gpu_info['total_memory_gb']:.1f}GB): {usable_memory:.1f}GB")
+        logger.info(f"Can fit on GPU: {can_fit}")
+        
+        if not can_fit:
+            logger.warning(f"⚠️  Model may be too large for GPU. Consider:")
+            if estimated_size > 8:
+                logger.warning(f"   - Use a smaller model variant")
+            logger.warning(f"   - Model will run on CPU (slower but will work)")
+            
+        return can_fit
+    
+    def _download_model_if_needed(self, model_name: str, hf_token: str = None) -> dict:
+        """Download model if not available locally, with proper gated model handling"""
+        try:
+            from huggingface_hub import snapshot_download, model_info
+            
+            # Load token from environment if not provided
+            if hf_token is None:
+                hf_token = os.getenv('HUGGINGFACE_HUB_TOKEN') or os.getenv('HF_TOKEN') or os.getenv('HUGGING_FACE_HUB_TOKEN')
+                
+                # Debug: Log token availability (first few chars only for security)
+                if hf_token:
+                    logger.info(f"🔑 DEBUG: Loaded HuggingFace token from environment: {hf_token[:8]}... (length: {len(hf_token)})")
+                else:
+                    logger.error("🔑 DEBUG: No HuggingFace token found in environment variables")
+                    logger.error(f"🔑 DEBUG: Checked variables: HUGGINGFACE_HUB_TOKEN={bool(os.getenv('HUGGINGFACE_HUB_TOKEN'))}, HF_TOKEN={bool(os.getenv('HF_TOKEN'))}, HUGGING_FACE_HUB_TOKEN={bool(os.getenv('HUGGING_FACE_HUB_TOKEN'))}")
+            
+            # First check if model is gated
+            try:
+                info = model_info(model_name, token=hf_token)
+                is_gated = getattr(info, 'gated', False)
+                
+                if is_gated:
+                    model_url = f"https://huggingface.co/{model_name}"
+                    if not hf_token:
+                        logger.error(f"❌ GATED MODEL ACCESS REQUIRED")
+                        logger.error(f"Model '{model_name}' is gated and requires approval.")
+                        logger.error(f"Please visit: {model_url}")
+                        return {
+                            'success': False,
+                            'error': 'gated_no_token',
+                            'message': f"Model '{model_name}' is gated and requires approval and authentication.",
+                            'model_url': model_url,
+                            'steps': [
+                                f"Visit the model page: {model_url}",
+                                "Click 'Request access' and wait for approval",
+                                "Create a token at: https://huggingface.co/settings/tokens",
+                                "Add your token to the .env file as HUGGINGFACE_HUB_TOKEN=your_token_here"
+                            ]
+                        }
+                    else:
+                        # Check if user has access with token
+                        logger.info(f"Checking access to gated model {model_name}...")
+                        try:
+                            # Try to get model info with token to verify access
+                            model_info(model_name, token=hf_token, use_auth_token=True)
+                            logger.info(f"✅ Access confirmed for gated model {model_name}")
+                        except Exception as access_e:
+                            if "not have access" in str(access_e).lower() or "gated" in str(access_e).lower():
+                                logger.error(f"❌ ACCESS DENIED")
+                                logger.error(f"You don't have access to the gated model '{model_name}'")
+                                return {
+                                    'success': False,
+                                    'error': 'gated_no_access',
+                                    'message': f"You don't have access to the gated model '{model_name}'",
+                                    'model_url': model_url,
+                                    'steps': [
+                                        f"Visit the model page: {model_url}",
+                                        "Click 'Request access' button",
+                                        "Wait for approval (usually takes a few minutes to hours)",
+                                        "Try again after approval is granted"
+                                    ]
+                                }
+                            else:
+                                logger.warning(f"Could not verify access: {access_e}")
+                
+            except Exception as info_e:
+                logger.warning(f"Could not check if model is gated: {info_e}")
+            
+            # Check GPU capabilities before downloading
+            gpu_info = self._check_gpu_memory()
+            can_use_gpu = self._can_load_model_on_gpu(model_name, gpu_info)
+            
+            if not can_use_gpu and gpu_info['has_gpu']:
+                logger.warning(f"⚠️  Model {model_name} may be too large for available GPU memory ({gpu_info['total_memory_gb']:.1f}GB total)")
+                logger.warning(f"Model will run on CPU (slower but should work)")
+            elif can_use_gpu:
+                logger.info(f"✅ Model {model_name} should fit on GPU ({gpu_info['total_memory_gb']:.1f}GB total)")
+            
+            logger.info(f"Downloading model {model_name}...")
+            
+            # Download with timeout and proper error handling
+            kwargs = {
+                'repo_id': model_name,
+                'local_files_only': False,
+                'resume_download': True
+            }
+            
+            if hf_token:
+                kwargs['token'] = hf_token
+            
+            # Download model files
+            snapshot_download(**kwargs)
+            logger.info(f"Successfully downloaded model {model_name}")
+            
+            return {
+                'success': True,
+                'message': f"Successfully downloaded model {model_name}"
+            }
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Failed to download model {model_name}: {error_msg}")
+            
+            if "gated repo" in error_msg.lower() or "access" in error_msg.lower() or "not have access" in error_msg.lower():
+                model_url = f"https://huggingface.co/{model_name}"
+                
+                if not hf_token:
+                    return {
+                        'success': False,
+                        'error': 'gated_no_token',
+                        'message': f"Model '{model_name}' requires special access and authentication.",
+                        'model_url': model_url,
+                        'steps': [
+                            f"Visit the model page: {model_url}",
+                            "Click 'Request access' button",
+                            "Wait for approval (usually takes a few minutes to hours)",
+                            "Create a token at: https://huggingface.co/settings/tokens",
+                            "Add HUGGINGFACE_HUB_TOKEN=your_token_here to your .env file"
+                        ],
+                        'alternatives': [
+                            "microsoft/DialoGPT-medium",
+                            "distilbert/distilgpt2",
+                            "Qwen/Qwen2-0.5B",
+                            "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+                        ]
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': 'gated_no_access',
+                        'message': f"Access denied to gated model '{model_name}'",
+                        'model_url': model_url,
+                        'steps': [
+                            f"Visit the model page: {model_url}",
+                            "Click 'Request access' button",
+                            "Wait for approval",
+                            "Try again after approval is granted"
+                        ]
+                    }
+            
+            return {
+                'success': False,
+                'error': 'download_failed',
+                'message': f"Failed to download model: {error_msg}"
+            }
+    
+    def _save_model_selection_to_db(self, model_name: str, provider: str):
+        """Save the selected model and provider to database"""
+        try:
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            
+            # Get current settings or create new ones
+            current_settings = chat_db.get_latest_model_settings() or {}
+            
+            # Update with new model selection
+            if provider.lower() == 'huggingface':
+                current_settings['llm'] = model_name
+                current_settings['provider'] = provider
+            else:
+                current_settings['embedding'] = model_name
+            
+            # Save updated settings
+            chat_db.save_model_settings(
+                llm=current_settings.get('llm', self.model_name),
+                embedding=current_settings.get('embedding', 'bge-m3'),
+                provider=current_settings.get('provider', provider),
+                parameters=current_settings.get('parameters', self.parameters)
+            )
+            
+            logger.info(f"Saved model selection to database: {model_name} ({provider})")
+            
+        except Exception as e:
+            logger.warning(f"Could not save model selection to database: {e}")
+    
+    def create_model(self):
+        if not HUGGINGFACE_AVAILABLE:
+            raise RuntimeError("Hugging Face libraries not available")
+        
+        logger.info(f"Creating Hugging Face model: {self.model_name}")
+        
+        # Get Hugging Face token from environment
+        hf_token = os.getenv('HUGGINGFACE_HUB_TOKEN') or os.getenv('HF_TOKEN') or os.getenv('HUGGING_FACE_HUB_TOKEN')
+        
+        # Debug: Log token availability (first few chars only for security)
+        if hf_token:
+            logger.info(f"🔑 DEBUG: HuggingFace token found: {hf_token[:8]}... (length: {len(hf_token)})")
+        else:
+            logger.error("🔑 DEBUG: No HuggingFace token found in environment variables")
+            logger.error(f"🔑 DEBUG: Checked variables: HUGGINGFACE_HUB_TOKEN={bool(os.getenv('HUGGINGFACE_HUB_TOKEN'))}, HF_TOKEN={bool(os.getenv('HF_TOKEN'))}, HUGGING_FACE_HUB_TOKEN={bool(os.getenv('HUGGING_FACE_HUB_TOKEN'))}")
+        
+        # Set up authentication if token is available
+        if hf_token:
+            logger.info("Using Hugging Face authentication token for gated models")
+            # Set the token for huggingface_hub
+            os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
+            
+            # Login to huggingface_hub programmatically
+            try:
+                from huggingface_hub import login
+                login(token=hf_token, add_to_git_credential=False)
+                logger.info("Successfully authenticated with Hugging Face Hub")
+            except Exception as e:
+                logger.warning(f"Could not login to Hugging Face Hub: {e}")
+        else:
+            logger.info("No Hugging Face token found - only public models will be accessible")
+        
+        # Check if model is downloaded locally first
+        if not self._check_model_downloaded(self.model_name, hf_token):
+            logger.info(f"Model {self.model_name} not available locally, attempting download...")
+            download_result = self._download_model_if_needed(self.model_name, hf_token)
+            
+            if not download_result['success']:
+                # Handle different types of errors
+                if download_result['error'] in ['gated_no_token', 'gated_no_access']:
+                    # For gated model errors, raise a special exception with all the details
+                    error_details = {
+                        'error_type': download_result['error'],
+                        'model_name': self.model_name,
+                        'model_url': download_result['model_url'],
+                        'message': download_result['message'],
+                        'steps': download_result['steps']
+                    }
+                    
+                    if 'alternatives' in download_result:
+                        error_details['alternatives'] = download_result['alternatives']
+                    
+                    # Log the error details for backend logs
+                    logger.error(f"❌ GATED MODEL ERROR: {download_result['message']}")
+                    logger.error(f"Model URL: {download_result['model_url']}")
+                    for i, step in enumerate(download_result['steps'], 1):
+                        logger.error(f"{i}. {step}")
+                    
+                    # Raise exception with structured data for frontend
+                    raise ValueError(f"GATED_MODEL_ERROR:{json.dumps(error_details)}")
+                else:
+                    # Regular download failure
+                    logger.error(f"❌ Failed to download model {self.model_name}")
+                    logger.error(f"🔄 Try these public alternatives that don't require approval:")
+                    logger.error(f"- microsoft/DialoGPT-medium (conversation model, ~700MB)")
+                    logger.error(f"- distilbert/distilgpt2 (small general model, ~300MB)")  
+                    logger.error(f"- Qwen/Qwen2-0.5B (efficient model, ~1GB)")
+                    logger.error(f"- TinyLlama/TinyLlama-1.1B-Chat-v1.0 (chat optimized, ~2GB)")
+                    raise RuntimeError(f"Could not download model {self.model_name}: {download_result['message']}")
+            else:
+                # Model downloaded successfully, save to database
+                logger.info(f"✅ Model {self.model_name} downloaded successfully")
+                self._save_model_selection_to_db(self.model_name, 'huggingface')
+        else:
+            # Model already exists locally, save selection to database
+            logger.info(f"✅ Model {self.model_name} already available locally")
+            self._save_model_selection_to_db(self.model_name, 'huggingface')
+        
+        try:
+            # Create text generation pipeline with local model preference
+            logger.info(f"Creating pipeline for {self.model_name}")
+            
+            # First, load the model and tokenizer separately with local_files_only
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            
+            # Load model and tokenizer with local_files_only preference
+            model_load_kwargs = {
+                'local_files_only': True,
+                'trust_remote_code': False,
+                'low_cpu_mem_usage': True,
+                'torch_dtype': 'auto'
+            }
+            
+            tokenizer_load_kwargs = {
+                'local_files_only': True,
+                'trust_remote_code': False
+            }
+            
+            # Add token for loading gated models if available
+            if hf_token:
+                model_load_kwargs['token'] = hf_token
+                tokenizer_load_kwargs['token'] = hf_token
+            
+            # Load tokenizer and model
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name, **tokenizer_load_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_load_kwargs)
+            
+            # Pipeline creation kwargs (without local_files_only since model is already loaded)
+            pipeline_kwargs = {
+                'model': model,
+                'tokenizer': tokenizer,
+                'max_new_tokens': self.parameters.get('max_tokens', 512),
+                'temperature': self.parameters.get('temperature', 0.7),
+                'top_p': self.parameters.get('top_p', 0.9),
+                'do_sample': True,  # Enable sampling for temperature and top_p to work
+            }
+            
+            # Only use device_map if CUDA is available and we're not in a constrained environment
+            cuda_available = os.getenv('CUDA_VISIBLE_DEVICES') is not None
+            if cuda_available:
+                # Move model to GPU if available
+                try:
+                    model = model.cuda()
+                    logger.info("Model moved to CUDA")
+                except Exception as cuda_e:
+                    logger.warning(f"Could not move model to CUDA: {cuda_e}")
+            else:
+                logger.info("Using CPU device")
+            
+            logger.info(f"About to create pipeline with model and tokenizer loaded separately")
+            
+            # Create pipeline with pre-loaded model and tokenizer
+            pipe = pipeline("text-generation", **pipeline_kwargs)
+            logger.info(f"Successfully created Hugging Face pipeline for {self.model_name}")
+            
+        except Exception as e:
+            # If local_files_only fails, suggest alternatives instead of retrying online
+            logger.error(f"Local model loading failed: {e}")
+            logger.error(f"Model {self.model_name} failed to load. This might be due to:")
+            logger.error("1. Model is too large for available memory")
+            logger.error("2. Model requires specific hardware (GPU) that's not available")
+            logger.error("3. Model has compatibility issues")
+            logger.error("")
+            logger.error("Try these smaller, CPU-friendly alternatives:")
+            logger.error("- microsoft/DialoGPT-medium (smaller, conversation-focused)")
+            logger.error("- distilbert/distilgpt2 (very small, good for testing)")
+            logger.error("- Qwen/Qwen2-0.5B (small but capable)")
+            logger.error("- TinyLlama/TinyLlama-1.1B-Chat-v1.0 (optimized for chat)")
+            
+            raise RuntimeError(f"Could not load model {self.model_name}. Try a smaller model.")
+        
+        return HuggingFacePipeline(pipeline=pipe)
+
+def create_embedding_model(model_name: str, provider: str = None):
+    """
+    Create an embedding model based on the provider
+    
+    Args:
+        model_name: The embedding model name
+        provider: The provider type ('ollama', 'huggingface', etc.)
+        
+    Returns:
+        Embedding model instance
+    """
+    if provider is None:
+        provider = detect_model_provider(model_name)
+    
+    logger.info(f"Creating embedding model '{model_name}' using provider '{provider}'")
+    
+    if provider.lower() == "huggingface":
+        from langchain_huggingface import HuggingFaceEmbeddings
+        
+        # Get Hugging Face token from environment
+        hf_token = os.getenv('HUGGINGFACE_HUB_TOKEN') or os.getenv('HF_TOKEN') or os.getenv('HUGGING_FACE_HUB_TOKEN')
+        
+        # Set up authentication if token is available
+        if hf_token:
+            logger.info("Using Hugging Face authentication token for embedding model")
+            os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
+        
+        # Check if embedding model is available locally
+        try:
+            from transformers import AutoConfig
+            
+            # Try to load config locally first
+            try:
+                config = AutoConfig.from_pretrained(model_name, local_files_only=True)
+                logger.info(f"Embedding model {model_name} found locally")
+                local_files_only = True
+            except:
+                logger.info(f"Embedding model {model_name} not found locally, will download if needed")
+                local_files_only = False
+                
+                # For HuggingFace embeddings, try to download if not local
+                if not local_files_only:
+                    try:
+                        from huggingface_hub import snapshot_download
+                        logger.info(f"Downloading embedding model {model_name}...")
+                        
+                        kwargs = {
+                            'repo_id': model_name,
+                            'local_files_only': False,
+                            'resume_download': True
+                        }
+                        
+                        if hf_token:
+                            kwargs['token'] = hf_token
+                        
+                        snapshot_download(**kwargs)
+                        logger.info(f"Successfully downloaded embedding model {model_name}")
+                        local_files_only = True
+                        
+                    except Exception as download_e:
+                        logger.warning(f"Could not download embedding model {model_name}: {download_e}")
+                        # Continue with online mode
+                        local_files_only = False
+        
+        except ImportError:
+            logger.warning("Could not check local model availability")
+            local_files_only = False
+        
+        # Create model kwargs
+        model_kwargs = {
+            'device': 'cuda' if os.getenv('CUDA_VISIBLE_DEVICES') else 'cpu'
+        }
+        
+        # Add token if available
+        if hf_token:
+            model_kwargs['token'] = hf_token
+        
+        # Try local first, then online
+        try:
+            if local_files_only:
+                logger.info(f"Loading embedding model {model_name} from local cache")
+            
+            embedding_model = HuggingFaceEmbeddings(
+                model_name=model_name,
+                model_kwargs=model_kwargs,
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            
+            # Save embedding model selection to database
+            try:
+                from chat_db import ChatDB
+                chat_db = ChatDB()
+                current_settings = chat_db.get_latest_model_settings() or {}
+                current_settings['embedding'] = model_name
+                
+                chat_db.save_model_settings(
+                    llm=current_settings.get('llm', 'deepseek-r1:latest'),
+                    embedding=model_name,
+                    provider=current_settings.get('provider', 'huggingface'),
+                    parameters=current_settings.get('parameters', {}),
+                    embedding_provider=provider
+                )
+                logger.info(f"Saved embedding model selection to database: {model_name}")
+            except Exception as db_e:
+                logger.warning(f"Could not save embedding model to database: {db_e}")
+            
+            return embedding_model
+            
+        except Exception as e:
+            logger.error(f"Failed to create HuggingFace embedding model {model_name}: {e}")
+            if "gated" in str(e).lower() and not hf_token:
+                logger.error("Model may be gated. Add HUGGINGFACE_HUB_TOKEN to your .env file.")
+            
+            # Fallback to Ollama for legacy model names that don't work with HuggingFace
+            logger.warning(f"HuggingFace failed for {model_name}, falling back to Ollama")
+            provider = 'ollama'  # Update provider for fallback
+            
+    # Use Ollama (either as original choice or as fallback)
+    if provider.lower() == 'ollama':
+        from langchain_ollama import OllamaEmbeddings
+        
+        embedding_model = OllamaEmbeddings(
+            model=model_name,
+            base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+        )
+        
+        # Save embedding model selection to database
+        try:
+            from chat_db import ChatDB
+            chat_db = ChatDB()
+            current_settings = chat_db.get_latest_model_settings() or {}
+            current_settings['embedding'] = model_name
+            
+            chat_db.save_model_settings(
+                llm=current_settings.get('llm', 'deepseek-r1:latest'),
+                embedding=model_name,
+                provider=current_settings.get('provider', 'ollama'),
+                parameters=current_settings.get('parameters', {}),
+                embedding_provider=provider
+            )
+            logger.info(f"Saved embedding model selection to database: {model_name} (ollama)")
+        except Exception as db_e:
+            logger.warning(f"Could not save embedding model to database: {db_e}")
+            
+        return embedding_model
+
+def detect_model_provider(model_name: str) -> str:
+    """
+    Detect the provider based on model name format
+    
+    Args:
+        model_name: The model name to analyze
+        
+    Returns:
+        str: Provider name ('huggingface', 'ollama', etc.)
+    """
+    if not model_name:
+        return "ollama"  # Default fallback
+    
+    # Hugging Face models typically have format: organization/model-name
+    # Examples: microsoft/DialoGPT-medium, google/flan-t5-base, sentence-transformers/all-MiniLM-L6-v2
+    if "/" in model_name and not model_name.startswith("ollama/"):
+        # Check for common Hugging Face organizations
+        hf_organizations = [
+            "microsoft", "google", "facebook", "sentence-transformers", 
+            "EleutherAI", "bigscience", "huggingface", "openai-gpt",
+            "bert-base", "distilbert", "roberta", "gpt2", "t5",
+            "Qwen", "BAAI", "thenlper", "intfloat", "jinaai",
+            "nomic-ai", "mixedbread-ai", "WhereIsAI", "avsolatorio"
+        ]
+        
+        org_name = model_name.split("/")[0].lower()
+        model_full_lower = model_name.lower()
+        
+        # Check if it's a known HF organization or has HF-style naming
+        if (org_name in [org.lower() for org in hf_organizations] or
+            any(term in model_full_lower for term in ["sentence-transformers", "all-minilm", "bge-", "e5-", "gte-"])):
+            return "huggingface"
+    
+    # Ollama models are typically simple names or have format like "model:tag"
+    # Examples: llama2, gemma:7b, qwen:latest
+    return "ollama"
+
+def create_llm_provider(provider_type: str, model_name: str, parameters: dict = None) -> LLMProvider:
+    """Factory function to create LLM providers"""
+    if provider_type.lower() == "ollama":
+        return OllamaProvider(model_name, parameters)
+    elif provider_type.lower() == "huggingface":
+        return HuggingFaceProvider(model_name, parameters)
+    else:
+        raise ValueError(f"Unsupported provider type: {provider_type}")
+
 class ChatPDF:
     """A class for handling PDF ingestion and question answering using RAG."""
 
@@ -112,6 +813,10 @@ class ChatPDF:
             'presence_penalty': 0.0
         }
         
+        # Initialize provider settings
+        self.provider = "ollama"  # Default provider
+        self.embedding_provider = "ollama"  # Default embedding provider
+        
         # Try to load model settings from database first, then fallback to config file
         try:
             from chat_db import ChatDB
@@ -121,6 +826,9 @@ class ChatPDF:
             if db_settings:
                 llm_model = db_settings.get('llm', llm_model)
                 embedding_model = db_settings.get('embedding', embedding_model)
+                self.provider = db_settings.get('provider', 'ollama')
+                self.embedding_provider = db_settings.get('embedding_provider', self.provider)  # Use LLM provider as fallback
+                self._loaded_from_database = True  # Flag to indicate we loaded from database
                 
                 # Load model parameters if available
                 if 'parameters' in db_settings:
@@ -129,28 +837,33 @@ class ChatPDF:
                 logger.info(f"Loaded model settings from database: LLM={llm_model}, Embedding={embedding_model}")
                 logger.info(f"Model parameters: {self.model_parameters}")
             else:
-                # Fallback to JSON config file
-                config_path = "model_settings.json"
-                if os.path.exists(config_path):
-                    with open(config_path, 'r') as f:
-                        settings = json.load(f)
-                        llm_model = settings.get('llm', llm_model)
-                        embedding_model = settings.get('embedding', embedding_model)
-                        
-                        # Load model parameters if available
-                        if 'parameters' in settings:
-                            self.model_parameters.update(settings['parameters'])
-                        
-                        logger.info(f"Loaded model settings from config file: LLM={llm_model}, Embedding={embedding_model}")
-                        logger.info(f"Model parameters: {self.model_parameters}")
+                # No model settings found in database - use defaults
+                self._loaded_from_database = False
+                logger.warning("No model settings found in database, using defaults")
+                logger.info(f"Using default model settings: LLM={llm_model}, Embedding={embedding_model}")
+                logger.info(f"Model parameters: {self.model_parameters}")
         except Exception as e:
-            logger.warning(f"Could not load model settings from database or config: {e}")
+            self._loaded_from_database = False
+            logger.warning(f"Could not load model settings from database: {e}")
+            logger.info(f"Using default model settings: LLM={llm_model}, Embedding={embedding_model}")
+        
+        # Auto-detect provider based on model name only if not loaded from database
+        # If we loaded settings from database, trust the provider from database
+        if hasattr(self, '_loaded_from_database') and self._loaded_from_database:
+            logger.info(f"Using provider '{self.provider}' from database for model '{llm_model}'")
+        else:
+            # Only auto-detect if we didn't load from database
+            detected_provider = detect_model_provider(llm_model)
+            if self.provider == "ollama" and detected_provider != "ollama":
+                logger.info(f"Auto-detected provider '{detected_provider}' for model '{llm_model}', switching from default 'ollama'")
+                self.provider = detected_provider
         
         # Initialize base attributes
         self.llm_model = llm_model
         self.embedding_model = embedding_model
         self.model = None
         self.embeddings = None
+        self.llm_provider = None  # Will hold the LLM provider instance
         
         # Initialize document storage service
         self.doc_storage = get_document_storage()
@@ -210,13 +923,13 @@ class ChatPDF:
         try:
             config_manager = get_retrieval_config_manager()
             config = config_manager.get_config(user_id)
-            logger.info(f"🔧 CONFIG LOADED for user_id='{user_id}': reranker_enabled={config.reranker_enabled}, reranker_model='{config.reranker_model}'")
+            logger.info(f"🔧 CONFIG LOADED for user_id='{user_id}': reranker_enabled={config.reranker_enabled}, reranker_model='{config.reranker_model}', reranker_provider='{config.reranker_provider}'")
             return config
         except Exception as e:
             logger.warning(f"Could not load retrieval config: {e}")
             # Return default config if loading fails
             default_config = RetrievalConfig()
-            logger.info(f"🔧 CONFIG FALLBACK: reranker_enabled={default_config.reranker_enabled}, reranker_model='{default_config.reranker_model}'")
+            logger.info(f"🔧 CONFIG FALLBACK: reranker_enabled={default_config.reranker_enabled}, reranker_model='{default_config.reranker_model}', reranker_provider='{default_config.reranker_provider}'")
             return default_config
 
     def _create_retriever_with_config(self, config: RetrievalConfig):
@@ -400,8 +1113,8 @@ class ChatPDF:
             if reranker:
                 # Set the reranker model to match the configuration
                 from reranker import set_reranker_model
-                set_reranker_model(config.reranker_model)
-                logger.info(f"🔧 RERANKER MODEL SET to: {config.reranker_model}")
+                set_reranker_model(config.reranker_model, config.reranker_provider)
+                logger.info(f"🔧 RERANKER MODEL SET to: {config.reranker_model} (provider: {config.reranker_provider})")
                 
                 # Use the configured max_chunks as top_k for reranking
                 logger.info(f"🔍 RERANKER STARTING: Processing {len(documents)} documents with top_k={config.max_chunks}")
@@ -789,14 +1502,19 @@ class ChatPDF:
             logger.error(f"Error pulling models: {str(e)}")
             raise
 
-    def update_models(self, llm_model: str, embedding_model: str):
+    def update_models(self, llm_model: str, embedding_model: str, provider: str = None, embedding_provider: str = None):
         """Update models and reload them, handling embedding dimension changes and parameter updates"""
         try:
-            logger.info(f"Updating models - LLM: {llm_model}, Embedding: {embedding_model}")
+            # Use the same provider for both if embedding_provider is not specified
+            if embedding_provider is None:
+                embedding_provider = provider or self.provider
+            
+            logger.info(f"Updating models - LLM: {llm_model} ({provider or self.provider}), Embedding: {embedding_model} ({embedding_provider})")
             
             # Check if embedding model is changing
             embedding_changed = self.embedding_model != embedding_model
             llm_changed = self.llm_model != llm_model
+            provider_changed = provider and self.provider != provider
             
             # Check if parameters changed
             parameters_changed = False
@@ -807,15 +1525,17 @@ class ChatPDF:
                 db_settings = chat_db.get_latest_model_settings()
                 
                 new_parameters = {}
-                if db_settings and 'parameters' in db_settings:
-                    new_parameters = db_settings['parameters']
+                new_provider = provider or self.provider
+                if db_settings:
+                    if 'parameters' in db_settings:
+                        new_parameters = db_settings['parameters']
+                    if 'provider' in db_settings:
+                        new_provider = db_settings['provider']
                 else:
-                    # Fallback to config file
-                    config_path = "model_settings.json"
-                    if os.path.exists(config_path):
-                        with open(config_path, 'r') as f:
-                            settings = json.load(f)
-                            new_parameters = settings.get('parameters', {})
+                    # No database settings found - use defaults
+                    logger.warning("No model settings found in database for parameter check")
+                    new_parameters = {}
+                    new_provider = provider or self.provider
                 
                 # Compare parameters
                 for key, value in new_parameters.items():
@@ -823,10 +1543,13 @@ class ChatPDF:
                         parameters_changed = True
                         break
                 
-                # Update stored parameters
+                # Update stored parameters and provider
                 if parameters_changed:
                     self.model_parameters.update(new_parameters)
                     logger.info(f"Updated model parameters: {self.model_parameters}")
+                if provider_changed or new_provider != self.provider:
+                    self.provider = new_provider
+                    logger.info(f"Updated provider: {self.provider}")
             except Exception as e:
                 logger.warning(f"Could not check parameter changes: {e}")
             
@@ -834,14 +1557,18 @@ class ChatPDF:
             logger.info("Clearing GPU memory before model switch...")
             self.clear_gpu_memory()
             
-            # Update model names
+            # Update model names and providers
             self.llm_model = llm_model
             self.embedding_model = embedding_model
+            if provider:
+                self.provider = provider
+            self.embedding_provider = embedding_provider
             
-            # Clear models if LLM changed or parameters changed
-            if llm_changed or parameters_changed:
-                logger.info(f"LLM or parameters changed, clearing model. LLM changed: {llm_changed}, Parameters changed: {parameters_changed}")
+            # Clear models if LLM, provider, or parameters changed
+            if llm_changed or parameters_changed or provider_changed:
+                logger.info(f"Model/provider/parameters changed, clearing model. LLM: {llm_changed}, Provider: {provider_changed}, Parameters: {parameters_changed}")
                 self.model = None
+                self.llm_provider = None
                 self.models_loaded = False
             
             # Force reload with new models
@@ -882,43 +1609,42 @@ class ChatPDF:
                 
                 if not self.embeddings:
                     logger.info(f"Loading embedding model: {self.embedding_model}")
-                    # Try to initialize embeddings
-                    self.embeddings = OllamaEmbeddings(
-                        model=self.embedding_model,
-                        base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434')
-                    )
+                    # Use stored embedding provider or auto-detect as fallback
+                    embedding_provider = self.embedding_provider or detect_model_provider(self.embedding_model)
+                    self.embeddings = create_embedding_model(self.embedding_model, embedding_provider)
+                    
                     # Test embeddings
                     self.embeddings.embed_query("test")
-                    logger.info("Embedding model loaded successfully")
+                    logger.info(f"Embedding model loaded successfully using {embedding_provider} provider")
                 
                 if not self.model:
-                    logger.info(f"Loading LLM model: {self.llm_model}")
+                    logger.info(f"Loading LLM model: {self.llm_model} using provider: {self.provider}")
                     logger.info(f"Using model parameters: {self.model_parameters}")
                     
-                    # Build model kwargs with parameters
-                    model_kwargs = {
-                        'model': self.llm_model,
-                        'base_url': os.getenv('OLLAMA_HOST', 'http://ollama:11434'),
-                        'temperature': self.model_parameters.get('temperature', 0.7),
-                        'num_ctx': self.model_parameters.get('max_tokens', 2048),
-                        'top_p': self.model_parameters.get('top_p', 0.9),
-                        'timeout': 120,  # Keep timeout for stability
-                        'streaming': True,  # Enable streaming
-                        'seed': 42  # Add seed for consistent responses
-                    }
-                    
-                    # Add frequency and presence penalties if supported by Ollama
-                    # Note: These might not be directly supported by Ollama, but we'll include them for future compatibility
-                    freq_penalty = self.model_parameters.get('frequency_penalty', 0.0)
-                    presence_penalty = self.model_parameters.get('presence_penalty', 0.0)
-                    
-                    if freq_penalty != 0.0:
-                        model_kwargs['frequency_penalty'] = freq_penalty
-                    if presence_penalty != 0.0:
-                        model_kwargs['presence_penalty'] = presence_penalty
-                    
-                    self.model = ChatOllama(**model_kwargs)
-                    logger.info("LLM model loaded successfully with custom parameters")
+                    # Create LLM provider and get model
+                    try:
+                        self.llm_provider = create_llm_provider(
+                            self.provider, 
+                            self.llm_model, 
+                            self.model_parameters
+                        )
+                        self.model = self.llm_provider.get_model()
+                        logger.info(f"LLM model loaded successfully using {self.provider} provider")
+                    except Exception as provider_error:
+                        logger.error(f"Failed to create {self.provider} provider: {provider_error}")
+                        # Fallback to Ollama if other provider fails
+                        if self.provider != "ollama":
+                            logger.info("Falling back to Ollama provider")
+                            self.provider = "ollama"
+                            self.llm_provider = create_llm_provider(
+                                "ollama", 
+                                self.llm_model, 
+                                self.model_parameters
+                            )
+                            self.model = self.llm_provider.get_model()
+                            logger.info("LLM model loaded successfully using fallback Ollama provider")
+                        else:
+                            raise provider_error
                 
                 # Mark models as loaded after successful initialization
                 self.models_loaded = True
@@ -1880,10 +2606,10 @@ class ChatPDF:
             
             # Reinitialize the embeddings with new model
             try:
-                self.embeddings = OllamaEmbeddings(
-                    model=model_name,
-                    base_url=self.ollama_url
-                )
+                # Auto-detect embedding provider and create appropriate model
+                embedding_provider = detect_model_provider(model_name)
+                self.embeddings = create_embedding_model(model_name, embedding_provider)
+                logger.info(f"Switched to embedding model '{model_name}' using {embedding_provider} provider")
                 
                 # Clear the vector store to force reinitialization with new embeddings
                 self.vector_store = None
@@ -3181,14 +3907,9 @@ def get_chatpdf_instance():
                 embedding_model = db_settings.get('embedding', embedding_model)
                 logger.info(f"Loaded current models from database for singleton: LLM={llm_model}, Embedding={embedding_model}")
             else:
-                # Fallback to config file
-                config_path = "model_settings.json"
-                if os.path.exists(config_path):
-                    with open(config_path, 'r') as f:
-                        settings = json.load(f)
-                        llm_model = settings.get('llm', llm_model)
-                        embedding_model = settings.get('embedding', embedding_model)
-                        logger.info(f"Loaded current models from config for singleton: LLM={llm_model}, Embedding={embedding_model}")
+                # No database settings found - use defaults
+                logger.warning("No model settings found in database for singleton, using defaults")
+                logger.info(f"Using default models for singleton: LLM={llm_model}, Embedding={embedding_model}")
         except Exception as e:
             logger.warning(f"Could not load current models for singleton, using defaults: {e}")
         

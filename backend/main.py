@@ -1,7 +1,7 @@
 import sys
 import os
 import json
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form, BackgroundTasks, Header, Query
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form, BackgroundTasks, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -29,10 +29,81 @@ import requests
 import subprocess
 import re
 
+# Global download status tracking
+download_status_cache = {}
+
+# WebSocket connection manager for download progress
+class DownloadProgressManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+
+    def disconnect(self, client_id: str):
+        if client_id in self.active_connections:
+            del self.active_connections[client_id]
+
+    async def send_progress(self, model_name: str, message: dict):
+        disconnected_clients = []
+        for client_id, websocket in self.active_connections.items():
+            try:
+                await websocket.send_json({
+                    "type": "download_progress",
+                    "model_name": model_name,
+                    **message
+                })
+            except:
+                disconnected_clients.append(client_id)
+        
+        # Clean up disconnected clients
+        for client_id in disconnected_clients:
+            self.disconnect(client_id)
+
+download_progress_manager = DownloadProgressManager()
+
+async def download_huggingface_model_background(model_name: str):
+    """Download HuggingFace model in background"""
+    try:
+        logger.info(f"🔄 Starting background download of HuggingFace reranker model: {model_name}")
+        
+        # Update status and notify WebSocket clients
+        status_update = {"downloading": True, "completed": False, "message": "Starting download...", "status": "downloading"}
+        download_status_cache[model_name] = status_update
+        await download_progress_manager.send_progress(model_name, status_update)
+        
+        # Update progress
+        status_update = {"downloading": True, "completed": False, "message": "Downloading model files...", "status": "downloading"}
+        download_status_cache[model_name] = status_update
+        await download_progress_manager.send_progress(model_name, status_update)
+        
+        from sentence_transformers import CrossEncoder
+        
+        # This will download the model to cache if not already present
+        # Run in thread pool to avoid blocking
+        import asyncio
+        loop = asyncio.get_event_loop()
+        model = await loop.run_in_executor(None, lambda: CrossEncoder(model_name))
+        
+        # Update status on success
+        status_update = {"downloading": False, "completed": True, "message": f"Successfully downloaded {model_name}", "status": "completed"}
+        download_status_cache[model_name] = status_update
+        await download_progress_manager.send_progress(model_name, status_update)
+        
+        logger.info(f"✅ Successfully downloaded HuggingFace reranker model: {model_name}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to download HuggingFace model {model_name}: {e}")
+        status_update = {"downloading": False, "completed": False, "message": f"Download failed: {str(e)}", "status": "failed"}
+        download_status_cache[model_name] = status_update
+        await download_progress_manager.send_progress(model_name, status_update)
+
 def get_gpu_memory_info() -> Dict[str, int]:
     """Get GPU memory information in MB"""
     try:
         # Try nvidia-smi first
+        logger.info("Attempting to get GPU info via nvidia-smi...")
         result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'], 
                               capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
@@ -44,17 +115,51 @@ def get_gpu_memory_info() -> Dict[str, int]:
                     total_mb = int(memory_info[0])
                     used_mb = int(memory_info[1])
                     free_mb = int(memory_info[2])
+                    logger.info(f"GPU detected via nvidia-smi: Total={total_mb}MB, Used={used_mb}MB, Free={free_mb}MB")
                     return {
                         'total': total_mb,
                         'used': used_mb,
                         'free': free_mb,
                         'available': free_mb
                     }
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        pass
+        logger.warning(f"nvidia-smi failed with return code {result.returncode}, stderr: {result.stderr}")
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError) as e:
+        logger.warning(f"nvidia-smi command failed: {e}")
+    
+    try:
+        # Try PyTorch GPU detection
+        logger.info("Attempting to get GPU info via PyTorch...")
+        import torch
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            logger.info(f"PyTorch detected {gpu_count} GPU(s)")
+            if gpu_count > 0:
+                # Get info for the first GPU
+                total_memory = torch.cuda.get_device_properties(0).total_memory
+                total_mb = int(total_memory / (1024 * 1024))
+                
+                # Get current memory usage
+                torch.cuda.empty_cache()  # Clear cache to get accurate reading
+                allocated = torch.cuda.memory_allocated(0)
+                cached = torch.cuda.memory_reserved(0)
+                used_mb = int((allocated + cached) / (1024 * 1024))
+                free_mb = total_mb - used_mb
+                
+                logger.info(f"GPU detected via PyTorch: Total={total_mb}MB, Used={used_mb}MB, Free={free_mb}MB")
+                return {
+                    'total': total_mb,
+                    'used': used_mb,
+                    'free': free_mb,
+                    'available': free_mb
+                }
+        else:
+            logger.info("PyTorch says CUDA is not available")
+    except Exception as e:
+        logger.warning(f"PyTorch GPU detection failed: {e}")
     
     try:
         # Fallback: Try to get info from /proc/driver/nvidia/gpus/
+        logger.info("Attempting to get GPU info via /proc/driver/nvidia/gpus/...")
         gpu_dirs = [d for d in os.listdir('/proc/driver/nvidia/gpus/') if os.path.isdir(f'/proc/driver/nvidia/gpus/{d}')]
         if gpu_dirs:
             # Read memory info from the first GPU
@@ -67,17 +172,24 @@ def get_gpu_memory_info() -> Dict[str, int]:
                     total_mb = int(memory_match.group(1))
                     # Estimate available as 80% of total (conservative)
                     available_mb = int(total_mb * 0.8)
+                    logger.info(f"GPU detected via /proc: Total={total_mb}MB, Estimated available={available_mb}MB")
                     return {
                         'total': total_mb,
                         'used': total_mb - available_mb,
                         'free': available_mb,
                         'available': available_mb
                     }
-    except (FileNotFoundError, PermissionError, ValueError):
-        pass
+    except (FileNotFoundError, PermissionError, ValueError) as e:
+        logger.warning(f"/proc/driver/nvidia detection failed: {e}")
     
     # If no GPU info available, return default values
-    logger.warning("Could not determine GPU memory, using default estimates")
+    logger.warning("Could not determine GPU memory, using default estimates. Running in CPU-only mode.")
+    return {
+        'total': 8192,  # 8GB default
+        'used': 2048,   # 2GB used
+        'free': 6144,   # 6GB free
+        'available': 6144
+    }
     return {
         'total': 8192,  # 8GB default
         'used': 2048,   # 2GB used
@@ -142,19 +254,19 @@ def check_model_compatibility_detailed(model_name: str, model_size: str = None) 
     
     # Leave some buffer for system and other processes (20% of total or min 1GB)
     buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
-    usable_memory = gpu_info['available'] - buffer_memory
+    usable_memory = gpu_info['total'] - buffer_memory  # Use total memory, not available
     
     is_compatible = required_memory <= usable_memory
     
     if is_compatible:
-        message = f"✅ Model {model_name} is compatible (requires ~{required_memory}MB, {usable_memory}MB available)"
+        message = f"✅ Model {model_name} is compatible (requires ~{required_memory}MB, {usable_memory}MB usable from {gpu_info['total']}MB total)"
     else:
         shortage = required_memory - usable_memory
-        message = f"❌ Model {model_name} requires ~{required_memory}MB but only {usable_memory}MB available (shortage: {shortage}MB)"
+        message = f"❌ Model {model_name} requires ~{required_memory}MB but only {usable_memory}MB usable from {gpu_info['total']}MB total (shortage: {shortage}MB)"
     
     details = {
         'required_memory_mb': required_memory,
-        'available_memory_mb': usable_memory,
+        'usable_memory_mb': usable_memory,  # Usable memory (total - buffer)
         'gpu_total_mb': gpu_info['total'],
         'gpu_used_mb': gpu_info['used'],
         'gpu_free_mb': gpu_info['free'],
@@ -1849,10 +1961,18 @@ async def get_document_chunks(
                     # Calculate embedding size safely
                     embedding_size = 0
                     try:
-                        if results.get('embeddings') and i < len(results['embeddings']) and results['embeddings'][i]:
-                            embedding_size = len(results['embeddings'][i])
+                        if results.get('embeddings') and i < len(results['embeddings']) and results['embeddings'][i] is not None:
+                            embedding = results['embeddings'][i]
+                            # Handle numpy arrays or lists
+                            if hasattr(embedding, 'shape'):
+                                embedding_size = embedding.shape[0] if len(embedding.shape) > 0 else 0
+                            elif isinstance(embedding, (list, tuple)):
+                                embedding_size = len(embedding)
+                            else:
+                                embedding_size = 1 if embedding else 0
                     except Exception as e:
                         logger.warning(f"Could not calculate embedding size for chunk {i}: {e}")
+                        embedding_size = 0
                     
                     chunk_data = {
                         "id": chunk_id,
@@ -2162,11 +2282,11 @@ async def get_available_models():
 
 @app.get("/api/models/current")
 async def get_current_models(current_user: dict = Depends(get_current_user)):
-    """Get current model settings including parameters"""
+    """Get current model settings including parameters and provider"""
     try:
         rag = get_chatpdf_instance()
         
-        # Load parameters from database first, then fallback to config file
+        # Load parameters and provider from database first, then fallback to config file
         parameters = {
             'temperature': 0.7,
             'max_tokens': 2048,
@@ -2174,32 +2294,391 @@ async def get_current_models(current_user: dict = Depends(get_current_user)):
             'frequency_penalty': 0.0,
             'presence_penalty': 0.0
         }
+        provider = "ollama"  # Default provider
         
         try:
             # Try database first
             db_settings = chat_db.get_latest_model_settings()
-            if db_settings and 'parameters' in db_settings:
-                parameters.update(db_settings['parameters'])
+            if db_settings:
+                if 'parameters' in db_settings:
+                    parameters.update(db_settings['parameters'])
+                if 'provider' in db_settings:
+                    provider = db_settings['provider']
             else:
-                # Fallback to config file
-                config_path = "model_settings.json"
-                if os.path.exists(config_path):
-                    with open(config_path, 'r') as f:
-                        settings = json.load(f)
-                        if 'parameters' in settings:
-                            parameters.update(settings['parameters'])
+                # No database settings found - use defaults
+                logger.warning("No model settings found in database, using defaults")
         except Exception as e:
-            logger.warning(f"Could not load parameters from database or config: {e}")
+            logger.warning(f"Could not load parameters from database: {e}")
         
         return {
             "success": True,
             "llm": rag.llm_model,
             "embedding": rag.embedding_model,
+            "provider": provider,
             "parameters": parameters
         }
     except Exception as e:
         logger.error(f"Error getting current models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get current models: {str(e)}")
+
+@app.get("/api/models/providers")
+async def get_model_providers(current_user: dict = Depends(get_current_user)):
+    """Get available model providers and their models"""
+    try:
+        def get_huggingface_models():
+            """Get popular Hugging Face models categorized by type using the official SDK"""
+            try:
+                # Import the official Hugging Face Hub SDK
+                from huggingface_hub import list_models
+                logger.info("Fetching models from Hugging Face Hub using official SDK...")
+                
+                def fetch_models_sdk(task: str, max_models: int = 100):
+                    """Fetch models from Hugging Face Hub using the SDK"""
+                    models = []
+                    try:
+                        # Use the official SDK to fetch models with proper pagination
+                        for model in list_models(filter=task, sort="downloads", direction=-1, limit=max_models * 2):  # Get more to filter
+                            # Skip private models
+                            if model.id.startswith("private/") or "/" not in model.id:
+                                continue
+                            
+                            model_type = "llm" if task == "text-generation" else "embedding"
+                            
+                            # For embedding models, apply stricter filtering
+                            if task in ["sentence-similarity", "feature-extraction"]:
+                                model_name_lower = model.id.lower()
+                                # Only include models that are clearly embedding models
+                                if any(keyword in model_name_lower for keyword in [
+                                    "sentence-transformers/", "embedding", "embed", "bge-", "e5-", 
+                                    "gte-", "multilingual", "mpnet", "minilm", "distilbert", 
+                                    "roberta", "bert-base", "msmarco", "paraphrase"
+                                ]):
+                                    # Exclude known non-embedding models
+                                    if not any(exclude in model_name_lower for exclude in [
+                                        "bart", "gpt", "t5-", "flan", "bloom", "llama", "mistral", 
+                                        "gemma", "qwen", "falcon", "vicuna", "generation", "chat"
+                                    ]):
+                                        models.append({
+                                            "name": model.id,
+                                            "downloads": getattr(model, 'downloads', 0) or 0,
+                                            "likes": getattr(model, 'likes', 0) or 0,
+                                            "type": "embedding",
+                                            "provider": "huggingface",
+                                            "task": task,
+                                            "last_modified": getattr(model, 'lastModified', None)
+                                        })
+                            else:
+                                # For LLM models, use existing logic
+                                models.append({
+                                    "name": model.id,
+                                    "downloads": getattr(model, 'downloads', 0) or 0,
+                                    "likes": getattr(model, 'likes', 0) or 0,
+                                    "type": model_type,
+                                    "provider": "huggingface",
+                                    "task": task,
+                                    "last_modified": getattr(model, 'lastModified', None)
+                                })
+                            
+                            # Stop when we reach the desired number
+                            if len(models) >= max_models:
+                                break
+                                
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch {task} models from HF Hub SDK: {e}")
+                        
+                    return models
+                
+                # Fetch LLM models (text-generation)
+                llm_models = fetch_models_sdk("text-generation", max_models=150)
+                logger.info(f"Found {len(llm_models)} LLM models from HF Hub SDK")
+                
+                # Fetch embedding models (sentence-similarity) 
+                embedding_models = fetch_models_sdk("sentence-similarity", max_models=100)
+                logger.info(f"Found {len(embedding_models)} embedding models from HF Hub SDK")
+                
+                # Also try feature-extraction as another embedding category
+                feature_extraction_models = fetch_models_sdk("feature-extraction", max_models=50)
+                logger.info(f"Found {len(feature_extraction_models)} feature-extraction models from HF Hub SDK")
+                
+                # Combine embedding models and mark them properly
+                all_embedding_models = embedding_models + [
+                    {**model, "type": "embedding"} for model in feature_extraction_models
+                ]
+                
+                # If SDK fails or returns too few models, fall back to curated list
+                if len(llm_models) < 10 and len(all_embedding_models) < 5:
+                    logger.info("SDK returned too few models, using fallback curated list")
+                    llm_models = [
+                        {"name": "microsoft/DialoGPT-medium", "type": "llm", "provider": "huggingface", "downloads": 50000},
+                        {"name": "google/flan-t5-base", "type": "llm", "provider": "huggingface", "downloads": 75000},
+                        {"name": "google/flan-t5-large", "type": "llm", "provider": "huggingface", "downloads": 60000},
+                        {"name": "facebook/blenderbot-1B-distill", "type": "llm", "provider": "huggingface", "downloads": 40000},
+                        {"name": "EleutherAI/gpt-neo-1.3B", "type": "llm", "provider": "huggingface", "downloads": 80000},
+                        {"name": "EleutherAI/gpt-j-6b", "type": "llm", "provider": "huggingface", "downloads": 90000},
+                        {"name": "bigscience/bloomz-1b1", "type": "llm", "provider": "huggingface", "downloads": 30000},
+                        {"name": "bigscience/bloomz-3b", "type": "llm", "provider": "huggingface", "downloads": 35000}
+                    ]
+                    all_embedding_models = [
+                        {"name": "sentence-transformers/all-MiniLM-L6-v2", "type": "embedding", "provider": "huggingface", "downloads": 200000},
+                        {"name": "sentence-transformers/all-mpnet-base-v2", "type": "embedding", "provider": "huggingface", "downloads": 150000},
+                        {"name": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", "type": "embedding", "provider": "huggingface", "downloads": 80000}
+                    ]
+                
+                # Sort by downloads (descending)
+                llm_models.sort(key=lambda x: x.get('downloads', 0), reverse=True)
+                all_embedding_models.sort(key=lambda x: x.get('downloads', 0), reverse=True)
+                
+                # Combine and return
+                all_models = llm_models + all_embedding_models
+                logger.info(f"Total HuggingFace models fetched: {len(all_models)} (LLM: {len(llm_models)}, Embedding: {len(all_embedding_models)})")
+                
+                return all_models
+                
+            except ImportError:
+                logger.warning("huggingface_hub not available, falling back to requests API")
+                # Fallback to the old requests method if SDK is not available
+                try:
+                    llm_models = []
+                    embedding_models = []
+                    
+                    # Get popular text-generation models (LLMs)
+                    try:
+                        llm_response = requests.get(
+                            "https://huggingface.co/api/models", 
+                            params={
+                                "filter": "text-generation",
+                                "sort": "downloads",
+                                "direction": -1,
+                                "limit": 50
+                            },
+                            timeout=10
+                        )
+                        if llm_response.status_code == 200:
+                            llm_data = llm_response.json()
+                            for model in llm_data:
+                                model_id = model.get('modelId', '')
+                                if model_id and not model_id.startswith('private/'):
+                                    llm_models.append({
+                                        "name": model_id,
+                                        "type": "llm",
+                                        "provider": "huggingface",
+                                        "downloads": model.get('downloads', 0)
+                                    })
+                            logger.info(f"Found {len(llm_models)} LLM models from fallback API")
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch LLM models from fallback API: {e}")
+                    
+                    # Get popular sentence-similarity/embedding models
+                    try:
+                        emb_response = requests.get(
+                            "https://huggingface.co/api/models",
+                            params={
+                                "filter": "sentence-similarity",
+                                "sort": "downloads", 
+                                "direction": -1,
+                                "limit": 30
+                            },
+                            timeout=10
+                        )
+                        if emb_response.status_code == 200:
+                            emb_data = emb_response.json()
+                            for model in emb_data:
+                                model_id = model.get('modelId', '')
+                                if model_id and not model_id.startswith('private/'):
+                                    embedding_models.append({
+                                        "name": model_id,
+                                        "type": "embedding",
+                                        "provider": "huggingface",
+                                        "downloads": model.get('downloads', 0)
+                                    })
+                            logger.info(f"Found {len(embedding_models)} embedding models from fallback API")
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch embedding models from fallback API: {e}")
+                    
+                    return llm_models + embedding_models
+                    
+                except Exception as e:
+                    logger.error(f"Fallback API also failed: {e}")
+                    # Return minimal fallback list
+                    return [
+                        {"name": "microsoft/DialoGPT-medium", "type": "llm", "provider": "huggingface", "downloads": 50000},
+                        {"name": "google/flan-t5-base", "type": "llm", "provider": "huggingface", "downloads": 75000},
+                        {"name": "sentence-transformers/all-MiniLM-L6-v2", "type": "embedding", "provider": "huggingface", "downloads": 200000}
+                    ]
+                    
+            except Exception as e:
+                logger.error(f"Error fetching Hugging Face models: {e}")
+                # Return minimal fallback list
+                return [
+                    {"name": "microsoft/DialoGPT-medium", "type": "llm", "provider": "huggingface", "downloads": 50000},
+                    {"name": "google/flan-t5-base", "type": "llm", "provider": "huggingface", "downloads": 75000},
+                    {"name": "sentence-transformers/all-MiniLM-L6-v2", "type": "embedding", "provider": "huggingface", "downloads": 200000}
+                ]
+
+        providers = {
+            "ollama": {
+                "name": "Ollama",
+                "icon": "ollama",
+                "models": []
+            },
+            "huggingface": {
+                "name": "Hugging Face",
+                "icon": "huggingface", 
+                "models": get_huggingface_models()
+            }
+        }
+        
+        # Get Ollama models dynamically using the comprehensive get_available_models function
+        try:
+            import httpx
+            from ollama_scraper import get_available_ollama_models
+            
+            ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+            
+            # Get locally installed models
+            local_models = []
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(f"{ollama_host}/api/tags")
+                    if response.status_code == 200:
+                        data = response.json()
+                        
+                        for model in data.get('models', []):
+                            model_name = model.get('name', '')
+                            model_size = model.get('size', 0)
+                            model_modified = model.get('modified_at', '')
+                            
+                            # Determine category with comprehensive embedding detection
+                            model_name_lower = model_name.lower()
+                            is_embedding = (
+                                'embed' in model_name_lower or
+                                'bge' in model_name_lower or
+                                'minilm' in model_name_lower or
+                                'all-minilm' in model_name_lower or
+                                'nomic' in model_name_lower or
+                                'e5-' in model_name_lower or
+                                'sentence' in model_name_lower or
+                                'text-embedding' in model_name_lower or
+                                'instructor' in model_name_lower or
+                                'gte-' in model_name_lower or
+                                'multilingual-e5' in model_name_lower or
+                                'arctic-embed' in model_name_lower or
+                                'mxbai-embed' in model_name_lower or
+                                model_name_lower.startswith('bge-') or
+                                model_name_lower.startswith('all-minilm-') or
+                                model_name_lower.startswith('e5-') or
+                                model_name_lower.startswith('gte-') or
+                                model_name_lower.startswith('nomic-') or
+                                'snowflake-arctic-embed' in model_name_lower or
+                                'paraphrase-' in model_name_lower or
+                                'distiluse' in model_name_lower
+                            )
+                            
+                            model_type = 'embedding' if is_embedding else 'llm'
+                            
+                            local_models.append({
+                                'name': model_name,
+                                'type': model_type,
+                                'category': model_type,
+                                'size': format_model_size(model_size),
+                                'modified_at': model_modified,
+                                'source': 'local',
+                                'provider': 'ollama',
+                                'description': f"Locally installed {model_type} model"
+                            })
+                    else:
+                        logger.warning(f"Could not fetch local Ollama models: {response.status_code}")
+            except Exception as e:
+                logger.warning(f"Could not fetch local Ollama models: {e}")
+            
+            # Get available models from Ollama library
+            try:
+                available_models = get_available_ollama_models(use_cache=True)
+                logger.info(f"Found {len(available_models)} models from Ollama library")
+            except Exception as e:
+                logger.warning(f"Could not fetch Ollama library models: {e}")
+                available_models = []
+            
+            # Combine local and available models, marking local ones
+            all_ollama_models = {}
+            
+            # Add local models first (these take priority)
+            for model in local_models:
+                all_ollama_models[model['name']] = model
+            
+            # Add available models that aren't already local
+            for model in available_models:
+                model_name = model['name']
+                if model_name not in all_ollama_models:
+                    # Determine category with comprehensive embedding detection
+                    model_name_lower = model_name.lower()
+                    is_embedding = (
+                        'embed' in model_name_lower or
+                        'bge' in model_name_lower or
+                        'minilm' in model_name_lower or
+                        'all-minilm' in model_name_lower or
+                        'nomic' in model_name_lower or
+                        'e5-' in model_name_lower or
+                        'sentence' in model_name_lower or
+                        'text-embedding' in model_name_lower or
+                        'instructor' in model_name_lower or
+                        'gte-' in model_name_lower or
+                        'multilingual-e5' in model_name_lower or
+                        'arctic-embed' in model_name_lower or
+                        'mxbai-embed' in model_name_lower or
+                        model_name_lower.startswith('bge-') or
+                        model_name_lower.startswith('all-minilm-') or
+                        model_name_lower.startswith('e5-') or
+                        model_name_lower.startswith('gte-') or
+                        model_name_lower.startswith('nomic-') or
+                        'snowflake-arctic-embed' in model_name_lower or
+                        'paraphrase-' in model_name_lower or
+                        'distiluse' in model_name_lower
+                    )
+                    
+                    # Override the category from library if needed
+                    model_type = 'embedding' if is_embedding else model.get('category', 'llm')
+                    
+                    # Add as available for download
+                    all_ollama_models[model_name] = {
+                        'name': model_name,
+                        'type': model_type,
+                        'category': model_type,
+                        'description': model.get('description', ''),
+                        'size': format_model_size(model.get('size', 'Unknown')),
+                        'source': 'library',
+                        'provider': 'ollama',
+                        'tags': model.get('tags', [])
+                    }
+                else:
+                    # Update local model with additional info from library
+                    all_ollama_models[model_name].update({
+                        'description': model.get('description', all_ollama_models[model_name].get('description', '')),
+                        'tags': model.get('tags', [])
+                    })
+            
+            # Convert to list and sort
+            ollama_models_list = list(all_ollama_models.values())
+            providers["ollama"]["models"] = sorted(ollama_models_list, key=lambda x: x['name'])
+            
+            logger.info(f"Found {len(ollama_models_list)} total Ollama models (local + library)")
+            
+        except Exception as e:
+            logger.warning(f"Could not fetch Ollama models: {e}")
+        
+        # Log summary
+        hf_models = providers["huggingface"]["models"]
+        hf_llm_count = len([m for m in hf_models if m.get('type') == 'llm'])
+        hf_emb_count = len([m for m in hf_models if m.get('type') == 'embedding'])
+        logger.info(f"Total HuggingFace models: {len(hf_models)} (LLM: {hf_llm_count}, Embedding: {hf_emb_count})")
+        
+        return {
+            "success": True,
+            "providers": providers
+        }
+    except Exception as e:
+        logger.error(f"Error getting model providers: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get model providers: {str(e)}")
 
 @app.post("/api/models/check-gpu")
 async def check_gpu_compatibility(request: dict = None):
@@ -2255,7 +2734,7 @@ async def check_gpu_compatibility(request: dict = None):
         total_required_mb = llm_details['required_memory_mb'] + embedding_details['required_memory_mb']
         gpu_info = get_gpu_memory_info()
         buffer_memory = max(1024, int(gpu_info['total'] * 0.2))
-        usable_memory = gpu_info['available'] - buffer_memory
+        usable_memory = gpu_info['total'] - buffer_memory  # Use total memory, not available
         
         combined_compatible = total_required_mb <= usable_memory
         
@@ -2278,9 +2757,10 @@ async def check_gpu_compatibility(request: dict = None):
             },
             "combined_check": {
                 "required_mb": total_required_mb,
-                "available_mb": usable_memory,
+                "usable_mb": usable_memory,
                 "compatible": combined_compatible,
-                "message": f"Combined models require {total_required_mb}MB, {usable_memory}MB available after buffer"
+                "message": f"Combined models require {total_required_mb}MB, {usable_memory}MB usable from {gpu_info['total']}MB total (after {buffer_memory}MB buffer)",
+                "shortage_mb": max(0, total_required_mb - usable_memory)
             },
             "gpu_info": gpu_info,
             "recommendation": (
@@ -2314,6 +2794,8 @@ async def update_models_settings(
         embedding_size = request.get('embedding_size')
         force_update = request.get('force', False)  # Allow bypassing compatibility check
         model_parameters = request.get('parameters', {})
+        provider = request.get('provider', 'ollama')  # Default to ollama for backward compatibility
+        embedding_provider = request.get('embedding_provider', provider)  # Use LLM provider as default for embedding
         
         if not llm_model or not embedding_model:
             raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
@@ -2435,7 +2917,7 @@ async def update_models_settings(
             
             # Update the models in the RAG system (this will only update parameters)
             try:
-                rag.update_models(llm_model, embedding_model)
+                rag.update_models(llm_model, embedding_model, provider=provider)
             except Exception as e:
                 logger.error(f"Error updating parameters: {str(e)}")
                 raise HTTPException(
@@ -2443,23 +2925,21 @@ async def update_models_settings(
                     detail=f"Failed to update parameters: {str(e)}"
                 )
             
-            # Save settings to database and config file
-            config_path = "model_settings.json"
+            # Save settings to database
             settings = {
                 'llm': llm_model,
                 'embedding': embedding_model,
-                'parameters': valid_parameters
+                'parameters': valid_parameters,
+                'provider': provider
             }
             
             # Save to database
             try:
-                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters, provider, embedding_provider_final)
+                logger.info(f"Model settings saved to database: {settings}")
             except Exception as e:
-                logger.warning(f"Could not save to database: {e}")
-            
-            # Also save to config file as backup
-            with open(config_path, 'w') as f:
-                json.dump(settings, f, indent=2)
+                logger.error(f"Could not save to database: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to save model settings: {e}")
             
             return {
                 "success": True,
@@ -2474,8 +2954,18 @@ async def update_models_settings(
         # Check which models need to be downloaded
         models_to_download = []
         
+        # Import the model provider detection function
+        from rag import detect_model_provider
+        
+        # Use provided providers or detect them from model names
+        llm_provider = provider if provider != 'ollama' else detect_model_provider(llm_model)
+        embedding_provider_final = embedding_provider if embedding_provider != 'ollama' else detect_model_provider(embedding_model)
+        
+        logger.info(f"Using providers - LLM: {llm_provider} for {llm_model}, Embedding: {embedding_provider_final} for {embedding_model}")
+        
+        # Only check Ollama models against Ollama's installed models
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Get currently installed models
+            # Get currently installed models from Ollama
             try:
                 response = await client.get(f"{ollama_host}/api/tags")
                 if response.status_code == 200:
@@ -2487,60 +2977,66 @@ async def update_models_settings(
                 logger.warning(f"Could not fetch installed models: {e}")
                 installed_models = set()
             
-            # Check if LLM model needs downloading
-            llm_model_to_check = llm_model
-            if llm_model not in installed_models:
-                # Check common variants for model matching
-                llm_variants = [
-                    llm_model,
-                    f"{llm_model}:latest", 
-                    llm_model.replace(":latest", "")
-                ]
-                model_found = any(variant in installed_models for variant in llm_variants)
-                if not model_found:
-                    models_to_download.append(llm_model)
-                    logger.info(f"LLM model {llm_model} needs to be downloaded")
-                else:
-                    logger.info(f"LLM model {llm_model} (or variant) already installed")
+            # Check if LLM model needs downloading (only for Ollama models)
+            if llm_provider.lower() == 'ollama':
+                llm_model_to_check = llm_model
+                if llm_model not in installed_models:
+                    # Check common variants for model matching
+                    llm_variants = [
+                        llm_model,
+                        f"{llm_model}:latest", 
+                        llm_model.replace(":latest", "")
+                    ]
+                    model_found = any(variant in installed_models for variant in llm_variants)
+                    if not model_found:
+                        models_to_download.append(llm_model)
+                        logger.info(f"Ollama LLM model {llm_model} needs to be downloaded")
+                    else:
+                        logger.info(f"Ollama LLM model {llm_model} (or variant) already installed")
+            else:
+                logger.info(f"LLM model {llm_model} is from {llm_provider} provider - will be handled during model creation")
                 
-            # Check if embedding model needs downloading with special handling for BGE/nomic
-            embedding_model_to_check = embedding_model
-            if embedding_model not in installed_models:
-                # Check common variants and fix common naming issues
-                embedding_variants = [
-                    embedding_model,
-                    f"{embedding_model}:latest",
-                    embedding_model.replace(":latest", "")
-                ]
-                
-                # Special handling for BGE models
-                if "bge" in embedding_model.lower():
-                    if embedding_model == "bge-m3:1.7M":
-                        # Fix incorrect format - should be bge-m3 not bge-m3:1.7M
-                        embedding_model = "bge-m3"
-                        embedding_model_to_check = "bge-m3"
-                        logger.info(f"Fixed BGE model name from bge-m3:1.7M to bge-m3")
-                    elif embedding_model == "bge-large:335m":
-                        embedding_model = "bge-large"
-                        embedding_model_to_check = "bge-large"
-                        logger.info(f"Fixed BGE model name from bge-large:335m to bge-large")
+            # Check if embedding model needs downloading (only for Ollama models)
+            if embedding_provider_final.lower() == 'ollama':
+                embedding_model_to_check = embedding_model
+                if embedding_model not in installed_models:
+                    # Check common variants and fix common naming issues
+                    embedding_variants = [
+                        embedding_model,
+                        f"{embedding_model}:latest",
+                        embedding_model.replace(":latest", "")
+                    ]
                     
-                    embedding_variants.extend([
-                        "bge-m3", "bge-large", "bge-m3:567m", "bge-large:335m"
-                    ])
-                
-                # Special handling for nomic models  
-                if "nomic" in embedding_model.lower():
-                    embedding_variants.extend([
-                        "nomic-embed-text", "nomic-embed-text:33.3M", "nomic-embed-text:latest"
-                    ])
-                
-                model_found = any(variant in installed_models for variant in embedding_variants)
-                if not model_found:
-                    models_to_download.append(embedding_model_to_check)
-                    logger.info(f"Embedding model {embedding_model_to_check} needs to be downloaded")
-                else:
-                    logger.info(f"Embedding model {embedding_model} (or variant) already installed")
+                    # Special handling for BGE models
+                    if "bge" in embedding_model.lower():
+                        if embedding_model == "bge-m3:1.7M":
+                            # Fix incorrect format - should be bge-m3 not bge-m3:1.7M
+                            embedding_model = "bge-m3"
+                            embedding_model_to_check = "bge-m3"
+                            logger.info(f"Fixed BGE model name from bge-m3:1.7M to bge-m3")
+                        elif embedding_model == "bge-large:335m":
+                            embedding_model = "bge-large"
+                            embedding_model_to_check = "bge-large"
+                            logger.info(f"Fixed BGE model name from bge-large:335m to bge-large")
+                        
+                        embedding_variants.extend([
+                            "bge-m3", "bge-large", "bge-m3:567m", "bge-large:335m"
+                        ])
+                    
+                    # Special handling for nomic models  
+                    if "nomic" in embedding_model.lower():
+                        embedding_variants.extend([
+                            "nomic-embed-text", "nomic-embed-text:33.3M", "nomic-embed-text:latest"
+                        ])
+                    
+                    model_found = any(variant in installed_models for variant in embedding_variants)
+                    if not model_found:
+                        models_to_download.append(embedding_model_to_check)
+                        logger.info(f"Ollama embedding model {embedding_model_to_check} needs to be downloaded")
+                    else:
+                        logger.info(f"Ollama embedding model {embedding_model} (or variant) already installed")
+            else:
+                logger.info(f"Embedding model {embedding_model} is from {embedding_provider_final} provider - will be handled during model creation")
             
             # Download missing models with progress tracking
             for model_name in models_to_download:
@@ -2678,7 +3174,7 @@ async def update_models_settings(
         
         try:
             # Update the models
-            rag.update_models(llm_model, embedding_model)
+            rag.update_models(llm_model, embedding_model, provider=provider, embedding_provider=embedding_provider_final)
         except Exception as e:
             logger.error(f"Error updating models: {str(e)}")
             
@@ -2701,23 +3197,22 @@ async def update_models_settings(
                 detail=error_detail
             )
         
-        # Save settings to database and config file
-        config_path = "model_settings.json"
+        # Save settings to database
         settings = {
             'llm': llm_model,
             'embedding': embedding_model,
-            'parameters': valid_parameters
+            'parameters': valid_parameters,
+            'provider': provider,
+            'embedding_provider': embedding_provider_final
         }
         
         # Save to database
         try:
-            chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+            chat_db.save_model_settings(llm_model, embedding_model, valid_parameters, provider, embedding_provider_final)
+            logger.info(f"Model settings saved to database: {settings}")
         except Exception as e:
-            logger.warning(f"Could not save to database: {e}")
-        
-        # Also save to config file as backup
-        with open(config_path, 'w') as f:
-            json.dump(settings, f, indent=2)
+            logger.error(f"Could not save to database: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save model settings: {e}")
         
         response_data = {
             "success": True,
@@ -2762,6 +3257,131 @@ async def update_models_settings(
         logger.error(f"Error updating models: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to update models: {str(e)}")
 
+@app.post("/api/models/download-huggingface")
+async def download_huggingface_model(
+    request: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Download and validate HuggingFace model before adding to settings"""
+    try:
+        model_name = request.get('model_name')
+        model_type = request.get('model_type', 'llm')  # 'llm' or 'embedding'
+        
+        if not model_name:
+            raise HTTPException(status_code=400, detail="Model name is required")
+        
+        logger.info(f"Attempting to download HuggingFace model: {model_name} (type: {model_type})")
+        
+        # Import HuggingFace provider
+        from rag import HuggingFaceProvider, create_embedding_model
+        
+        if model_type == 'llm':
+            # Create HuggingFace provider and attempt to load model
+            provider = HuggingFaceProvider(model_name, {})
+            
+            try:
+                # This will check if model is downloaded and download if needed
+                model = provider.create_model()
+                
+                # If we get here, download was successful
+                return {
+                    "success": True,
+                    "message": f"Successfully downloaded and validated LLM model: {model_name}",
+                    "model_name": model_name,
+                    "model_type": model_type,
+                    "ready_to_use": True
+                }
+                
+            except ValueError as e:
+                # Check if this is a gated model error
+                error_str = str(e)
+                if error_str.startswith("GATED_MODEL_ERROR:"):
+                    # Parse the structured error data
+                    try:
+                        error_data = json.loads(error_str.replace("GATED_MODEL_ERROR:", ""))
+                        return {
+                            "success": False,
+                            "error_type": "gated_model",
+                            "model_name": model_name,
+                            "model_type": model_type,
+                            "message": error_data["message"],
+                            "model_url": error_data["model_url"],
+                            "steps": error_data["steps"],
+                            "alternatives": error_data.get("alternatives", [])
+                        }
+                    except json.JSONDecodeError:
+                        pass
+                raise HTTPException(status_code=400, detail=str(e))
+                
+            except Exception as e:
+                logger.error(f"Failed to download LLM model {model_name}: {e}")
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"Failed to download model: {str(e)}"
+                )
+        
+        elif model_type == 'embedding':
+            try:
+                # Create embedding model and attempt to load
+                embedding_model = create_embedding_model(model_name, 'huggingface')
+                
+                # Test the embedding model
+                test_embedding = embedding_model.embed_query("test")
+                
+                if test_embedding and len(test_embedding) > 0:
+                    return {
+                        "success": True,
+                        "message": f"Successfully downloaded and validated embedding model: {model_name}",
+                        "model_name": model_name,
+                        "model_type": model_type,
+                        "embedding_dimension": len(test_embedding),
+                        "ready_to_use": True
+                    }
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Model downloaded but failed validation test"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Failed to download embedding model {model_name}: {e}")
+                
+                # Check for gated model error
+                if "gated" in str(e).lower() or "access" in str(e).lower():
+                    model_url = f"https://huggingface.co/{model_name}"
+                    return {
+                        "success": False,
+                        "error_type": "gated_model",
+                        "model_name": model_name,
+                        "model_type": model_type,
+                        "message": f"Model '{model_name}' requires special access",
+                        "model_url": model_url,
+                        "steps": [
+                            f"Visit the model page: {model_url}",
+                            "Click 'Request access' button",
+                            "Wait for approval",
+                            "Ensure you have a valid HuggingFace token in your .env file",
+                            "Try again after approval is granted"
+                        ]
+                    }
+                
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to download embedding model: {str(e)}"
+                )
+        
+        else:
+            raise HTTPException(status_code=400, detail="model_type must be 'llm' or 'embedding'")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in download_huggingface_model: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error: {str(e)}"
+        )
+
 @app.post("/api/models/simple-settings")
 async def update_simple_models_settings(
     request: dict,
@@ -2773,13 +3393,39 @@ async def update_simple_models_settings(
         import asyncio
         from rag import check_model_compatibility
         
+        # Debug: Print the entire request to see what frontend is sending
+        logger.info(f"🔍 DEBUG: Frontend request: {request}")
+        
         # Validate and normalize model names
         llm_model = request.get('llm')
         embedding_model = request.get('embedding')
         model_parameters = request.get('parameters', {})
+        requested_provider = request.get('provider')  # Get provider from request
+        requested_embedding_provider = request.get('embedding_provider', requested_provider)  # Get embedding provider from request
+        
+        logger.info(f"🔍 DEBUG: Extracted provider from request: '{requested_provider}'")
+        logger.info(f"🔍 DEBUG: Extracted embedding provider from request: '{requested_embedding_provider}'")
         
         if not llm_model or not embedding_model:
             raise HTTPException(status_code=400, detail="Both LLM and embedding models are required")
+        
+        # Use requested provider if provided, otherwise auto-detect
+        if requested_provider:
+            detected_provider = requested_provider
+            logger.info(f"Using requested provider '{detected_provider}' for LLM model '{llm_model}'")
+        else:
+            from rag import detect_model_provider
+            detected_provider = detect_model_provider(llm_model)
+            logger.info(f"Auto-detected provider '{detected_provider}' for LLM model '{llm_model}'")
+        
+        # Use requested embedding provider if provided, otherwise auto-detect
+        if requested_embedding_provider:
+            detected_embedding_provider = requested_embedding_provider
+            logger.info(f"Using requested embedding provider '{detected_embedding_provider}' for embedding model '{embedding_model}'")
+        else:
+            from rag import detect_model_provider
+            detected_embedding_provider = detect_model_provider(embedding_model)
+            logger.info(f"Auto-detected embedding provider '{detected_embedding_provider}' for embedding model '{embedding_model}'")
         
         # Validate model parameters
         valid_parameters = {}
@@ -2899,7 +3545,7 @@ async def update_simple_models_settings(
             
             # Update the models in the RAG system (this will only update parameters)
             try:
-                rag.update_models(llm_model, embedding_model)
+                rag.update_models(llm_model, embedding_model, provider=detected_provider, embedding_provider=detected_embedding_provider)
             except Exception as e:
                 logger.error(f"Error updating parameters: {str(e)}")
                 raise HTTPException(
@@ -2907,23 +3553,22 @@ async def update_simple_models_settings(
                     detail=f"Failed to update parameters: {str(e)}"
                 )
             
-            # Save settings to database and config file
-            config_path = "model_settings.json"
+            # Save settings to database
             settings = {
                 'llm': llm_model,
                 'embedding': embedding_model,
+                'provider': detected_provider,
+                'embedding_provider': detected_embedding_provider,
                 'parameters': valid_parameters
             }
             
             # Save to database
             try:
-                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters, detected_provider, detected_embedding_provider)
+                logger.info(f"Model settings saved to database: {settings}")
             except Exception as e:
-                logger.warning(f"Could not save to database: {e}")
-            
-            # Also save to config file as backup
-            with open(config_path, 'w') as f:
-                json.dump(settings, f, indent=2)
+                logger.error(f"Could not save to database: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to save model settings: {e}")
             
             response_data = {
                 "success": True,
@@ -2941,88 +3586,159 @@ async def update_simple_models_settings(
             
             return response_data
         
-        # Check which models need to be downloaded
+        # Use provider-aware model initialization instead of just Ollama
         models_to_download = []
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Get currently installed models
-            try:
-                response = await client.get(f"{ollama_host}/api/tags")
-                if response.status_code == 200:
-                    data = response.json()
-                    installed_models = {model.get('name', '') for model in data.get('models', [])}
-                else:
-                    installed_models = set()
-            except Exception as e:
-                logger.warning(f"Could not fetch installed models: {e}")
-                installed_models = set()
-            
-            # Check if models need downloading
-            if llm_model not in installed_models:
-                models_to_download.append(llm_model)
-                
-            if embedding_model not in installed_models:
-                models_to_download.append(embedding_model)
-            
-            # Download missing models with progress tracking
-            for model_name in models_to_download:
-                logger.info(f"Downloading model: {model_name}")
-                try:
-                    download_response = await client.post(
-                        f"{ollama_host}/api/pull",
-                        json={"name": model_name},
-                        timeout=600.0  # 10 minutes timeout for model download
-                    )
-                    
-                    if download_response.status_code != 200:
-                        logger.error(f"Failed to download model {model_name}: {download_response.status_code}")
-                        raise HTTPException(
-                            status_code=500, 
-                            detail=f"Failed to download model {model_name}"
-                        )
-                    else:
-                        logger.info(f"Successfully downloaded model: {model_name}")
-                        
-                except httpx.TimeoutException:
-                    logger.error(f"Timeout downloading model {model_name}")
-                    raise HTTPException(
-                        status_code=500, 
-                        detail=f"Timeout downloading model {model_name}. Please try again."
-                    )
-                except Exception as e:
-                    logger.error(f"Error downloading model {model_name}: {e}")
-                    raise HTTPException(
-                        status_code=500, 
-                        detail=f"Failed to download model {model_name}: {str(e)}"
-                    )
-        
-        # Get RAG instance
+        # Get RAG instance first
         rag = get_chatpdf_instance()
         
         # Check if embedding model changed - if so, we need to re-ingest
         embedding_changed = rag.embedding_model != embedding_model
         
-        # Update the models
-        rag.update_models(llm_model, embedding_model)
-        
-        # Save settings to database and config file
-        config_path = "model_settings.json"
-        settings = {
-            'llm': llm_model,
-            'embedding': embedding_model,
-            'parameters': valid_parameters
-        }
-        
-        # Save to database
+        # Try to initialize models with provider-specific logic
         try:
-            chat_db.save_model_settings(llm_model, embedding_model, valid_parameters)
+            if detected_provider == 'huggingface':
+                # For HuggingFace, attempt direct initialization which will handle gated models properly
+                from rag import HuggingFaceProvider
+                
+                # Test HuggingFace LLM model download
+                logger.info(f"Testing HuggingFace model download: {llm_model}")
+                hf_provider = HuggingFaceProvider(llm_model)
+                
+                # This will attempt download and return gated model error if needed
+                download_result = hf_provider._download_model_if_needed(llm_model)
+                
+                if download_result.get('success') == False:
+                    logger.error(f"HuggingFace model download failed: {download_result}")
+                    
+                    # Check if it's a gated model error
+                    if download_result.get('error') in ['gated_no_token', 'gated_no_access']:
+                        # Format the gated model error for frontend handling
+                        gated_error_json = {
+                            'error_type': download_result['error'],
+                            'model_name': llm_model,
+                            'model_url': download_result['model_url'],
+                            'message': download_result['message'],
+                            'steps': download_result['steps']
+                        }
+                        
+                        # Add alternatives if present
+                        if 'alternatives' in download_result:
+                            gated_error_json['alternatives'] = download_result['alternatives']
+                        
+                        # Return the gated model error in the response for frontend handling
+                        return {
+                            "success": True,
+                            "message": f"GATED_MODEL_ERROR:{json.dumps(gated_error_json)}",
+                            "llm": llm_model,
+                            "embedding": embedding_model,
+                            "embedding_changed": False,
+                            "downloaded_models": [],
+                            "gated_model_error": True
+                        }
+                    else:
+                        # Other HuggingFace error
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed to download HuggingFace model {llm_model}: {download_result.get('message', 'Unknown error')}"
+                        )
+                
+                # HuggingFace download successful, continue with update
+                models_to_download.append(llm_model)
+                
+            else:
+                # For Ollama, use the existing download logic
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    # Get currently installed models
+                    try:
+                        response = await client.get(f"{ollama_host}/api/tags")
+                        if response.status_code == 200:
+                            data = response.json()
+                            installed_models = {model.get('name', '') for model in data.get('models', [])}
+                        else:
+                            installed_models = set()
+                    except Exception as e:
+                        logger.warning(f"Could not fetch installed models: {e}")
+                        installed_models = set()
+                    
+                    # Check if models need downloading
+                    if llm_model not in installed_models:
+                        models_to_download.append(llm_model)
+                        
+                    if embedding_model not in installed_models:
+                        models_to_download.append(embedding_model)
+                    
+                    # Download missing models with progress tracking
+                    for model_name in models_to_download:
+                        logger.info(f"Downloading model: {model_name}")
+                        try:
+                            download_response = await client.post(
+                                f"{ollama_host}/api/pull",
+                                json={"name": model_name},
+                                timeout=600.0  # 10 minutes timeout for model download
+                            )
+                            
+                            if download_response.status_code != 200:
+                                logger.error(f"Failed to download model {model_name}: {download_response.status_code}")
+                                raise HTTPException(
+                                    status_code=500, 
+                                    detail=f"Failed to download model {model_name}"
+                                )
+                            else:
+                                logger.info(f"Successfully downloaded model: {model_name}")
+                                
+                        except httpx.TimeoutException:
+                            logger.error(f"Timeout downloading model {model_name}")
+                            raise HTTPException(
+                                status_code=500, 
+                                detail=f"Timeout downloading model {model_name}. Please try again."
+                            )
+                        except Exception as e:
+                            logger.error(f"Error downloading model {model_name}: {e}")
+                            raise HTTPException(
+                                status_code=500, 
+                                detail=f"Failed to download model {model_name}: {str(e)}"
+                            )
+            
+            # Update the models with provider-specific logic
+            rag.update_models(llm_model, embedding_model, provider=detected_provider, embedding_provider=detected_embedding_provider)
+            
+            # Only save to database AFTER successful model update and download
+            # Save settings to database
+            settings = {
+                'llm': llm_model,
+                'embedding': embedding_model,
+                'provider': detected_provider,
+                'embedding_provider': detected_embedding_provider,
+                'parameters': valid_parameters
+            }
+            
+            # Save to database
+            try:
+                chat_db.save_model_settings(llm_model, embedding_model, valid_parameters, detected_provider, detected_embedding_provider)
+                logger.info(f"Model settings saved to database after successful download: {settings}")
+            except Exception as e:
+                logger.error(f"Could not save to database: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to save model settings: {e}")
+            
         except Exception as e:
-            logger.warning(f"Could not save to database: {e}")
-        
-        # Also save to config file as backup
-        with open(config_path, 'w') as f:
-            json.dump(settings, f, indent=2)
-        
+            # Check if the error message contains gated model information
+            error_str = str(e)
+            if 'GATED_MODEL_ERROR:' in error_str:
+                # Extract and return the gated model error for frontend handling
+                return {
+                    "success": True,
+                    "message": error_str,  # Contains GATED_MODEL_ERROR: JSON
+                    "llm": llm_model,
+                    "embedding": embedding_model,
+                    "embedding_changed": False,
+                    "downloaded_models": [],
+                    "gated_model_error": True
+                }
+            else:
+                # Re-raise non-gated errors
+                raise e
+
         response_data = {
             "success": True,
             "message": "Models updated successfully",
@@ -3182,10 +3898,36 @@ async def get_retrieval_config(token: str = Depends(oauth2_scheme)):
         logger.error(f"Error getting retrieval config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def check_and_download_reranker_model(model_name: str) -> Dict[str, Any]:
+async def check_and_download_reranker_model(model_name: str, provider: str = "ollama") -> Dict[str, Any]:
     """Check if a reranker model is available locally, download if not"""
     if not model_name or model_name.lower() == "none":
         return {"success": True, "downloaded": False, "message": "No reranker model specified"}
+    
+    # For HuggingFace models, handle download with status tracking
+    if provider == "huggingface":
+        # Check if already downloading
+        if model_name in download_status_cache:
+            status = download_status_cache[model_name]
+            return {"success": True, "downloaded": status.get("completed", False), "message": status.get("message", "Download in progress"), "downloading": status.get("downloading", False)}
+        
+        # Start download process
+        try:
+            logger.info(f"🔄 Downloading HuggingFace reranker model: {model_name}")
+            download_status_cache[model_name] = {"downloading": True, "completed": False, "message": "Starting download..."}
+            
+            from sentence_transformers import CrossEncoder
+            
+            # This will download the model to cache if not already present
+            model = CrossEncoder(model_name)
+            
+            # Update status on success
+            download_status_cache[model_name] = {"downloading": False, "completed": True, "message": f"Successfully downloaded {model_name}"}
+            
+            return {"success": True, "downloaded": True, "message": f"HuggingFace model {model_name} downloaded successfully"}
+        except Exception as e:
+            logger.error(f"Failed to download HuggingFace model {model_name}: {e}")
+            download_status_cache[model_name] = {"downloading": False, "completed": False, "message": f"Download failed: {str(e)}"}
+            return {"success": False, "downloaded": False, "message": f"Failed to download HuggingFace model: {str(e)}"}
     
     try:
         import httpx
@@ -3303,6 +4045,7 @@ async def check_and_download_reranker_model(model_name: str) -> Dict[str, Any]:
 @app.put("/api/retrieval/config")
 async def update_retrieval_config(
     config_data: Dict[str, Any],
+    background_tasks: BackgroundTasks,
     token: str = Depends(oauth2_scheme)
 ):
     """Update retrieval configuration with auto-download for reranker models"""
@@ -3316,15 +4059,25 @@ async def update_retrieval_config(
         # Create config from provided data
         config = RetrievalConfig.from_dict(config_data)
         
-        # Check and download reranker model if needed
+        # Check and handle reranker model download
         download_result = {"success": True, "downloaded": False, "message": "No reranker model specified"}
         if config.reranker_enabled and config.reranker_model and config.reranker_model.lower() != "none":
             logger.info(f"🎯 Checking reranker model availability: {config.reranker_model}")
-            download_result = await check_and_download_reranker_model(config.reranker_model)
             
-            if not download_result["success"]:
-                # If download failed, still save config but include warning
-                logger.warning(f"⚠️ Reranker model download failed but continuing with config save: {download_result['message']}")
+            if config.reranker_provider == "huggingface":
+                # For HuggingFace models, start download in background
+                if config.reranker_model not in download_status_cache:
+                    download_status_cache[config.reranker_model] = {"downloading": True, "completed": False, "message": "Download starting..."}
+                    # Use asyncio.create_task instead of BackgroundTasks
+                    asyncio.create_task(download_huggingface_model_background(config.reranker_model))
+                download_result = {"success": True, "downloaded": False, "message": f"HuggingFace model {config.reranker_model} download started in background"}
+            else:
+                # For Ollama models, download synchronously
+                download_result = await check_and_download_reranker_model(config.reranker_model, config.reranker_provider)
+                
+                if not download_result["success"]:
+                    # If download failed, still save config but include warning
+                    logger.warning(f"⚠️ Reranker model download failed but continuing with config save: {download_result['message']}")
         
         # Validate configuration
         warnings = config_manager.validate_config(config)
@@ -3359,8 +4112,8 @@ async def update_retrieval_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/retrieval/reranker-models")
-async def get_available_reranker_models(token: str = Depends(oauth2_scheme)):
-    """Get list of available reranker models from Ollama (both local and library)"""
+async def get_available_reranker_models(provider: Optional[str] = None, token: str = Depends(oauth2_scheme)):
+    """Get list of available reranker models from Ollama and HuggingFace"""
     try:
         # Get models from Ollama API (locally installed) and Ollama scraper (library)
         ollama_url = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
@@ -3408,7 +4161,8 @@ async def get_available_reranker_models(token: str = Depends(oauth2_scheme)):
         reranker_models.append({
             "name": "",
             "display_name": "None (Vector + Keyword)",
-            "description": "Use weighted combination of vector similarity and keyword matching"
+            "description": "Use weighted combination of vector similarity and keyword matching",
+            "provider": "none"
         })
         
         # Check each model (both local and library)
@@ -3465,41 +4219,126 @@ async def get_available_reranker_models(token: str = Depends(oauth2_scheme)):
                     "name": original_name,
                     "display_name": display_name,
                     "description": description,
-                    "is_local": is_local
+                    "is_local": is_local,
+                    "provider": "ollama"
                 })
+        
+        # Add HuggingFace reranker models
+        huggingface_reranker_models = [
+            {
+                "name": "BAAI/bge-reranker-v2-m3",
+                "display_name": "BGE Reranker V2 M3",
+                "description": "🤗 Multilingual BGE reranking model with excellent cross-lingual performance",
+                "provider": "huggingface",
+                "size": "1.2B",
+                "is_local": False
+            },
+            {
+                "name": "BAAI/bge-reranker-large",
+                "display_name": "BGE Reranker Large",
+                "description": "🤗 Large BGE reranking model for high-accuracy document ranking",
+                "provider": "huggingface",
+                "size": "560M",
+                "is_local": False
+            },
+            {
+                "name": "BAAI/bge-reranker-base",
+                "display_name": "BGE Reranker Base",
+                "description": "🤗 Base BGE reranking model, balanced performance and speed",
+                "provider": "huggingface",
+                "size": "278M",
+                "is_local": False
+            },
+            {
+                "name": "jinaai/jina-reranker-v1-base-en",
+                "display_name": "Jina Reranker V1 Base (English)",
+                "description": "🤗 Jina's dedicated reranking model optimized for English",
+                "provider": "huggingface",
+                "size": "278M",
+                "is_local": False
+            },
+            {
+                "name": "jinaai/jina-reranker-v1-tiny-en",
+                "display_name": "Jina Reranker V1 Tiny (English)",
+                "description": "🤗 Lightweight Jina reranker for fast processing",
+                "provider": "huggingface",
+                "size": "33M",
+                "is_local": False
+            },
+            {
+                "name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+                "display_name": "MS Marco MiniLM L6 V2",
+                "description": "🤗 Microsoft's cross-encoder reranker trained on MS MARCO",
+                "provider": "huggingface",
+                "size": "90M",
+                "is_local": False
+            },
+            {
+                "name": "cross-encoder/ms-marco-MiniLM-L-12-v2",
+                "display_name": "MS Marco MiniLM L12 V2",
+                "description": "🤗 Larger Microsoft cross-encoder with better accuracy",
+                "provider": "huggingface",
+                "size": "134M",
+                "is_local": False
+            },
+            {
+                "name": "mixedbread-ai/mxbai-rerank-large-v1",
+                "display_name": "MixedBread AI Rerank Large V1",
+                "description": "🤗 High-performance multilingual reranking model",
+                "provider": "huggingface",
+                "size": "560M",
+                "is_local": False
+            }
+        ]
+        
+        # Add HuggingFace models to the list
+        reranker_models.extend(huggingface_reranker_models)
         
         # logger.info(f"Reranker model filtering: Checked {total_models_checked} models, found {reranker_models_found} dedicated reranker models")
         
-        # If no reranker models found, add some fallback models
-        if len(reranker_models) == 1:  # Only "None" option
-            logger.warning("No reranker models found in Ollama, adding fallback models")
-            fallback_models = [
+        # If no ollama reranker models found, add some fallback ollama models
+        if reranker_models_found == 0:
+            logger.warning("No reranker models found in Ollama, adding fallback Ollama models")
+            fallback_ollama_models = [
                 {
                     "name": "linux6200/bge-reranker-v2-m3",
                     "display_name": "BGE Reranker V2 M3",
                     "description": "High-performance BGE reranking model (available to download)",
-                    "is_local": False
+                    "is_local": False,
+                    "provider": "ollama"
                 },
                 {
                     "name": "dengcao/Qwen3-Reranker-8B",
                     "display_name": "Qwen3 Reranker 8B",
                     "description": "Alibaba's multilingual reranking model (available to download)",
-                    "is_local": False
+                    "is_local": False,
+                    "provider": "ollama"
                 },
                 {
                     "name": "qllama/bge-reranker-large",
                     "display_name": "BGE Reranker Large (Quantized)",
                     "description": "Quantized BGE reranking model (available to download)",
-                    "is_local": False
+                    "is_local": False,
+                    "provider": "ollama"
                 },
                 {
                     "name": "BAAI/bge-reranker-large",
                     "display_name": "BGE Reranker Large (Original)",
                     "description": "Original BGE reranking model (may need to be pulled)",
-                    "is_local": False
+                    "is_local": False,
+                    "provider": "ollama"
                 }
             ]
-            reranker_models.extend(fallback_models)
+            reranker_models.extend(fallback_ollama_models)
+        
+        # Apply server-side filtering if provider is specified
+        if provider:
+            if provider == 'ollama':
+                # Filter for Ollama models and the "None" option
+                reranker_models = [model for model in reranker_models if model.get('provider') in ['ollama', 'none']]
+            elif provider == 'huggingface':
+                # Filter for HuggingFace models and the "None" option
+                reranker_models = [model for model in reranker_models if model.get('provider') in ['huggingface', 'none']]
         
         return {
             "models": reranker_models
@@ -3512,24 +4351,76 @@ async def get_available_reranker_models(token: str = Depends(oauth2_scheme)):
             {
                 "name": "",
                 "display_name": "None (Vector + Keyword)",
-                "description": "Use weighted combination of vector similarity and keyword matching"
+                "description": "Use weighted combination of vector similarity and keyword matching",
+                "provider": "none"
+            },
+            {
+                "name": "BAAI/bge-reranker-v2-m3",
+                "display_name": "BGE Reranker V2 M3",
+                "description": "🤗 Multilingual BGE reranking model (error occurred)",
+                "provider": "huggingface",
+                "is_local": False
             },
             {
                 "name": "linux6200/bge-reranker-v2-m3",
                 "display_name": "BGE Reranker V2 M3",
                 "description": "High-performance BGE reranking model (error occurred)",
-                "is_local": False
-            },
-            {
-                "name": "dengcao/Qwen3-Reranker-8B",
-                "display_name": "Qwen3 Reranker 8B",
-                "description": "Alibaba's multilingual reranking model (error occurred)",
+                "provider": "ollama",
                 "is_local": False
             }
         ]
         return {
             "models": fallback_models
         }
+
+@app.get("/api/retrieval/reranker-download-status")
+async def get_reranker_download_status(model_name: str, token: str = Depends(oauth2_scheme)):
+    """Get the download status of a reranker model"""
+    try:
+        if model_name in download_status_cache:
+            status = download_status_cache[model_name]
+            return {
+                "model_name": model_name,
+                "downloading": status.get("downloading", False),
+                "completed": status.get("completed", False),
+                "message": status.get("message", "Unknown status")
+            }
+        else:
+            return {
+                "model_name": model_name,
+                "downloading": False,
+                "completed": False,
+                "message": "No download status available"
+            }
+    except Exception as e:
+        logger.error(f"Error getting download status for {model_name}: {e}")
+        return {
+            "model_name": model_name,
+            "downloading": False,
+            "completed": False,
+            "message": f"Error getting status: {str(e)}"
+        }
+
+@app.websocket("/api/ws/download-progress")
+async def websocket_download_progress(websocket: WebSocket, token: str = None):
+    """WebSocket endpoint for real-time download progress updates"""
+    import uuid
+    client_id = str(uuid.uuid4())
+    
+    try:
+        # Add to manager with client ID (this will accept the connection)
+        await download_progress_manager.connect(websocket, client_id)
+        
+        try:
+            # Keep connection alive and listen for disconnection
+            while True:
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        download_progress_manager.disconnect(client_id)
 
 def _get_method_description(method: ChunkingMethod) -> str:
     """Get description for chunking method"""

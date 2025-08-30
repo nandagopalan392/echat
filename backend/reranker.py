@@ -15,16 +15,32 @@ logger = logging.getLogger(__name__)
 class CrossEncoderReranker:
     """Reranker that uses cross-encoder models to improve retrieval relevance"""
     
-    def __init__(self, model_name: str = "BAAI/bge-reranker-large"):
+    def __init__(self, model_name: str = "BAAI/bge-reranker-large", provider: str = "ollama"):
         """
         Initialize the reranker.
         
         Args:
             model_name: Name of the reranker model to use.
+            provider: Provider for the model ('ollama' or 'huggingface')
         """
         self.model_name = model_name
+        self.provider = provider
         self.ollama_base_url = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
-        logger.info(f"Initialized CrossEncoderReranker with model {model_name}")
+        self._huggingface_model = None
+        logger.info(f"Initialized CrossEncoderReranker with model {model_name} (provider: {provider})")
+        
+    def _load_huggingface_model(self):
+        """Load HuggingFace model using sentence-transformers"""
+        if self._huggingface_model is None:
+            try:
+                from sentence_transformers import CrossEncoder
+                logger.info(f"Loading HuggingFace model: {self.model_name}")
+                self._huggingface_model = CrossEncoder(self.model_name)
+                logger.info(f"Successfully loaded HuggingFace model: {self.model_name}")
+            except Exception as e:
+                logger.error(f"Failed to load HuggingFace model {self.model_name}: {e}")
+                raise
+        return self._huggingface_model
         
     async def rerank(self, query: str, documents: List[Document], top_k: int = 3) -> List[Document]:
         """
@@ -95,19 +111,90 @@ class CrossEncoderReranker:
         """
         try:
             # Use the configured reranker model
-            print(f"[RERANKER] Using reranker model: {self.model_name}")
+            print(f"[RERANKER] Using reranker model: {self.model_name} (provider: {self.provider})")
             
+            # For HuggingFace models, use sentence-transformers directly
+            if self.provider == "huggingface":
+                return await self._compute_scores_huggingface(pairs)
+            else:
+                return await self._compute_scores_ollama(pairs)
+                
+        except Exception as e:
+            logger.error(f"Error computing scores: {str(e)}")
+            # Return neutral scores as fallback
+            return [0.5] * len(pairs)
+    
+    async def _compute_scores_huggingface(self, pairs: List[tuple]) -> List[float]:
+        """Compute scores using HuggingFace CrossEncoder"""
+        try:
+            model = self._load_huggingface_model()
+            
+            # Prepare input pairs for the cross-encoder
+            input_pairs = [[query, doc] for query, doc in pairs]
+            
+            # Compute scores using the cross-encoder
+            scores = model.predict(input_pairs)
+            
+            # Convert to list and ensure it's float
+            if hasattr(scores, 'tolist'):
+                scores = scores.tolist()
+            
+            logger.info(f"HuggingFace reranker computed {len(scores)} scores")
+            return [float(score) for score in scores]
+            
+        except Exception as e:
+            logger.error(f"Error with HuggingFace reranker: {e}")
+            return [0.5] * len(pairs)
+    
+    async def _compute_scores_ollama(self, pairs: List[tuple]) -> List[float]:
+        """Compute scores using Ollama API (existing method)"""
+        try:
             # For reranker models, we need to compute similarity scores between query-document pairs
             # First, get embeddings for queries and documents separately
             queries = [pair[0] for pair in pairs]
             documents = [pair[1] for pair in pairs]
             
             async with aiohttp.ClientSession() as session:
+                # Try to use the reranker model first, fallback to main embedding model if not available
+                model_to_use = self.model_name
+                
+                # Test if the model exists by trying a simple request
+                try:
+                    test_response = await session.post(
+                        f"{self.ollama_base_url}/api/embed",
+                        json={
+                            "model": self.model_name,
+                            "input": ["test"]
+                        },
+                        timeout=10
+                    )
+                    if test_response.status != 200:
+                        error_text = await test_response.text()
+                        if "not found" in error_text.lower():
+                            logger.warning(f"Reranker model {self.model_name} not found, falling back to main embedding model")
+                            # Get the main embedding model from database
+                            try:
+                                from chat_db import ChatDB
+                                chat_db = ChatDB()
+                                settings = chat_db.get_latest_model_settings()
+                                if settings and settings.get('embedding'):
+                                    model_to_use = settings['embedding']
+                                    logger.info(f"Using main embedding model for reranking: {model_to_use}")
+                                else:
+                                    model_to_use = "bge-m3"  # fallback
+                                    logger.info(f"Using fallback embedding model for reranking: {model_to_use}")
+                            except Exception as e:
+                                logger.warning(f"Could not get main embedding model: {e}, using fallback")
+                                model_to_use = "bge-m3"
+                except Exception as e:
+                    logger.warning(f"Could not test reranker model {self.model_name}: {e}, using fallback")
+                    model_to_use = "bge-m3"
+                
                 # Get embeddings for queries
                 async with session.post(
                     f"{self.ollama_base_url}/api/embed",
                     json={
-                        "model": self.model_name,
+                        "model": model_to_use,
                         "input": queries
                     },
                     timeout=30
@@ -131,7 +218,7 @@ class CrossEncoderReranker:
                 async with session.post(
                     f"{self.ollama_base_url}/api/embed",
                     json={
-                        "model": self.model_name,
+                        "model": model_to_use,
                         "input": documents
                     },
                     timeout=30
@@ -524,13 +611,14 @@ class HybridReranker:
 # Global reranker instance to be used throughout the application
 _reranker_instance = None
 _current_reranker_model = "BAAI/bge-reranker-large"
+_current_reranker_provider = "ollama"
 
 def get_reranker():
     """Get or create a singleton reranker instance"""
-    global _reranker_instance, _current_reranker_model
+    global _reranker_instance, _current_reranker_model, _current_reranker_provider
     if (_reranker_instance is None):
-        logger.info(f"Creating reranker instance with model: {_current_reranker_model}")
-        base_reranker = CrossEncoderReranker(model_name=_current_reranker_model)
+        logger.info(f"Creating reranker instance with model: {_current_reranker_model} (provider: {_current_reranker_provider})")
+        base_reranker = CrossEncoderReranker(model_name=_current_reranker_model, provider=_current_reranker_provider)
         _reranker_instance = HybridReranker(base_reranker=base_reranker)
     return _reranker_instance
 
@@ -539,18 +627,19 @@ def get_current_reranker_model():
     global _current_reranker_model
     return _current_reranker_model
 
-def set_reranker_model(model_name: str):
+def set_reranker_model(model_name: str, provider: str = "ollama"):
     """Set the reranker model and reset the instance"""
-    global _reranker_instance, _current_reranker_model
+    global _reranker_instance, _current_reranker_model, _current_reranker_provider
     
-    logger.info(f"Setting reranker model to: {model_name}")
+    logger.info(f"Setting reranker model to: {model_name} (provider: {provider})")
     _current_reranker_model = model_name
+    _current_reranker_provider = provider
     
     # Reset the reranker instance to force recreation with new model
     _reranker_instance = None
     
     # Create new instance with the specified model
-    base_reranker = CrossEncoderReranker(model_name=model_name)
+    base_reranker = CrossEncoderReranker(model_name=model_name, provider=provider)
     _reranker_instance = HybridReranker(base_reranker=base_reranker)
     
     # Clear the RAG module's cached reranker instance

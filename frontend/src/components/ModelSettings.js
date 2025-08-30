@@ -39,17 +39,37 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
     const [gpuInfo, setGpuInfo] = useState(null);
     const [isLoadingGpuInfo, setIsLoadingGpuInfo] = useState(false);
     
+    // Provider state
+    const [providers, setProviders] = useState({});
+    const [selectedProvider, setSelectedProvider] = useState('ollama');
+    const [isLoadingProviders, setIsLoadingProviders] = useState(false);
+    
 
 
     // Load available models when dialog opens
     useEffect(() => {
+        console.log('🔄 ModelSettings useEffect triggered, isOpen:', isOpen);
         if (isOpen) {
+            console.log('🔄 Loading providers and models...');
+            loadProviders();
             loadAvailableModels();
             loadCurrentSettings();
             loadIngestionStatus();
             loadGpuInfo();
         }
     }, [isOpen]);
+
+    // Reload models when provider changes
+    useEffect(() => {
+        if (selectedProvider && providers[selectedProvider]) {
+            debugLog(`Provider changed to: ${selectedProvider}`);
+            // Reset selected models when switching providers
+            setSelectedModels({
+                llm: '',
+                embedding: ''
+            });
+        }
+    }, [selectedProvider, providers]);
 
     const loadGpuInfo = async () => {
         setIsLoadingGpuInfo(true);
@@ -69,6 +89,32 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
             });
         } finally {
             setIsLoadingGpuInfo(false);
+        }
+    };
+
+    const loadProviders = async () => {
+        setIsLoadingProviders(true);
+        try {
+            debugLog('🔄 Loading providers...');
+            const response = await api.get('/api/models/providers');
+            debugLog('📡 Providers API response:', response);
+            
+            if (response && response.providers) {
+                debugLog('✅ Setting providers:', response.providers);
+                setProviders(response.providers);
+                // Set default provider if none selected
+                if (!selectedProvider && Object.keys(response.providers).length > 0) {
+                    setSelectedProvider(Object.keys(response.providers)[0]);
+                }
+            } else {
+                debugLog('❌ No providers in response:', response);
+            }
+        } catch (err) {
+            console.error('❌ Error loading providers:', err);
+            debugLog('❌ Provider loading error details:', err.response || err);
+            setError('Failed to load model providers');
+        } finally {
+            setIsLoadingProviders(false);
         }
     };
 
@@ -304,6 +350,7 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
             
             const response = await api.post('/api/models/settings', {
                 ...selectedModels,
+                provider: selectedProvider,
                 llm_size: compatibilityPayload.llm_size,
                 embedding_size: compatibilityPayload.embedding_size
             });
@@ -364,6 +411,43 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
     };
 
     const filterModelsByType = (type) => {
+        // First get models from the selected provider
+        const providerModels = selectedProvider && providers[selectedProvider] 
+            ? providers[selectedProvider].models || []
+            : [];
+        
+        if (providerModels.length > 0) {
+            // Use provider-specific models
+            debugLog(`Using ${providerModels.length} models from ${selectedProvider} provider`);
+            return providerModels.filter(modelName => {
+                const name = modelName.toLowerCase();
+                
+                // Enhanced embedding model detection
+                const isEmbeddingModel = name.includes('embed') || 
+                                       name.includes('bge') ||
+                                       name.includes('minilm') ||
+                                       name.includes('all-minilm') ||
+                                       name.includes('nomic') ||
+                                       name.includes('e5-') ||
+                                       name.includes('sentence') ||
+                                       name.includes('text-embedding');
+                
+                switch (type) {
+                    case 'llm':
+                        return !isEmbeddingModel && !name.includes('rerank');
+                    case 'embedding':
+                        return isEmbeddingModel;
+                    default:
+                        return true;
+                }
+            }).map(modelName => ({
+                name: modelName,
+                category: type,
+                provider: selectedProvider
+            }));
+        }
+        
+        // Fallback to original logic for backward compatibility
         if (!availableModels || !Array.isArray(availableModels)) return [];
         
         debugLog(`Filtering models for type: ${type}`);
@@ -663,6 +747,80 @@ const ModelSettings = ({ isOpen, onClose, onSave }) => {
 
                         {!isLoadingModels && (
                             <div className="space-y-6">
+                                {(() => {
+                                    debugLog('🎨 Rendering provider UI. isLoadingProviders:', isLoadingProviders, 'providers:', providers, 'selectedProvider:', selectedProvider);
+                                    return null;
+                                })()}
+                                {/* Provider Selection */}
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                                        Model Provider
+                                    </label>
+                                    <p className="text-xs text-gray-500 mb-3">
+                                        Choose the provider for your language models and embeddings.
+                                    </p>
+                                    {isLoadingProviders ? (
+                                        <div className="flex items-center justify-center p-4">
+                                            <svg className="animate-spin h-5 w-5 mr-2 text-gray-600" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                            </svg>
+                                            Loading providers...
+                                        </div>
+                                    ) : Object.keys(providers).length > 0 ? (
+                                        <div className="grid grid-cols-2 gap-4 mb-6">
+                                            {Object.entries(providers).map(([providerKey, provider]) => (
+                                                <div
+                                                    key={providerKey}
+                                                    className={`relative p-4 border-2 rounded-lg cursor-pointer transition-all duration-200 ${
+                                                        selectedProvider === providerKey
+                                                            ? 'border-blue-500 bg-blue-50'
+                                                            : 'border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                                                    }`}
+                                                    onClick={() => setSelectedProvider(providerKey)}
+                                                >
+                                                    <div className="flex items-center space-x-3">
+                                                        <div className="flex-shrink-0">
+                                                            {providerKey === 'ollama' ? (
+                                                                <div className="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+                                                                    <span className="text-white font-bold text-sm">O</span>
+                                                                </div>
+                                                            ) : providerKey === 'huggingface' ? (
+                                                                <div className="w-8 h-8 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-lg flex items-center justify-center">
+                                                                    <span className="text-white font-bold text-sm">🤗</span>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="w-8 h-8 bg-gray-500 rounded-lg flex items-center justify-center">
+                                                                    <span className="text-white font-bold text-sm">{provider.name?.[0] || 'P'}</span>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex-1">
+                                                            <h3 className="font-medium text-gray-900">{provider.name || providerKey}</h3>
+                                                            <p className="text-sm text-gray-500">
+                                                                {provider.models?.length || 0} models available
+                                                            </p>
+                                                        </div>
+                                                        {selectedProvider === providerKey && (
+                                                            <div className="absolute top-2 right-2">
+                                                                <div className="w-4 h-4 bg-blue-500 rounded-full flex items-center justify-center">
+                                                                    <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                                                                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                                                                    </svg>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="p-4 border border-gray-300 rounded-lg text-center text-gray-500">
+                                            No providers available
+                                        </div>
+                                    )}
+                                </div>
+
                                 {/* LLM Model Selection */}
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-2">

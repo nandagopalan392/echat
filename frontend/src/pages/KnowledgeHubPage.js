@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
 import FolderUploadReview from '../components/FolderUploadReview';
@@ -15,6 +15,14 @@ import {
     IconButton,
     Divider,
     ThemeProvider,
+    Card,
+    CardContent,
+    Avatar,
+    FormControl,
+    InputLabel,
+    Select,
+    MenuItem,
+    Chip,
 } from '@mui/material';
 import {
     ArrowBack,
@@ -25,7 +33,10 @@ import {
     CloudUpload as CloudUploadIcon,
     Folder as FolderIcon,
     Article as ArticleIcon,
+    CheckCircle as CheckCircleIcon,
 } from '@mui/icons-material';
+import ollamaIcon from '../assets/ollama.svg';
+import huggingfaceIcon from '../assets/huggingface.svg';
 import { theme } from '../theme';
 
 // Add custom styles for resizable table
@@ -168,16 +179,25 @@ const KnowledgeHubPage = () => {
         keyword_similarity_weight: 0.7,
         reranker_enabled: false,
         reranker_model: '',
+        reranker_provider: 'ollama', // Add provider for reranker
         max_chunks: 5,
         search_type: 'similarity',
         auto_merging_enabled: false,
         auto_merging_similarity_threshold: 0.8
     });
     const [rerankerModels, setRerankerModels] = useState([]);
+    const [rerankerModelsCache, setRerankerModelsCache] = useState({});
+    const [loadingRerankerModels, setLoadingRerankerModels] = useState(false);
+    const [selectedRerankerProvider, setSelectedRerankerProvider] = useState('ollama');
     const [loadingRetrievalConfig, setLoadingRetrievalConfig] = useState(false);
     const [savingRetrievalConfig, setSavingRetrievalConfig] = useState(false);
     const [retrievalConfigMessage, setRetrievalConfigMessage] = useState(null);
+    const [downloadingRerankerModel, setDownloadingRerankerModel] = useState(false);
+    const [downloadProgress, setDownloadProgress] = useState('');
     const [showAdvancedReingestionConfig, setShowAdvancedReingestionConfig] = useState(false);
+    
+    // WebSocket connection for download progress
+    const downloadWebSocketRef = useRef(null);
 
     // Status polling states
     const [statusPolling, setStatusPolling] = useState(false);
@@ -294,16 +314,21 @@ const KnowledgeHubPage = () => {
         loadFiles();
         loadChunkingMethods();
         loadRetrievalConfig();
-        loadRerankerModels();
+        preloadRerankerModels(); // Use preload instead of loadRerankerModels
     }, []);
 
     // Load retrieval config when switching to retrieval tab
     useEffect(() => {
         if (activeTab === 'retrieval') {
             loadRetrievalConfig();
-            loadRerankerModels();
+            // Don't reload models here since they're preloaded
         }
     }, [activeTab]);
+
+    // Reload reranker models when provider changes (now instant from cache)
+    useEffect(() => {
+        loadRerankerModels();
+    }, [selectedRerankerProvider]);
 
     // Status polling effect - monitors documents with pending status
     useEffect(() => {
@@ -585,16 +610,24 @@ const KnowledgeHubPage = () => {
         setLoadingRetrievalConfig(true);
         try {
             const response = await api.getRetrievalConfig();
-            setRetrievalConfig(response.config || {
+            const config = response.config || {
                 similarity_threshold: 0.2,
                 keyword_similarity_weight: 0.7,
                 reranker_enabled: false,
                 reranker_model: '',
+                reranker_provider: 'ollama',
                 max_chunks: 5,
                 search_type: 'similarity',
                 auto_merging_enabled: false,
                 auto_merging_similarity_threshold: 0.8
-            });
+            };
+            
+            setRetrievalConfig(config);
+            
+            // Set the reranker provider if it exists in the config
+            if (config.reranker_provider) {
+                setSelectedRerankerProvider(config.reranker_provider);
+            }
         } catch (error) {
             console.error('Error loading retrieval config:', error);
             setRetrievalConfigMessage({ type: 'error', text: 'Failed to load retrieval configuration' });
@@ -603,12 +636,154 @@ const KnowledgeHubPage = () => {
         }
     };
 
-    const loadRerankerModels = async () => {
+    const loadRerankerModels = async (provider = selectedRerankerProvider) => {
+        // Check cache first
+        if (rerankerModelsCache[provider]) {
+            console.log(`Using cached models for ${provider}:`, rerankerModelsCache[provider].length);
+            setRerankerModels(rerankerModelsCache[provider]);
+            return;
+        }
+        
+        console.log(`Loading models for provider: ${provider}`);
+        setLoadingRerankerModels(true);
         try {
-            const response = await api.getRerankerModels();
-            setRerankerModels(response.models || []);
+            // Pass the selected provider to get filtered models from backend
+            const response = await api.getRerankerModels(provider);
+            const allModels = response.models || [];
+            
+            console.log(`Loaded ${allModels.length} models for ${provider}`);
+            
+            // Cache the result
+            setRerankerModelsCache(prev => ({
+                ...prev,
+                [provider]: allModels
+            }));
+            
+            // Set current models
+            setRerankerModels(allModels);
         } catch (error) {
             console.error('Error loading reranker models:', error);
+        } finally {
+            setLoadingRerankerModels(false);
+        }
+    };
+
+    // Pre-load both providers' models
+    const preloadRerankerModels = async () => {
+        console.log('Preloading reranker models for both providers...');
+        try {
+            // Load both providers in parallel
+            const [ollamaResponse, huggingfaceResponse] = await Promise.all([
+                api.getRerankerModels('ollama'),
+                api.getRerankerModels('huggingface')
+            ]);
+            
+            const cache = {
+                ollama: ollamaResponse.models || [],
+                huggingface: huggingfaceResponse.models || []
+            };
+            
+            console.log('Preloaded models:', cache);
+            setRerankerModelsCache(cache);
+            
+            // Set current models based on selected provider
+            setRerankerModels(cache[selectedRerankerProvider] || []);
+        } catch (error) {
+            console.error('Error preloading reranker models:', error);
+        }
+    };
+
+    // WebSocket connection management for download progress
+    const connectToDownloadWebSocket = () => {
+        try {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            // Use the same host but point to the WebSocket endpoint
+            // Follow the same pattern as evaluations: /api/ws/...
+            const host = window.location.host;
+            const wsUrl = `${protocol}//${host}/api/ws/download-progress`;
+            
+            downloadWebSocketRef.current = new WebSocket(wsUrl);
+            
+            downloadWebSocketRef.current.onopen = () => {
+                console.log('Connected to download progress WebSocket');
+            };
+            
+            downloadWebSocketRef.current.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.type === 'download_progress') {
+                        setDownloadProgress(data.message);
+                        
+                        if (data.status === 'completed') {
+                            setDownloadingRerankerModel(false);
+                            setDownloadProgress('');
+                            setRetrievalConfigMessage({ 
+                                type: 'success', 
+                                text: `Retrieval configuration saved and model ${data.model_name} downloaded successfully!` 
+                            });
+                            setTimeout(() => setRetrievalConfigMessage(null), 5000);
+                            disconnectDownloadWebSocket();
+                        } else if (data.status === 'failed') {
+                            setDownloadingRerankerModel(false);
+                            setDownloadProgress('');
+                            setRetrievalConfigMessage({ 
+                                type: 'error', 
+                                text: `Model download failed: ${data.message}` 
+                            });
+                            disconnectDownloadWebSocket();
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            };
+            
+            downloadWebSocketRef.current.onclose = () => {
+                console.log('Download progress WebSocket disconnected');
+            };
+            
+            downloadWebSocketRef.current.onerror = (error) => {
+                console.error('Download progress WebSocket error:', error);
+                setDownloadingRerankerModel(false);
+                setDownloadProgress('');
+            };
+        } catch (error) {
+            console.error('Error connecting to download WebSocket:', error);
+            setDownloadingRerankerModel(false);
+            setDownloadProgress('');
+        }
+    };
+    
+    const disconnectDownloadWebSocket = () => {
+        if (downloadWebSocketRef.current) {
+            downloadWebSocketRef.current.close();
+            downloadWebSocketRef.current = null;
+        }
+    };
+
+    const pollDownloadStatus = async (modelName) => {
+        try {
+            const status = await api.getRerankerDownloadStatus(modelName);
+            
+            if (status.downloading) {
+                setDownloadProgress(status.message);
+                // Continue polling
+                setTimeout(() => pollDownloadStatus(modelName), 2000);
+            } else if (status.completed) {
+                setDownloadingRerankerModel(false);
+                setDownloadProgress('');
+                setRetrievalConfigMessage({ type: 'success', text: `Model ${modelName} downloaded successfully!` });
+                setTimeout(() => setRetrievalConfigMessage(null), 3000);
+            } else if (status.message.includes('failed') || status.message.includes('error')) {
+                setDownloadingRerankerModel(false);
+                setDownloadProgress('');
+                setRetrievalConfigMessage({ type: 'error', text: `Model download failed: ${status.message}` });
+            }
+        } catch (error) {
+            console.error('Error polling download status:', error);
+            setDownloadingRerankerModel(false);
+            setDownloadProgress('');
         }
     };
 
@@ -616,19 +791,42 @@ const KnowledgeHubPage = () => {
         setSavingRetrievalConfig(true);
         setRetrievalConfigMessage(null);
         try {
-            const response = await api.updateRetrievalConfig(retrievalConfig);
+            // Include the selected reranker provider in the configuration
+            const configToSave = {
+                ...retrievalConfig,
+                reranker_provider: selectedRerankerProvider
+            };
             
-            if (response.warnings && response.warnings.length > 0) {
-                setRetrievalConfigMessage({ 
-                    type: 'warning', 
-                    text: `Configuration saved with warnings: ${response.warnings.join(', ')}` 
-                });
+            const response = await api.updateRetrievalConfig(configToSave);
+            
+            // Check if we need to start download progress tracking for HuggingFace models
+            if (configToSave.reranker_enabled && 
+                configToSave.reranker_model && 
+                configToSave.reranker_model.toLowerCase() !== "none" &&
+                selectedRerankerProvider === 'huggingface') {
+                
+                setDownloadingRerankerModel(true);
+                setDownloadProgress('Starting download...');
+                // Connect to WebSocket for real-time progress updates
+                connectToDownloadWebSocket();
+                
+                // Don't show success message yet, wait for download completion via WebSocket
             } else {
-                setRetrievalConfigMessage({ type: 'success', text: 'Retrieval configuration saved successfully!' });
+                // Only show success message if no download is in progress
+                if (response.warnings && response.warnings.length > 0) {
+                    setRetrievalConfigMessage({ 
+                        type: 'warning', 
+                        text: `Configuration saved with warnings: ${response.warnings.join(', ')}` 
+                    });
+                } else {
+                    setRetrievalConfigMessage({ type: 'success', text: 'Retrieval configuration saved successfully!' });
+                }
             }
             
-            // Clear message after 3 seconds
-            setTimeout(() => setRetrievalConfigMessage(null), 3000);
+            // Clear message after 3 seconds (unless downloading)
+            if (!downloadingRerankerModel) {
+                setTimeout(() => setRetrievalConfigMessage(null), 3000);
+            }
         } catch (error) {
             console.error('Error saving retrieval config:', error);
             setRetrievalConfigMessage({ type: 'error', text: 'Failed to save retrieval configuration' });
@@ -654,11 +852,14 @@ const KnowledgeHubPage = () => {
             keyword_similarity_weight: 0.7,
             reranker_enabled: false,
             reranker_model: '',
+            reranker_provider: 'ollama',
             max_chunks: 5,
             search_type: 'similarity',
             auto_merging_enabled: false,
             auto_merging_similarity_threshold: 0.8
         });
+        
+        setSelectedRerankerProvider('ollama');
         
         setRetrievalConfigMessage({ type: 'success', text: 'Settings reset to default values. Remember to save if you want to keep these changes.' });
         setTimeout(() => setRetrievalConfigMessage(null), 4000);
@@ -1322,6 +1523,13 @@ const KnowledgeHubPage = () => {
             document.removeEventListener('click', handleDocumentClick);
         };
     }, [openDropdown]);
+
+    // Cleanup WebSocket connection on unmount
+    useEffect(() => {
+        return () => {
+            disconnectDownloadWebSocket();
+        };
+    }, []);
 
     return (
         <div className="min-h-screen bg-gray-50 flex">
@@ -2439,14 +2647,19 @@ const KnowledgeHubPage = () => {
                                                 </button>
                                                 <button
                                                     onClick={saveRetrievalConfig}
-                                                    disabled={savingRetrievalConfig}
+                                                    disabled={savingRetrievalConfig || downloadingRerankerModel}
                                                     className={`px-4 py-2 text-sm font-medium text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 ${
-                                                        savingRetrievalConfig
+                                                        savingRetrievalConfig || downloadingRerankerModel
                                                             ? 'bg-gray-400 cursor-not-allowed'
                                                             : 'bg-green-600 hover:bg-green-700 focus:ring-green-500'
                                                     }`}
                                                 >
-                                                    {savingRetrievalConfig ? 'Saving...' : 'Save Configuration'}
+                                                    {savingRetrievalConfig 
+                                                        ? 'Saving...' 
+                                                        : downloadingRerankerModel 
+                                                            ? `Downloading... ${downloadProgress}`
+                                                            : 'Save Configuration'
+                                                    }
                                                 </button>
                                             </div>
                                         </div>
@@ -2547,9 +2760,9 @@ const KnowledgeHubPage = () => {
 
                                         {/* Reranker Settings */}
                                         <div className="mt-8 pt-6 border-t border-gray-200">
-                                            <h4 className="text-md font-medium text-gray-900 mb-4">Reranker Configuration</h4>
+                                            <h4 className="text-md font-medium text-gray-900 mb-6">Reranker Configuration</h4>
                                             
-                                            <div className="space-y-4">
+                                            <div className="space-y-6">
                                                 {/* Enable Reranker */}
                                                 <div className="flex items-center">
                                                     <input
@@ -2564,28 +2777,124 @@ const KnowledgeHubPage = () => {
                                                     </label>
                                                 </div>
 
-                                                {/* Reranker Model Selection */}
+                                                {/* Reranker Provider and Model Selection */}
                                                 {retrievalConfig.reranker_enabled && (
-                                                    <div>
-                                                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                                                            Reranker Model
-                                                        </label>
-                                                        <select
-                                                            value={retrievalConfig.reranker_model}
-                                                            onChange={(e) => handleRetrievalConfigChange('reranker_model', e.target.value)}
-                                                            className="mt-1 block w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500"
-                                                        >
-                                                            {rerankerModels.map((model) => (
-                                                                <option key={model.name} value={model.name}>
-                                                                    {model.display_name}
-                                                                </option>
-                                                            ))}
-                                                        </select>
-                                                        <p className="mt-1 text-xs text-gray-500">
-                                                            {rerankerModels.find(m => m.name === retrievalConfig.reranker_model)?.description || 
-                                                             'Select a reranker model to improve retrieval relevance'}
-                                                        </p>
-                                                    </div>
+                                                    <ThemeProvider theme={theme}>
+                                                        <div className="space-y-6">
+                                                            {/* Provider Selection */}
+                                                            <div>
+                                                                <label className="block text-sm font-medium text-gray-700 mb-3">
+                                                                    Model Provider
+                                                                </label>
+                                                                <div className="grid grid-cols-2 gap-4">
+                                                                    {/* Ollama Provider */}
+                                                                    <Card 
+                                                                        className={`cursor-pointer transition-all duration-200 ${
+                                                                            selectedRerankerProvider === 'ollama' 
+                                                                                ? 'ring-2 ring-indigo-500 bg-indigo-50' 
+                                                                                : 'hover:shadow-md'
+                                                                        }`}
+                                                                        onClick={() => setSelectedRerankerProvider('ollama')}
+                                                                    >
+                                                                        <CardContent className="p-4">
+                                                                            <div className="flex items-center space-x-3">
+                                                                                <Avatar className="h-8 w-8">
+                                                                                    <img 
+                                                                                        src={ollamaIcon} 
+                                                                                        alt="Ollama" 
+                                                                                        className="h-8 w-8"
+                                                                                    />
+                                                                                </Avatar>
+                                                                                <div className="flex-1">
+                                                                                    <h3 className="text-sm font-medium text-gray-900">Ollama</h3>
+                                                                                    <p className="text-xs text-gray-500">Local models</p>
+                                                                                </div>
+                                                                                {selectedRerankerProvider === 'ollama' && (
+                                                                                    <CheckCircleIcon className="h-5 w-5 text-indigo-600" />
+                                                                                )}
+                                                                            </div>
+                                                                        </CardContent>
+                                                                    </Card>
+
+                                                                    {/* HuggingFace Provider */}
+                                                                    <Card 
+                                                                        className={`cursor-pointer transition-all duration-200 ${
+                                                                            selectedRerankerProvider === 'huggingface' 
+                                                                                ? 'ring-2 ring-indigo-500 bg-indigo-50' 
+                                                                                : 'hover:shadow-md'
+                                                                        }`}
+                                                                        onClick={() => setSelectedRerankerProvider('huggingface')}
+                                                                    >
+                                                                        <CardContent className="p-4">
+                                                                            <div className="flex items-center space-x-3">
+                                                                                <Avatar className="h-8 w-8">
+                                                                                    <img 
+                                                                                        src={huggingfaceIcon} 
+                                                                                        alt="HuggingFace" 
+                                                                                        className="h-8 w-8"
+                                                                                    />
+                                                                                </Avatar>
+                                                                                <div className="flex-1">
+                                                                                    <h3 className="text-sm font-medium text-gray-900">HuggingFace</h3>
+                                                                                    <p className="text-xs text-gray-500">Cloud models</p>
+                                                                                </div>
+                                                                                {selectedRerankerProvider === 'huggingface' && (
+                                                                                    <CheckCircleIcon className="h-5 w-5 text-indigo-600" />
+                                                                                )}
+                                                                            </div>
+                                                                        </CardContent>
+                                                                    </Card>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Model Selection */}
+                                                            <div>
+                                                                <Box sx={{ minWidth: 120 }}>
+                                                                    <FormControl fullWidth variant="outlined">
+                                                                        <InputLabel id="reranker-model-label">Reranker Model</InputLabel>
+                                                                        <Select
+                                                                            labelId="reranker-model-label"
+                                                                            value={retrievalConfig.reranker_model || ''}
+                                                                            label="Reranker Model"
+                                                                            onChange={(e) => handleRetrievalConfigChange('reranker_model', e.target.value)}
+                                                                            size="small"
+                                                                            disabled={loadingRerankerModels}
+                                                                        >
+                                                                            {loadingRerankerModels ? (
+                                                                                <MenuItem disabled>
+                                                                                    <em>Loading models...</em>
+                                                                                </MenuItem>
+                                                                            ) : rerankerModels.length === 0 ? (
+                                                                                <MenuItem disabled>
+                                                                                    <em>No models available for {selectedRerankerProvider}</em>
+                                                                                </MenuItem>
+                                                                            ) : (
+                                                                                rerankerModels.map((model) => (
+                                                                                    <MenuItem key={model.name} value={model.name}>
+                                                                                        <div className="flex items-center justify-between w-full">
+                                                                                            <span>{model.display_name || model.name}</span>
+                                                                                            {model.size && (
+                                                                                                <Chip 
+                                                                                                    label={model.size} 
+                                                                                                    size="small" 
+                                                                                                    variant="outlined"
+                                                                                                    sx={{ ml: 1, fontSize: '0.7rem' }}
+                                                                                                />
+                                                                                            )}
+                                                                                        </div>
+                                                                                    </MenuItem>
+                                                                                ))
+                                                                            )}
+                                                                        </Select>
+                                                                    </FormControl>
+                                                                </Box>
+                                                                <p className="mt-2 text-xs text-gray-500">
+                                                                    {rerankerModels.find(m => m.name === retrievalConfig.reranker_model)?.description || 
+                                                                     'Select a reranker model to improve retrieval relevance by re-scoring and re-ordering retrieved documents'}
+                                                                </p>
+                                                            </div>
+                                                        </div>
+                                                    </ThemeProvider>
                                                 )}
                                             </div>
                                         </div>

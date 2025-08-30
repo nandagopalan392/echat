@@ -130,6 +130,26 @@ class ChatDB:
                     )
                 ''')
 
+                # Add provider column to existing model_settings table if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE model_settings ADD COLUMN provider TEXT DEFAULT 'ollama'")
+                    logger.info("Added provider column to model_settings table")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" in str(e).lower():
+                        logger.debug("provider column already exists in model_settings table")
+                    else:
+                        logger.warning(f"Could not add provider column: {e}")
+
+                # Add embedding_provider column to existing model_settings table if it doesn't exist
+                try:
+                    cursor.execute("ALTER TABLE model_settings ADD COLUMN embedding_provider TEXT DEFAULT 'ollama'")
+                    logger.info("Added embedding_provider column to model_settings table")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" in str(e).lower():
+                        logger.debug("embedding_provider column already exists in model_settings table")
+                    else:
+                        logger.warning(f"Could not add embedding_provider column: {e}")
+
                 # Create retrieval configs table
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS retrieval_configs (
@@ -1288,18 +1308,22 @@ class ChatDB:
                 "recent_messages": 0
             }
 
-    def save_model_settings(self, llm, embedding, parameters):
+    def save_model_settings(self, llm, embedding, parameters, provider='ollama', embedding_provider=None):
         """Save model settings to the database."""
         try:
+            # Use LLM provider as default for embedding if not specified
+            if embedding_provider is None:
+                embedding_provider = provider
+                
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 # Insert new settings
                 cursor.execute('''
-                    INSERT INTO model_settings (llm, embedding, parameters, updated_at)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (llm, embedding, json.dumps(parameters)))
+                    INSERT INTO model_settings (llm, embedding, parameters, provider, embedding_provider, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (llm, embedding, json.dumps(parameters), provider, embedding_provider))
                 conn.commit()
-                logger.info(f"Saved model settings: LLM={llm}, Embedding={embedding}, Parameters={parameters}")
+                logger.info(f"Saved model settings: LLM={llm}, Embedding={embedding}, Provider={provider}, EmbeddingProvider={embedding_provider}, Parameters={parameters}")
                 return True
         except Exception as e:
             logger.error(f"Error saving model settings: {e}")
@@ -1311,18 +1335,25 @@ class ChatDB:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT llm, embedding, parameters FROM model_settings
+                    SELECT llm, embedding, parameters, provider, embedding_provider FROM model_settings
                     ORDER BY updated_at DESC LIMIT 1
                 ''')
                 row = cursor.fetchone()
                 if row:
-                    llm, embedding, parameters_json = row
+                    llm, embedding, parameters_json, provider, embedding_provider = row
                     parameters = json.loads(parameters_json)
-                    logger.info(f"Loaded model settings: LLM={llm}, Embedding={embedding}")
+                    # Handle null provider from existing records
+                    if provider is None:
+                        provider = 'ollama'
+                    if embedding_provider is None:
+                        embedding_provider = provider  # Use LLM provider as default
+                    logger.info(f"Loaded model settings: LLM={llm}, Embedding={embedding}, Provider={provider}, EmbeddingProvider={embedding_provider}")
                     return {
                         'llm': llm,
                         'embedding': embedding,
-                        'parameters': parameters
+                        'parameters': parameters,
+                        'provider': provider,
+                        'embedding_provider': embedding_provider
                     }
         except Exception as e:
             logger.error(f"Error loading model settings: {e}")
