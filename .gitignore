@@ -12,6 +12,10 @@ node_modules
 /frontend/dist
 /backend/build
 /backend/dist
+/backend/data
+/backend/temp_uploads
+/backend/__pycache__
+
 
 # environment files
 .env
