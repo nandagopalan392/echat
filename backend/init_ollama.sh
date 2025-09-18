@@ -29,7 +29,7 @@ STATUS_URL="${OLLAMA_URL}/api/version"
 
 # Define exact model names to ensure consistency
 EMBEDDING_MODEL="mxbai-embed-large"
-LLM_MODEL="deepseek-r1"  # Updated from deepseek-r1:latest to deepseek-r1
+LLM_MODEL="gemma2:2b"  # Using smaller, faster model to avoid download issues
 
 echo "Checking for Ollama availability at $STATUS_URL"
 
@@ -135,6 +135,14 @@ fi
 # Start the server
 export HOST=${HOST:-0.0.0.0}
 export PORT=${PORT:-8000}
+
+# Disable DeepSpeed and problematic integrations
+export DISABLE_MLFLOW_INTEGRATION=TRUE
+export WANDB_DISABLED=true
+export DEEPSPEED_DISABLE=true
+export ACCELERATE_USE_DEEPSPEED=false
+export ACCELERATE_USE_FSDP=false
+export CUDA_LAUNCH_BLOCKING=1
 
 # Start with proper settings for metrics collection
 exec uvicorn main:app --host $HOST --port $PORT --reload --log-level info

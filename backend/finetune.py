@@ -20,7 +20,7 @@ class FineTuner:
     Manages fine-tuning of models based on RLHF feedback
     """
     
-    def __init__(self, model_name: str = "deepseek-r1:latest"):
+    def __init__(self, model_name: str = "gemma2:2b"):
         self.model_name = model_name
         self.ollama_base_url = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
         self.rlhf_db = RLHF()
@@ -508,7 +508,7 @@ class FineTuner:
 # Global finetuner instance to be used throughout the application
 _finetuner_instance = None
 
-def get_finetuner(model_name: str = "deepseek-r1:latest"):
+def get_finetuner(model_name: str = "gemma2:2b"):
     """Get or create a singleton finetuner instance"""
     global _finetuner_instance
     if _finetuner_instance is None:

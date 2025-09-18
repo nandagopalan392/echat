@@ -53,7 +53,7 @@ def call_ollama_sync(model: str, prompt: str, temperature: float = 0.0) -> str:
         logger.error(f"Error calling Ollama API: {e}")
         return ""
 
-def generate_single_qa_pair_sync(content_chunk: str, document_filename: str, difficulty: str, model_name: str, question_index: int) -> dict:
+def generate_single_qa_pair_sync(content_chunk: str, document_filename: str, difficulty: str, model_name: str, question_index: int, source_chunks: List[str] = None) -> dict:
     """Generate a single question-answer pair synchronously"""
     
     generation_prompt = f"""Based on the following document content, generate ONE high-quality question and answer pair.
@@ -94,6 +94,26 @@ Generate only the JSON output, nothing else."""
                 qa_data = json.loads(json_match.group())
                 
                 if qa_data.get('question') and qa_data.get('answer'):
+                    # Create expected_chunks from the source chunks if provided, otherwise use content_chunk
+                    expected_chunks = []
+                    if source_chunks:
+                        for chunk_idx, chunk in enumerate(source_chunks):
+                            expected_chunks.append({
+                                "text": chunk,
+                                "title": document_filename,
+                                "source": document_filename,
+                                "chunk_index": chunk_idx,
+                                "relevance_score": 1.0
+                            })
+                    else:
+                        expected_chunks = [{
+                            "text": content_chunk,
+                            "title": document_filename,
+                            "source": document_filename,
+                            "chunk_index": 0,
+                            "relevance_score": 1.0
+                        }]
+                    
                     return {
                         'question': qa_data['question'].strip(),
                         'answer': qa_data['answer'].strip(),
@@ -101,7 +121,8 @@ Generate only the JSON output, nothing else."""
                         'source_file': document_filename,
                         'question_index': question_index,
                         'confidence': qa_data.get('confidence', 'medium'),
-                        'reasoning': qa_data.get('reasoning', '')
+                        'reasoning': qa_data.get('reasoning', ''),
+                        'expected_chunks': expected_chunks
                     }
             except json.JSONDecodeError:
                 logger.warning(f"Failed to parse JSON from LLM response: {response}")
@@ -1248,18 +1269,18 @@ def create_dataset_background(
                             time.sleep(5)
                     
                     try:
-                        # Select difficulty level and chunks
+                        # Select difficulty level and single chunk for focused evaluation
                         difficulty = random.choice(difficulty_levels)
-                        selected_chunks = random.sample(chunks, min(2, len(chunks)))
-                        combined_content = " ".join(selected_chunks)
+                        selected_chunk = random.choice(chunks)
                         
-                        # Generate Q&A pair
+                        # Generate Q&A pair with single chunk for expected_chunks
                         qa_pair = generate_single_qa_pair_sync(
-                            content_chunk=combined_content,
+                            content_chunk=selected_chunk,
                             document_filename=document.get('filename', 'Unknown'),
                             difficulty=difficulty,
                             model_name=model_name,
-                            question_index=i + 1
+                            question_index=i + 1,
+                            source_chunks=[selected_chunk]  # Pass single chunk as list for expected_chunks
                         )
                         
                         if qa_pair:

@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 # Comprehensive fallback list with latest Ollama models (updated based on ollama.com/search)
 FALLBACK_MODELS = {
+    # Default and recommended models
+    "gemma2:2b": {
+        "name": "gemma2:2b",
+        "category": "llm",
+        "description": "Google's Gemma 2 2B model - fast and efficient for general use",
+        "tags": ["google", "gemma", "efficient", "default"],
+        "size": "2B parameters",
+        "source": "ollama",
+        "variants": ["2b"]
+    },
     # Latest Large Language Models from Ollama Search
     "deepseek-r1": {
         "name": "deepseek-r1",

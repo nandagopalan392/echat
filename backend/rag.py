@@ -1,5 +1,4 @@
 # rag.py
-
 from langchain_core.globals import set_verbose, set_debug
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain.schema.output_parser import StrOutputParser
@@ -14,38 +13,13 @@ import httpx
 import requests
 import traceback
 import sqlite3
-import json
 from typing import List
-import logging
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-# Hugging Face imports
+# Try to import torch, with fallback if not available
 try:
-    from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings
-    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-    HUGGINGFACE_AVAILABLE = True
+    import torch
 except ImportError:
-    HUGGINGFACE_AVAILABLE = False
-    logger.warning("Hugging Face libraries not available. Only Ollama models will be supported.")
-
-# Set up some reasonable defaults for ChromaDB
-os.environ["CHROMA_SERVER_NOFILE"] = "65536"
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema.runnable import RunnablePassthrough
-# Set up logging first
-logger = logging.getLogger(__name__)
-
-# Hugging Face imports
-try:
-    from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings
-    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-    HUGGINGFACE_AVAILABLE = True
-except ImportError:
-    HUGGINGFACE_AVAILABLE = False
-    logger.warning("Hugging Face libraries not available. Only Ollama models will be supported.")
+    torch = None
 # Set up some reasonable defaults for ChromaDB
 os.environ["CHROMA_SERVER_NOFILE"] = "65536"
 from langchain_community.document_loaders import PyPDFLoader
@@ -54,6 +28,7 @@ from langchain.schema.runnable import RunnablePassthrough
 from langchain_community.vectorstores.utils import filter_complex_metadata
 from langchain_core.prompts import ChatPromptTemplate
 from typing import Optional, List, Dict, Tuple
+import logging
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -70,7 +45,6 @@ import subprocess
 import re
 from enhanced_document_processor import get_document_processor
 from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
-from retrieval_config import get_retrieval_config_manager, RetrievalConfig
 
 # Add stub for reranker that will be dynamically loaded
 _reranker_instance = None
@@ -84,17 +58,11 @@ def get_reranker():
         _reranker_instance = _get_reranker()
     return _reranker_instance
 
-def clear_reranker_cache():
-    """Clear the cached reranker instance to force recreation"""
-    global _reranker_instance
-    _reranker_instance = None
-    logger.info("RAG reranker cache cleared")
-
-# Disable LangChain debug/verbose mode to suppress chain tracing logs
-set_debug(False)
-set_verbose(False)
+set_debug(True)
+set_verbose(True)
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def estimate_query_complexity(query):
     """Estimate the complexity of a user query"""
@@ -129,677 +97,6 @@ def estimate_hallucination(response, context_docs):
     
     return hallucination_score
 
-class LLMProvider:
-    """Abstract base class for LLM providers"""
-    def __init__(self, model_name: str, parameters: dict = None):
-        self.model_name = model_name
-        self.parameters = parameters or {}
-        self.model = None
-    
-    def create_model(self):
-        """Create and return the LLM model instance"""
-        raise NotImplementedError
-    
-    def get_model(self):
-        """Get the model instance, creating it if necessary"""
-        if self.model is None:
-            self.model = self.create_model()
-        return self.model
-
-class OllamaProvider(LLMProvider):
-    """Ollama LLM provider"""
-    def create_model(self):
-        logger.info(f"Creating Ollama model: {self.model_name}")
-        model_kwargs = {
-            'model': self.model_name,
-            'base_url': os.getenv('OLLAMA_HOST', 'http://ollama:11434')
-        }
-        
-        # Add supported parameters
-        if 'temperature' in self.parameters:
-            model_kwargs['temperature'] = self.parameters['temperature']
-        if 'max_tokens' in self.parameters:
-            model_kwargs['num_predict'] = self.parameters['max_tokens']
-        if 'top_p' in self.parameters:
-            model_kwargs['top_p'] = self.parameters['top_p']
-        
-        # Save model selection to database
-        self._save_model_selection_to_db(self.model_name, 'ollama')
-        
-        return ChatOllama(**model_kwargs)
-    
-    def _save_model_selection_to_db(self, model_name: str, provider: str):
-        """Save the selected model and provider to database"""
-        try:
-            from chat_db import ChatDB
-            chat_db = ChatDB()
-            
-            # Get current settings or create new ones
-            current_settings = chat_db.get_latest_model_settings() or {}
-            
-            # Update with new model selection
-            current_settings['llm'] = model_name
-            current_settings['provider'] = provider
-            
-            # Save updated settings
-            chat_db.save_model_settings(
-                llm=current_settings.get('llm', model_name),
-                embedding=current_settings.get('embedding', 'bge-m3'),
-                provider=current_settings.get('provider', provider),
-                parameters=current_settings.get('parameters', self.parameters)
-            )
-            
-            logger.info(f"Saved model selection to database: {model_name} ({provider})")
-            
-        except Exception as e:
-            logger.warning(f"Could not save model selection to database: {e}")
-
-class HuggingFaceProvider(LLMProvider):
-    """Hugging Face LLM provider"""
-    
-    def _check_model_downloaded(self, model_name: str, hf_token: str = None) -> bool:
-        """Check if model is already downloaded locally"""
-        try:
-            from huggingface_hub import snapshot_download, model_info
-            from transformers import AutoConfig
-            import tempfile
-            import shutil
-            
-            # Try to load config to check if model exists locally
-            try:
-                config = AutoConfig.from_pretrained(model_name, local_files_only=True)
-                logger.info(f"Model {model_name} found locally")
-                return True
-            except:
-                logger.info(f"Model {model_name} not found locally, needs to be downloaded")
-                return False
-                
-        except Exception as e:
-            logger.warning(f"Could not check local model availability: {e}")
-            return False
-    
-    def _check_gpu_memory(self) -> dict:
-        """Check GPU capabilities based on total memory size"""
-        gpu_info = {
-            'has_gpu': False,
-            'total_memory_gb': 0,
-            'gpu_name': 'Unknown'
-        }
-        
-        try:
-            import torch
-            if torch.cuda.is_available():
-                gpu_info['has_gpu'] = True
-                # Get total GPU memory (hardware spec, not current usage)
-                total_memory = torch.cuda.get_device_properties(0).total_memory
-                gpu_info['total_memory_gb'] = total_memory / (1024**3)  # Convert to GB
-                gpu_info['gpu_name'] = torch.cuda.get_device_name(0)
-                
-                logger.info(f"GPU detected: {gpu_info['gpu_name']}, Total Memory: {gpu_info['total_memory_gb']:.1f}GB")
-            else:
-                logger.info("No GPU available, will use CPU")
-        except ImportError:
-            logger.warning("PyTorch not available, cannot check GPU")
-        except Exception as e:
-            logger.warning(f"Error checking GPU: {e}")
-        
-        return gpu_info
-    
-    def _can_load_model_on_gpu(self, model_name: str, gpu_info: dict) -> bool:
-        """Estimate if model can fit on GPU based on total GPU memory and model size"""
-        if not gpu_info['has_gpu']:
-            return False
-        
-        # Rough model size estimates (in GB) - these are approximate
-        model_size_estimates = {
-            'google/gemma-1.1-2b-it': 4.0,  # 2B parameters ≈ 4GB
-            'google/gemma-7b-it': 14.0,      # 7B parameters ≈ 14GB
-            'google/gemma-2b': 4.0,          # 2B parameters ≈ 4GB
-            'microsoft/DialoGPT-medium': 0.7, # 345M parameters ≈ 0.7GB
-            'distilbert/distilgpt2': 0.3,    # 82M parameters ≈ 0.3GB
-            'Qwen/Qwen2-0.5B': 1.0,         # 0.5B parameters ≈ 1GB
-            'Qwen/Qwen2-1.5B': 3.0,         # 1.5B parameters ≈ 3GB
-            'TinyLlama/TinyLlama-1.1B-Chat-v1.0': 2.2  # 1.1B parameters ≈ 2.2GB
-        }
-        
-        estimated_size = model_size_estimates.get(model_name, 8.0)  # Default 8GB for unknown models
-        
-        # Use 80% of total GPU memory as safe threshold (leave 20% for system and operations)
-        usable_memory = gpu_info['total_memory_gb'] * 0.8
-        
-        can_fit = usable_memory >= estimated_size
-        logger.info(f"Model {model_name} estimated size: {estimated_size:.1f}GB")
-        logger.info(f"GPU usable memory (80% of {gpu_info['total_memory_gb']:.1f}GB): {usable_memory:.1f}GB")
-        logger.info(f"Can fit on GPU: {can_fit}")
-        
-        if not can_fit:
-            logger.warning(f"⚠️  Model may be too large for GPU. Consider:")
-            if estimated_size > 8:
-                logger.warning(f"   - Use a smaller model variant")
-            logger.warning(f"   - Model will run on CPU (slower but will work)")
-            
-        return can_fit
-    
-    def _download_model_if_needed(self, model_name: str, hf_token: str = None) -> dict:
-        """Download model if not available locally, with proper gated model handling"""
-        try:
-            from huggingface_hub import snapshot_download, model_info
-            
-            # Load token from environment if not provided
-            if hf_token is None:
-                hf_token = os.getenv('HUGGINGFACE_HUB_TOKEN') or os.getenv('HF_TOKEN') or os.getenv('HUGGING_FACE_HUB_TOKEN')
-                
-                # Debug: Log token availability (first few chars only for security)
-                if hf_token:
-                    logger.info(f"🔑 DEBUG: Loaded HuggingFace token from environment: {hf_token[:8]}... (length: {len(hf_token)})")
-                else:
-                    logger.error("🔑 DEBUG: No HuggingFace token found in environment variables")
-                    logger.error(f"🔑 DEBUG: Checked variables: HUGGINGFACE_HUB_TOKEN={bool(os.getenv('HUGGINGFACE_HUB_TOKEN'))}, HF_TOKEN={bool(os.getenv('HF_TOKEN'))}, HUGGING_FACE_HUB_TOKEN={bool(os.getenv('HUGGING_FACE_HUB_TOKEN'))}")
-            
-            # First check if model is gated
-            try:
-                info = model_info(model_name, token=hf_token)
-                is_gated = getattr(info, 'gated', False)
-                
-                if is_gated:
-                    model_url = f"https://huggingface.co/{model_name}"
-                    if not hf_token:
-                        logger.error(f"❌ GATED MODEL ACCESS REQUIRED")
-                        logger.error(f"Model '{model_name}' is gated and requires approval.")
-                        logger.error(f"Please visit: {model_url}")
-                        return {
-                            'success': False,
-                            'error': 'gated_no_token',
-                            'message': f"Model '{model_name}' is gated and requires approval and authentication.",
-                            'model_url': model_url,
-                            'steps': [
-                                f"Visit the model page: {model_url}",
-                                "Click 'Request access' and wait for approval",
-                                "Create a token at: https://huggingface.co/settings/tokens",
-                                "Add your token to the .env file as HUGGINGFACE_HUB_TOKEN=your_token_here"
-                            ]
-                        }
-                    else:
-                        # Check if user has access with token
-                        logger.info(f"Checking access to gated model {model_name}...")
-                        try:
-                            # Try to get model info with token to verify access
-                            model_info(model_name, token=hf_token, use_auth_token=True)
-                            logger.info(f"✅ Access confirmed for gated model {model_name}")
-                        except Exception as access_e:
-                            if "not have access" in str(access_e).lower() or "gated" in str(access_e).lower():
-                                logger.error(f"❌ ACCESS DENIED")
-                                logger.error(f"You don't have access to the gated model '{model_name}'")
-                                return {
-                                    'success': False,
-                                    'error': 'gated_no_access',
-                                    'message': f"You don't have access to the gated model '{model_name}'",
-                                    'model_url': model_url,
-                                    'steps': [
-                                        f"Visit the model page: {model_url}",
-                                        "Click 'Request access' button",
-                                        "Wait for approval (usually takes a few minutes to hours)",
-                                        "Try again after approval is granted"
-                                    ]
-                                }
-                            else:
-                                logger.warning(f"Could not verify access: {access_e}")
-                
-            except Exception as info_e:
-                logger.warning(f"Could not check if model is gated: {info_e}")
-            
-            # Check GPU capabilities before downloading
-            gpu_info = self._check_gpu_memory()
-            can_use_gpu = self._can_load_model_on_gpu(model_name, gpu_info)
-            
-            if not can_use_gpu and gpu_info['has_gpu']:
-                logger.warning(f"⚠️  Model {model_name} may be too large for available GPU memory ({gpu_info['total_memory_gb']:.1f}GB total)")
-                logger.warning(f"Model will run on CPU (slower but should work)")
-            elif can_use_gpu:
-                logger.info(f"✅ Model {model_name} should fit on GPU ({gpu_info['total_memory_gb']:.1f}GB total)")
-            
-            logger.info(f"Downloading model {model_name}...")
-            
-            # Download with timeout and proper error handling
-            kwargs = {
-                'repo_id': model_name,
-                'local_files_only': False,
-                'resume_download': True
-            }
-            
-            if hf_token:
-                kwargs['token'] = hf_token
-            
-            # Download model files
-            snapshot_download(**kwargs)
-            logger.info(f"Successfully downloaded model {model_name}")
-            
-            return {
-                'success': True,
-                'message': f"Successfully downloaded model {model_name}"
-            }
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Failed to download model {model_name}: {error_msg}")
-            
-            if "gated repo" in error_msg.lower() or "access" in error_msg.lower() or "not have access" in error_msg.lower():
-                model_url = f"https://huggingface.co/{model_name}"
-                
-                if not hf_token:
-                    return {
-                        'success': False,
-                        'error': 'gated_no_token',
-                        'message': f"Model '{model_name}' requires special access and authentication.",
-                        'model_url': model_url,
-                        'steps': [
-                            f"Visit the model page: {model_url}",
-                            "Click 'Request access' button",
-                            "Wait for approval (usually takes a few minutes to hours)",
-                            "Create a token at: https://huggingface.co/settings/tokens",
-                            "Add HUGGINGFACE_HUB_TOKEN=your_token_here to your .env file"
-                        ],
-                        'alternatives': [
-                            "microsoft/DialoGPT-medium",
-                            "distilbert/distilgpt2",
-                            "Qwen/Qwen2-0.5B",
-                            "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-                        ]
-                    }
-                else:
-                    return {
-                        'success': False,
-                        'error': 'gated_no_access',
-                        'message': f"Access denied to gated model '{model_name}'",
-                        'model_url': model_url,
-                        'steps': [
-                            f"Visit the model page: {model_url}",
-                            "Click 'Request access' button",
-                            "Wait for approval",
-                            "Try again after approval is granted"
-                        ]
-                    }
-            
-            return {
-                'success': False,
-                'error': 'download_failed',
-                'message': f"Failed to download model: {error_msg}"
-            }
-    
-    def _save_model_selection_to_db(self, model_name: str, provider: str):
-        """Save the selected model and provider to database"""
-        try:
-            from chat_db import ChatDB
-            chat_db = ChatDB()
-            
-            # Get current settings or create new ones
-            current_settings = chat_db.get_latest_model_settings() or {}
-            
-            # Update with new model selection
-            if provider.lower() == 'huggingface':
-                current_settings['llm'] = model_name
-                current_settings['provider'] = provider
-            else:
-                current_settings['embedding'] = model_name
-            
-            # Save updated settings
-            chat_db.save_model_settings(
-                llm=current_settings.get('llm', self.model_name),
-                embedding=current_settings.get('embedding', 'bge-m3'),
-                provider=current_settings.get('provider', provider),
-                parameters=current_settings.get('parameters', self.parameters)
-            )
-            
-            logger.info(f"Saved model selection to database: {model_name} ({provider})")
-            
-        except Exception as e:
-            logger.warning(f"Could not save model selection to database: {e}")
-    
-    def create_model(self):
-        if not HUGGINGFACE_AVAILABLE:
-            raise RuntimeError("Hugging Face libraries not available")
-        
-        logger.info(f"Creating Hugging Face model: {self.model_name}")
-        
-        # Get Hugging Face token from environment
-        hf_token = os.getenv('HUGGINGFACE_HUB_TOKEN') or os.getenv('HF_TOKEN') or os.getenv('HUGGING_FACE_HUB_TOKEN')
-        
-        # Debug: Log token availability (first few chars only for security)
-        if hf_token:
-            logger.info(f"🔑 DEBUG: HuggingFace token found: {hf_token[:8]}... (length: {len(hf_token)})")
-        else:
-            logger.error("🔑 DEBUG: No HuggingFace token found in environment variables")
-            logger.error(f"🔑 DEBUG: Checked variables: HUGGINGFACE_HUB_TOKEN={bool(os.getenv('HUGGINGFACE_HUB_TOKEN'))}, HF_TOKEN={bool(os.getenv('HF_TOKEN'))}, HUGGING_FACE_HUB_TOKEN={bool(os.getenv('HUGGING_FACE_HUB_TOKEN'))}")
-        
-        # Set up authentication if token is available
-        if hf_token:
-            logger.info("Using Hugging Face authentication token for gated models")
-            # Set the token for huggingface_hub
-            os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
-            
-            # Login to huggingface_hub programmatically
-            try:
-                from huggingface_hub import login
-                login(token=hf_token, add_to_git_credential=False)
-                logger.info("Successfully authenticated with Hugging Face Hub")
-            except Exception as e:
-                logger.warning(f"Could not login to Hugging Face Hub: {e}")
-        else:
-            logger.info("No Hugging Face token found - only public models will be accessible")
-        
-        # Check if model is downloaded locally first
-        if not self._check_model_downloaded(self.model_name, hf_token):
-            logger.info(f"Model {self.model_name} not available locally, attempting download...")
-            download_result = self._download_model_if_needed(self.model_name, hf_token)
-            
-            if not download_result['success']:
-                # Handle different types of errors
-                if download_result['error'] in ['gated_no_token', 'gated_no_access']:
-                    # For gated model errors, raise a special exception with all the details
-                    error_details = {
-                        'error_type': download_result['error'],
-                        'model_name': self.model_name,
-                        'model_url': download_result['model_url'],
-                        'message': download_result['message'],
-                        'steps': download_result['steps']
-                    }
-                    
-                    if 'alternatives' in download_result:
-                        error_details['alternatives'] = download_result['alternatives']
-                    
-                    # Log the error details for backend logs
-                    logger.error(f"❌ GATED MODEL ERROR: {download_result['message']}")
-                    logger.error(f"Model URL: {download_result['model_url']}")
-                    for i, step in enumerate(download_result['steps'], 1):
-                        logger.error(f"{i}. {step}")
-                    
-                    # Raise exception with structured data for frontend
-                    raise ValueError(f"GATED_MODEL_ERROR:{json.dumps(error_details)}")
-                else:
-                    # Regular download failure
-                    logger.error(f"❌ Failed to download model {self.model_name}")
-                    logger.error(f"🔄 Try these public alternatives that don't require approval:")
-                    logger.error(f"- microsoft/DialoGPT-medium (conversation model, ~700MB)")
-                    logger.error(f"- distilbert/distilgpt2 (small general model, ~300MB)")  
-                    logger.error(f"- Qwen/Qwen2-0.5B (efficient model, ~1GB)")
-                    logger.error(f"- TinyLlama/TinyLlama-1.1B-Chat-v1.0 (chat optimized, ~2GB)")
-                    raise RuntimeError(f"Could not download model {self.model_name}: {download_result['message']}")
-            else:
-                # Model downloaded successfully, save to database
-                logger.info(f"✅ Model {self.model_name} downloaded successfully")
-                self._save_model_selection_to_db(self.model_name, 'huggingface')
-        else:
-            # Model already exists locally, save selection to database
-            logger.info(f"✅ Model {self.model_name} already available locally")
-            self._save_model_selection_to_db(self.model_name, 'huggingface')
-        
-        try:
-            # Create text generation pipeline with local model preference
-            logger.info(f"Creating pipeline for {self.model_name}")
-            
-            # First, load the model and tokenizer separately with local_files_only
-            from transformers import AutoTokenizer, AutoModelForCausalLM
-            
-            # Load model and tokenizer with local_files_only preference
-            model_load_kwargs = {
-                'local_files_only': True,
-                'trust_remote_code': False,
-                'low_cpu_mem_usage': True,
-                'torch_dtype': 'auto'
-            }
-            
-            tokenizer_load_kwargs = {
-                'local_files_only': True,
-                'trust_remote_code': False
-            }
-            
-            # Add token for loading gated models if available
-            if hf_token:
-                model_load_kwargs['token'] = hf_token
-                tokenizer_load_kwargs['token'] = hf_token
-            
-            # Load tokenizer and model
-            tokenizer = AutoTokenizer.from_pretrained(self.model_name, **tokenizer_load_kwargs)
-            model = AutoModelForCausalLM.from_pretrained(self.model_name, **model_load_kwargs)
-            
-            # Pipeline creation kwargs (without local_files_only since model is already loaded)
-            pipeline_kwargs = {
-                'model': model,
-                'tokenizer': tokenizer,
-                'max_new_tokens': self.parameters.get('max_tokens', 512),
-                'temperature': self.parameters.get('temperature', 0.7),
-                'top_p': self.parameters.get('top_p', 0.9),
-                'do_sample': True,  # Enable sampling for temperature and top_p to work
-            }
-            
-            # Only use device_map if CUDA is available and we're not in a constrained environment
-            cuda_available = os.getenv('CUDA_VISIBLE_DEVICES') is not None
-            if cuda_available:
-                # Move model to GPU if available
-                try:
-                    model = model.cuda()
-                    logger.info("Model moved to CUDA")
-                except Exception as cuda_e:
-                    logger.warning(f"Could not move model to CUDA: {cuda_e}")
-            else:
-                logger.info("Using CPU device")
-            
-            logger.info(f"About to create pipeline with model and tokenizer loaded separately")
-            
-            # Create pipeline with pre-loaded model and tokenizer
-            pipe = pipeline("text-generation", **pipeline_kwargs)
-            logger.info(f"Successfully created Hugging Face pipeline for {self.model_name}")
-            
-        except Exception as e:
-            # If local_files_only fails, suggest alternatives instead of retrying online
-            logger.error(f"Local model loading failed: {e}")
-            logger.error(f"Model {self.model_name} failed to load. This might be due to:")
-            logger.error("1. Model is too large for available memory")
-            logger.error("2. Model requires specific hardware (GPU) that's not available")
-            logger.error("3. Model has compatibility issues")
-            logger.error("")
-            logger.error("Try these smaller, CPU-friendly alternatives:")
-            logger.error("- microsoft/DialoGPT-medium (smaller, conversation-focused)")
-            logger.error("- distilbert/distilgpt2 (very small, good for testing)")
-            logger.error("- Qwen/Qwen2-0.5B (small but capable)")
-            logger.error("- TinyLlama/TinyLlama-1.1B-Chat-v1.0 (optimized for chat)")
-            
-            raise RuntimeError(f"Could not load model {self.model_name}. Try a smaller model.")
-        
-        return HuggingFacePipeline(pipeline=pipe)
-
-def create_embedding_model(model_name: str, provider: str = None):
-    """
-    Create an embedding model based on the provider
-    
-    Args:
-        model_name: The embedding model name
-        provider: The provider type ('ollama', 'huggingface', etc.)
-        
-    Returns:
-        Embedding model instance
-    """
-    if provider is None:
-        provider = detect_model_provider(model_name)
-    
-    logger.info(f"Creating embedding model '{model_name}' using provider '{provider}'")
-    
-    if provider.lower() == "huggingface":
-        from langchain_huggingface import HuggingFaceEmbeddings
-        
-        # Get Hugging Face token from environment
-        hf_token = os.getenv('HUGGINGFACE_HUB_TOKEN') or os.getenv('HF_TOKEN') or os.getenv('HUGGING_FACE_HUB_TOKEN')
-        
-        # Set up authentication if token is available
-        if hf_token:
-            logger.info("Using Hugging Face authentication token for embedding model")
-            os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
-        
-        # Check if embedding model is available locally
-        try:
-            from transformers import AutoConfig
-            
-            # Try to load config locally first
-            try:
-                config = AutoConfig.from_pretrained(model_name, local_files_only=True)
-                logger.info(f"Embedding model {model_name} found locally")
-                local_files_only = True
-            except:
-                logger.info(f"Embedding model {model_name} not found locally, will download if needed")
-                local_files_only = False
-                
-                # For HuggingFace embeddings, try to download if not local
-                if not local_files_only:
-                    try:
-                        from huggingface_hub import snapshot_download
-                        logger.info(f"Downloading embedding model {model_name}...")
-                        
-                        kwargs = {
-                            'repo_id': model_name,
-                            'local_files_only': False,
-                            'resume_download': True
-                        }
-                        
-                        if hf_token:
-                            kwargs['token'] = hf_token
-                        
-                        snapshot_download(**kwargs)
-                        logger.info(f"Successfully downloaded embedding model {model_name}")
-                        local_files_only = True
-                        
-                    except Exception as download_e:
-                        logger.warning(f"Could not download embedding model {model_name}: {download_e}")
-                        # Continue with online mode
-                        local_files_only = False
-        
-        except ImportError:
-            logger.warning("Could not check local model availability")
-            local_files_only = False
-        
-        # Create model kwargs
-        model_kwargs = {
-            'device': 'cuda' if os.getenv('CUDA_VISIBLE_DEVICES') else 'cpu'
-        }
-        
-        # Add token if available
-        if hf_token:
-            model_kwargs['token'] = hf_token
-        
-        # Try local first, then online
-        try:
-            if local_files_only:
-                logger.info(f"Loading embedding model {model_name} from local cache")
-            
-            embedding_model = HuggingFaceEmbeddings(
-                model_name=model_name,
-                model_kwargs=model_kwargs,
-                encode_kwargs={'normalize_embeddings': True}
-            )
-            
-            # Save embedding model selection to database
-            try:
-                from chat_db import ChatDB
-                chat_db = ChatDB()
-                current_settings = chat_db.get_latest_model_settings() or {}
-                current_settings['embedding'] = model_name
-                
-                chat_db.save_model_settings(
-                    llm=current_settings.get('llm', 'deepseek-r1:latest'),
-                    embedding=model_name,
-                    provider=current_settings.get('provider', 'huggingface'),
-                    parameters=current_settings.get('parameters', {}),
-                    embedding_provider=provider
-                )
-                logger.info(f"Saved embedding model selection to database: {model_name}")
-            except Exception as db_e:
-                logger.warning(f"Could not save embedding model to database: {db_e}")
-            
-            return embedding_model
-            
-        except Exception as e:
-            logger.error(f"Failed to create HuggingFace embedding model {model_name}: {e}")
-            if "gated" in str(e).lower() and not hf_token:
-                logger.error("Model may be gated. Add HUGGINGFACE_HUB_TOKEN to your .env file.")
-            
-            # Fallback to Ollama for legacy model names that don't work with HuggingFace
-            logger.warning(f"HuggingFace failed for {model_name}, falling back to Ollama")
-            provider = 'ollama'  # Update provider for fallback
-            
-    # Use Ollama (either as original choice or as fallback)
-    if provider.lower() == 'ollama':
-        from langchain_ollama import OllamaEmbeddings
-        
-        embedding_model = OllamaEmbeddings(
-            model=model_name,
-            base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434')
-        )
-        
-        # Save embedding model selection to database
-        try:
-            from chat_db import ChatDB
-            chat_db = ChatDB()
-            current_settings = chat_db.get_latest_model_settings() or {}
-            current_settings['embedding'] = model_name
-            
-            chat_db.save_model_settings(
-                llm=current_settings.get('llm', 'deepseek-r1:latest'),
-                embedding=model_name,
-                provider=current_settings.get('provider', 'ollama'),
-                parameters=current_settings.get('parameters', {}),
-                embedding_provider=provider
-            )
-            logger.info(f"Saved embedding model selection to database: {model_name} (ollama)")
-        except Exception as db_e:
-            logger.warning(f"Could not save embedding model to database: {db_e}")
-            
-        return embedding_model
-
-def detect_model_provider(model_name: str) -> str:
-    """
-    Detect the provider based on model name format
-    
-    Args:
-        model_name: The model name to analyze
-        
-    Returns:
-        str: Provider name ('huggingface', 'ollama', etc.)
-    """
-    if not model_name:
-        return "ollama"  # Default fallback
-    
-    # Hugging Face models typically have format: organization/model-name
-    # Examples: microsoft/DialoGPT-medium, google/flan-t5-base, sentence-transformers/all-MiniLM-L6-v2
-    if "/" in model_name and not model_name.startswith("ollama/"):
-        # Check for common Hugging Face organizations
-        hf_organizations = [
-            "microsoft", "google", "facebook", "sentence-transformers", 
-            "EleutherAI", "bigscience", "huggingface", "openai-gpt",
-            "bert-base", "distilbert", "roberta", "gpt2", "t5",
-            "Qwen", "BAAI", "thenlper", "intfloat", "jinaai",
-            "nomic-ai", "mixedbread-ai", "WhereIsAI", "avsolatorio"
-        ]
-        
-        org_name = model_name.split("/")[0].lower()
-        model_full_lower = model_name.lower()
-        
-        # Check if it's a known HF organization or has HF-style naming
-        if (org_name in [org.lower() for org in hf_organizations] or
-            any(term in model_full_lower for term in ["sentence-transformers", "all-minilm", "bge-", "e5-", "gte-"])):
-            return "huggingface"
-    
-    # Ollama models are typically simple names or have format like "model:tag"
-    # Examples: llama2, gemma:7b, qwen:latest
-    return "ollama"
-
-def create_llm_provider(provider_type: str, model_name: str, parameters: dict = None) -> LLMProvider:
-    """Factory function to create LLM providers"""
-    if provider_type.lower() == "ollama":
-        return OllamaProvider(model_name, parameters)
-    elif provider_type.lower() == "huggingface":
-        return HuggingFaceProvider(model_name, parameters)
-    else:
-        raise ValueError(f"Unsupported provider type: {provider_type}")
-
 class ChatPDF:
     """A class for handling PDF ingestion and question answering using RAG."""
 
@@ -813,10 +110,6 @@ class ChatPDF:
             'presence_penalty': 0.0
         }
         
-        # Initialize provider settings
-        self.provider = "ollama"  # Default provider
-        self.embedding_provider = "ollama"  # Default embedding provider
-        
         # Try to load model settings from database first, then fallback to config file
         try:
             from chat_db import ChatDB
@@ -826,9 +119,6 @@ class ChatPDF:
             if db_settings:
                 llm_model = db_settings.get('llm', llm_model)
                 embedding_model = db_settings.get('embedding', embedding_model)
-                self.provider = db_settings.get('provider', 'ollama')
-                self.embedding_provider = db_settings.get('embedding_provider', self.provider)  # Use LLM provider as fallback
-                self._loaded_from_database = True  # Flag to indicate we loaded from database
                 
                 # Load model parameters if available
                 if 'parameters' in db_settings:
@@ -837,33 +127,28 @@ class ChatPDF:
                 logger.info(f"Loaded model settings from database: LLM={llm_model}, Embedding={embedding_model}")
                 logger.info(f"Model parameters: {self.model_parameters}")
             else:
-                # No model settings found in database - use defaults
-                self._loaded_from_database = False
-                logger.warning("No model settings found in database, using defaults")
-                logger.info(f"Using default model settings: LLM={llm_model}, Embedding={embedding_model}")
-                logger.info(f"Model parameters: {self.model_parameters}")
+                # Fallback to JSON config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        llm_model = settings.get('llm', llm_model)
+                        embedding_model = settings.get('embedding', embedding_model)
+                        
+                        # Load model parameters if available
+                        if 'parameters' in settings:
+                            self.model_parameters.update(settings['parameters'])
+                        
+                        logger.info(f"Loaded model settings from config file: LLM={llm_model}, Embedding={embedding_model}")
+                        logger.info(f"Model parameters: {self.model_parameters}")
         except Exception as e:
-            self._loaded_from_database = False
-            logger.warning(f"Could not load model settings from database: {e}")
-            logger.info(f"Using default model settings: LLM={llm_model}, Embedding={embedding_model}")
-        
-        # Auto-detect provider based on model name only if not loaded from database
-        # If we loaded settings from database, trust the provider from database
-        if hasattr(self, '_loaded_from_database') and self._loaded_from_database:
-            logger.info(f"Using provider '{self.provider}' from database for model '{llm_model}'")
-        else:
-            # Only auto-detect if we didn't load from database
-            detected_provider = detect_model_provider(llm_model)
-            if self.provider == "ollama" and detected_provider != "ollama":
-                logger.info(f"Auto-detected provider '{detected_provider}' for model '{llm_model}', switching from default 'ollama'")
-                self.provider = detected_provider
+            logger.warning(f"Could not load model settings from database or config: {e}")
         
         # Initialize base attributes
         self.llm_model = llm_model
         self.embedding_model = embedding_model
         self.model = None
         self.embeddings = None
-        self.llm_provider = None  # Will hold the LLM provider instance
         
         # Initialize document storage service
         self.doc_storage = get_document_storage()
@@ -873,9 +158,6 @@ class ChatPDF:
         
         # Add a flag to track if models are loaded - set to False initially
         self.models_loaded = False
-        
-        # Store last context documents for evaluation
-        self.last_context_docs = []
         
         # Update text splitter settings for better handling of technical documents
         self.text_splitter = RecursiveCharacterTextSplitter(
@@ -917,248 +199,6 @@ class ChatPDF:
         # Replace problematic characters with underscores
         safe_model_name = self.embedding_model.replace(":", "_").replace("-", "_").replace("/", "_")
         return f"embeddings_{safe_model_name}"
-
-    def _get_retrieval_config(self, user_id: Optional[str] = None) -> RetrievalConfig:
-        """Get retrieval configuration for the current user or default"""
-        try:
-            config_manager = get_retrieval_config_manager()
-            config = config_manager.get_config(user_id)
-            logger.info(f"🔧 CONFIG LOADED for user_id='{user_id}': reranker_enabled={config.reranker_enabled}, reranker_model='{config.reranker_model}', reranker_provider='{config.reranker_provider}'")
-            return config
-        except Exception as e:
-            logger.warning(f"Could not load retrieval config: {e}")
-            # Return default config if loading fails
-            default_config = RetrievalConfig()
-            logger.info(f"🔧 CONFIG FALLBACK: reranker_enabled={default_config.reranker_enabled}, reranker_model='{default_config.reranker_model}', reranker_provider='{default_config.reranker_provider}'")
-            return default_config
-
-    def _create_retriever_with_config(self, config: RetrievalConfig):
-        """Create retriever with the given configuration"""
-        if not self.vector_store:
-            return None
-        
-        search_kwargs = {"k": config.max_chunks}
-        
-        # Add score threshold if specified
-        if config.search_type == "similarity_score_threshold":
-            search_kwargs["score_threshold"] = config.similarity_threshold
-        elif config.search_type == "mmr":
-            # Maximum Marginal Relevance search
-            search_kwargs["fetch_k"] = config.max_chunks * 2  # Fetch more for diversity
-            search_kwargs["lambda_mult"] = 0.5  # Balance between relevance and diversity
-        
-        return self.vector_store.as_retriever(
-            search_type=config.search_type,
-            search_kwargs=search_kwargs
-        )
-
-    def _perform_hybrid_search(self, query: str, config: RetrievalConfig) -> List:
-        """
-        Perform hybrid search combining semantic similarity and keyword matching.
-        
-        Args:
-            query: The search query
-            config: Retrieval configuration with keyword_similarity_weight
-            
-        Returns:
-            List of documents ranked by hybrid score
-        """
-        try:
-            from rank_bm25 import BM25Okapi
-            import numpy as np
-            from collections import defaultdict
-            
-            # Get all documents from vector store for keyword search
-            all_docs = []
-            if hasattr(self.vector_store, '_collection') and self.vector_store._collection:
-                try:
-                    # Get all documents for BM25
-                    results = self.vector_store._collection.get()
-                    if results and 'documents' in results:
-                        all_docs = [doc for doc in results['documents'] if doc]
-                except Exception as e:
-                    logger.warning(f"Could not retrieve all documents for BM25: {e}")
-                    # Fallback to semantic search only
-                    return self.vector_store.similarity_search(query, k=config.max_chunks)
-            
-            if not all_docs:
-                logger.warning("No documents available for hybrid search, falling back to semantic search")
-                return self.vector_store.similarity_search(query, k=config.max_chunks)
-            
-            # Perform semantic search
-            semantic_docs = self.vector_store.similarity_search_with_score(
-                query, k=min(config.max_chunks * 3, len(all_docs))
-            )
-            
-            # Prepare documents for BM25
-            tokenized_docs = [doc.split() for doc in all_docs]
-            bm25 = BM25Okapi(tokenized_docs)
-            
-            # Perform BM25 search
-            query_tokens = query.split()
-            bm25_scores = bm25.get_scores(query_tokens)
-            
-            # Normalize BM25 scores to 0-1 range
-            if bm25_scores.max() > 0:
-                bm25_scores = bm25_scores / bm25_scores.max()
-            
-            # Create mapping from document content to BM25 score
-            doc_to_bm25_score = {doc: score for doc, score in zip(all_docs, bm25_scores)}
-            
-            # Combine semantic and keyword scores
-            hybrid_scores = []
-            for doc, semantic_score in semantic_docs:
-                # Normalize semantic score (similarity_search_with_score returns distance, lower is better)
-                # Convert to similarity score (higher is better)
-                normalized_semantic_score = max(0, 1 - semantic_score)
-                
-                # Get BM25 score for this document
-                bm25_score = doc_to_bm25_score.get(doc.page_content, 0.0)
-                
-                # Calculate hybrid score using keyword_similarity_weight
-                # weight = 1.0 means pure keyword search, weight = 0.0 means pure semantic search
-                hybrid_score = (
-                    config.keyword_similarity_weight * bm25_score +
-                    (1 - config.keyword_similarity_weight) * normalized_semantic_score
-                )
-                
-                hybrid_scores.append((doc, hybrid_score))
-            
-            # Sort by hybrid score (descending)
-            hybrid_scores.sort(key=lambda x: x[1], reverse=True)
-            
-            # Apply similarity threshold if specified
-            if config.similarity_threshold > 0:
-                hybrid_scores = [
-                    (doc, score) for doc, score in hybrid_scores 
-                    if score >= config.similarity_threshold
-                ]
-            
-            # Return top k documents
-            result_docs = [doc for doc, score in hybrid_scores[:config.max_chunks]]
-            
-            logger.info(f"Hybrid search completed: {len(result_docs)} documents, "
-                       f"keyword_weight: {config.keyword_similarity_weight}")
-            
-            return result_docs
-            
-        except ImportError:
-            logger.warning("rank_bm25 not available, falling back to semantic search")
-            return self.vector_store.similarity_search(query, k=config.max_chunks)
-        except Exception as e:
-            logger.error(f"Error in hybrid search: {e}")
-            # Fallback to semantic search
-            return self.vector_store.similarity_search(query, k=config.max_chunks)
-
-    def _perform_search_with_config(self, query: str, config: RetrievalConfig) -> List:
-        """
-        Perform document search based on the specified search type and configuration.
-        
-        Args:
-            query: The search query
-            config: Retrieval configuration
-            
-        Returns:
-            List of relevant documents
-        """
-        try:
-            if config.search_type == "hybrid":
-                # Use hybrid search that combines semantic and keyword search
-                return self._perform_hybrid_search(query, config)
-            
-            elif config.search_type == "mmr":
-                # Maximum Marginal Relevance search for diversity
-                search_kwargs = {
-                    "k": config.max_chunks,
-                    "fetch_k": config.max_chunks * 2,
-                    "lambda_mult": 0.5  # Balance between relevance and diversity
-                }
-                return self.vector_store.max_marginal_relevance_search(query, **search_kwargs)
-            
-            elif config.search_type == "similarity_score_threshold":
-                # Similarity search with score threshold
-                search_kwargs = {
-                    "k": config.max_chunks,
-                    "score_threshold": config.similarity_threshold
-                }
-                docs_with_scores = self.vector_store.similarity_search_with_score(query, **search_kwargs)
-                # Filter by threshold and return documents
-                filtered_docs = [doc for doc, score in docs_with_scores if score >= config.similarity_threshold]
-                return filtered_docs[:config.max_chunks]
-            
-            elif config.search_type == "similarity":
-                # Standard similarity search
-                return self.vector_store.similarity_search(query, k=config.max_chunks)
-            
-            else:
-                logger.warning(f"Unknown search type: {config.search_type}, falling back to similarity search. Valid types: similarity, mmr, similarity_score_threshold, hybrid")
-                return self.vector_store.similarity_search(query, k=config.max_chunks)
-                
-        except Exception as e:
-            logger.error(f"Error in search with config: {e}")
-            # Fallback to basic similarity search
-            return self.vector_store.similarity_search(query, k=config.max_chunks)
-
-    async def _apply_reranking(self, query: str, documents: List, config: RetrievalConfig) -> List:
-        """Apply reranking if enabled in configuration"""
-        # Debug: Log reranker configuration
-        logger.info(f"🔍 RERANKER DEBUG: enabled={config.reranker_enabled}, model='{config.reranker_model}', documents={len(documents)}")
-        
-        if not config.reranker_enabled or not config.reranker_model:
-            logger.info(f"🔍 RERANKER SKIPPED: enabled={config.reranker_enabled}, model='{config.reranker_model}'")
-            return documents
-        
-        try:
-            reranker = get_reranker()
-            if reranker:
-                # Set the reranker model to match the configuration
-                from reranker import set_reranker_model
-                set_reranker_model(config.reranker_model, config.reranker_provider)
-                logger.info(f"🔧 RERANKER MODEL SET to: {config.reranker_model} (provider: {config.reranker_provider})")
-                
-                # Use the configured max_chunks as top_k for reranking
-                logger.info(f"🔍 RERANKER STARTING: Processing {len(documents)} documents with top_k={config.max_chunks}")
-                reranked_docs = await reranker.rerank(query, documents, top_k=config.max_chunks)
-                logger.info(f"✅ RERANKER SUCCESS: Reranked {len(documents)} documents to {len(reranked_docs)} using {config.reranker_model}")
-                
-                # Apply auto merging if enabled
-                if config.auto_merging_enabled:
-                    logger.info(f"🔗 AUTO MERGE STARTING: Processing {len(reranked_docs)} reranked documents")
-                    try:
-                        from auto_merging_retriever import create_auto_merging_retriever
-                        auto_merger = create_auto_merging_retriever(
-                            similarity_threshold=config.auto_merging_similarity_threshold
-                        )
-                        merged_docs = auto_merger.merge_documents(reranked_docs)
-                        logger.info(f"✅ AUTO MERGE SUCCESS: Merged {len(reranked_docs)} documents to {len(merged_docs)}")
-                        return merged_docs
-                    except Exception as e:
-                        logger.warning(f"❌ AUTO MERGE FAILED: {e}")
-                        return reranked_docs
-                else:
-                    logger.info(f"🔗 AUTO MERGE SKIPPED: auto_merging_enabled={config.auto_merging_enabled}")
-                    
-                return reranked_docs
-            else:
-                logger.warning("❌ RERANKER ERROR: Reranker requested but not available")
-        except Exception as e:
-            logger.warning(f"❌ RERANKER FAILED: {e}")
-        
-        # Apply auto merging even if reranker is disabled or failed
-        if config.auto_merging_enabled:
-            logger.info(f"🔗 AUTO MERGE STARTING: Processing {len(documents)} documents (no reranker)")
-            try:
-                from auto_merging_retriever import create_auto_merging_retriever
-                auto_merger = create_auto_merging_retriever(
-                    similarity_threshold=config.auto_merging_similarity_threshold
-                )
-                merged_docs = auto_merger.merge_documents(documents)
-                logger.info(f"✅ AUTO MERGE SUCCESS: Merged {len(documents)} documents to {len(merged_docs)}")
-                return merged_docs
-            except Exception as e:
-                logger.warning(f"❌ AUTO MERGE FAILED: {e}")
-        
-        return documents
 
     def _ensure_chroma_dir(self):
         """Ensure Chroma directory exists with proper permissions"""
@@ -1355,9 +395,11 @@ class ChatPDF:
                 
                 # Initialize retriever if vector store has data
                 if existing_collection.count() > 0:
-                    retrieval_config = self._get_retrieval_config()
-                    self.retriever = self._create_retriever_with_config(retrieval_config)
-                    logger.info(f"Initialized retriever with existing data (k={retrieval_config.max_chunks}, threshold={retrieval_config.similarity_threshold})")
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    logger.info("Initialized retriever with existing data")
                 else:
                     logger.info("Collection exists but is empty")
                     
@@ -1426,9 +468,11 @@ class ChatPDF:
                     
                     if doc_count > 0:
                         # Initialize retriever for existing data
-                        retrieval_config = self._get_retrieval_config()
-                        self.retriever = self._create_retriever_with_config(retrieval_config)
-                        logger.info(f"Initialized retriever with existing vector data (k={retrieval_config.max_chunks})")
+                        self.retriever = self.vector_store.as_retriever(
+                            search_type="similarity",
+                            search_kwargs={"k": 3}
+                        )
+                        logger.info("Initialized retriever with existing vector data")
                     else:
                         logger.info("Collection is empty, will need to ingest documents")
                         
@@ -1442,9 +486,10 @@ class ChatPDF:
                 if success:
                     # Reinitialize retriever after re-ingestion
                     try:
-                        retrieval_config = self._get_retrieval_config()
-                        self.retriever = self._create_retriever_with_config(retrieval_config)
-                        logger.info(f"Reinitialized retriever after re-ingestion (k={retrieval_config.max_chunks})")
+                        self.retriever = self.vector_store.as_retriever(
+                            search_type="similarity",
+                            search_kwargs={"k": 3}
+                        )
                         logger.info("Retriever reinitialized after successful re-ingestion")
                     except Exception as e:
                         logger.error(f"Failed to reinitialize retriever: {e}")
@@ -1502,19 +547,14 @@ class ChatPDF:
             logger.error(f"Error pulling models: {str(e)}")
             raise
 
-    def update_models(self, llm_model: str, embedding_model: str, provider: str = None, embedding_provider: str = None):
+    def update_models(self, llm_model: str, embedding_model: str):
         """Update models and reload them, handling embedding dimension changes and parameter updates"""
         try:
-            # Use the same provider for both if embedding_provider is not specified
-            if embedding_provider is None:
-                embedding_provider = provider or self.provider
-            
-            logger.info(f"Updating models - LLM: {llm_model} ({provider or self.provider}), Embedding: {embedding_model} ({embedding_provider})")
+            logger.info(f"Updating models - LLM: {llm_model}, Embedding: {embedding_model}")
             
             # Check if embedding model is changing
             embedding_changed = self.embedding_model != embedding_model
             llm_changed = self.llm_model != llm_model
-            provider_changed = provider and self.provider != provider
             
             # Check if parameters changed
             parameters_changed = False
@@ -1525,17 +565,15 @@ class ChatPDF:
                 db_settings = chat_db.get_latest_model_settings()
                 
                 new_parameters = {}
-                new_provider = provider or self.provider
-                if db_settings:
-                    if 'parameters' in db_settings:
-                        new_parameters = db_settings['parameters']
-                    if 'provider' in db_settings:
-                        new_provider = db_settings['provider']
+                if db_settings and 'parameters' in db_settings:
+                    new_parameters = db_settings['parameters']
                 else:
-                    # No database settings found - use defaults
-                    logger.warning("No model settings found in database for parameter check")
-                    new_parameters = {}
-                    new_provider = provider or self.provider
+                    # Fallback to config file
+                    config_path = "model_settings.json"
+                    if os.path.exists(config_path):
+                        with open(config_path, 'r') as f:
+                            settings = json.load(f)
+                            new_parameters = settings.get('parameters', {})
                 
                 # Compare parameters
                 for key, value in new_parameters.items():
@@ -1543,13 +581,10 @@ class ChatPDF:
                         parameters_changed = True
                         break
                 
-                # Update stored parameters and provider
+                # Update stored parameters
                 if parameters_changed:
                     self.model_parameters.update(new_parameters)
                     logger.info(f"Updated model parameters: {self.model_parameters}")
-                if provider_changed or new_provider != self.provider:
-                    self.provider = new_provider
-                    logger.info(f"Updated provider: {self.provider}")
             except Exception as e:
                 logger.warning(f"Could not check parameter changes: {e}")
             
@@ -1557,18 +592,14 @@ class ChatPDF:
             logger.info("Clearing GPU memory before model switch...")
             self.clear_gpu_memory()
             
-            # Update model names and providers
+            # Update model names
             self.llm_model = llm_model
             self.embedding_model = embedding_model
-            if provider:
-                self.provider = provider
-            self.embedding_provider = embedding_provider
             
-            # Clear models if LLM, provider, or parameters changed
-            if llm_changed or parameters_changed or provider_changed:
-                logger.info(f"Model/provider/parameters changed, clearing model. LLM: {llm_changed}, Provider: {provider_changed}, Parameters: {parameters_changed}")
+            # Clear models if LLM changed or parameters changed
+            if llm_changed or parameters_changed:
+                logger.info(f"LLM or parameters changed, clearing model. LLM changed: {llm_changed}, Parameters changed: {parameters_changed}")
                 self.model = None
-                self.llm_provider = None
                 self.models_loaded = False
             
             # Force reload with new models
@@ -1581,9 +612,11 @@ class ChatPDF:
             elif self.vector_store and self.embeddings:
                 # If only LLM changed, just reinitialize retriever
                 try:
-                    retrieval_config = self._get_retrieval_config()
-                    self.retriever = self._create_retriever_with_config(retrieval_config)
-                    logger.info(f"Vector store retriever updated (k={retrieval_config.max_chunks})")
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    logger.info("Vector store retriever updated")
                 except Exception as e:
                     logger.warning(f"Could not update vector store retriever: {str(e)}")
             
@@ -1609,42 +642,96 @@ class ChatPDF:
                 
                 if not self.embeddings:
                     logger.info(f"Loading embedding model: {self.embedding_model}")
-                    # Use stored embedding provider or auto-detect as fallback
-                    embedding_provider = self.embedding_provider or detect_model_provider(self.embedding_model)
-                    self.embeddings = create_embedding_model(self.embedding_model, embedding_provider)
+                    
+                    # Determine the provider for the embedding model
+                    embedding_provider = getattr(self, 'embedding_provider', 'ollama')
+                    
+                    # Apply compatibility override for mxbai-embed-large (BERT models need HuggingFace)
+                    if self.embedding_model.startswith("mxbai-embed-large"):
+                        embedding_provider = "huggingface"
+                        logger.info(f"Using HuggingFace provider for BERT-based model: {self.embedding_model}")
+                    
+                    if embedding_provider == "huggingface":
+                        # Use HuggingFace embeddings
+                        from langchain_huggingface import HuggingFaceEmbeddings
+                        import threading
+                        import time
+                        
+                        # Map short model name to full HuggingFace model name
+                        if self.embedding_model == "mxbai-embed-large":
+                            hf_model_name = "mixedbread-ai/mxbai-embed-large-v1"
+                        else:
+                            hf_model_name = self.embedding_model
+                        
+                        logger.info(f"Starting download of HuggingFace model: {hf_model_name}")
+                        logger.info("This may take several minutes for first-time download...")
+                        
+                        # Progress indicator for model download
+                        download_complete = threading.Event()
+                        start_time = time.time()
+                        
+                        def progress_logger():
+                            while not download_complete.is_set():
+                                elapsed = int(time.time() - start_time)
+                                logger.info(f"⏳ Still downloading {hf_model_name}... ({elapsed}s elapsed)")
+                                if download_complete.wait(10):  # Wait 10 seconds or until complete
+                                    break
+                        
+                        # Start progress logging in background
+                        progress_thread = threading.Thread(target=progress_logger, daemon=True)
+                        progress_thread.start()
+                        
+                        try:
+                            self.embeddings = HuggingFaceEmbeddings(
+                                model_name=hf_model_name,
+                                model_kwargs={'device': 'cuda' if torch and torch.cuda.is_available() else 'cpu'}
+                            )
+                            download_complete.set()  # Signal completion
+                            elapsed = int(time.time() - start_time)
+                            logger.info(f"✅ Successfully loaded HuggingFace embedding model: {hf_model_name} ({elapsed}s)")
+                        except Exception as e:
+                            download_complete.set()  # Signal completion even on error
+                            raise e
+                    else:
+                        # Use Ollama embeddings (default)
+                        self.embeddings = OllamaEmbeddings(
+                            model=self.embedding_model,
+                            base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+                        )
+                        logger.info(f"Loaded Ollama embedding model: {self.embedding_model}")
                     
                     # Test embeddings
-                    self.embeddings.embed_query("test")
-                    logger.info(f"Embedding model loaded successfully using {embedding_provider} provider")
+                    test_result = self.embeddings.embed_query("test")
+                    logger.info(f"Embedding model loaded successfully, test embedding dimension: {len(test_result) if test_result else 'unknown'}")
                 
                 if not self.model:
-                    logger.info(f"Loading LLM model: {self.llm_model} using provider: {self.provider}")
+                    logger.info(f"Loading LLM model: {self.llm_model}")
                     logger.info(f"Using model parameters: {self.model_parameters}")
                     
-                    # Create LLM provider and get model
-                    try:
-                        self.llm_provider = create_llm_provider(
-                            self.provider, 
-                            self.llm_model, 
-                            self.model_parameters
-                        )
-                        self.model = self.llm_provider.get_model()
-                        logger.info(f"LLM model loaded successfully using {self.provider} provider")
-                    except Exception as provider_error:
-                        logger.error(f"Failed to create {self.provider} provider: {provider_error}")
-                        # Fallback to Ollama if other provider fails
-                        if self.provider != "ollama":
-                            logger.info("Falling back to Ollama provider")
-                            self.provider = "ollama"
-                            self.llm_provider = create_llm_provider(
-                                "ollama", 
-                                self.llm_model, 
-                                self.model_parameters
-                            )
-                            self.model = self.llm_provider.get_model()
-                            logger.info("LLM model loaded successfully using fallback Ollama provider")
-                        else:
-                            raise provider_error
+                    # Build model kwargs with parameters
+                    model_kwargs = {
+                        'model': self.llm_model,
+                        'base_url': os.getenv('OLLAMA_HOST', 'http://ollama:11434'),
+                        'temperature': self.model_parameters.get('temperature', 0.7),
+                        'num_ctx': self.model_parameters.get('max_tokens', 2048),
+                        'top_p': self.model_parameters.get('top_p', 0.9),
+                        'timeout': 120,  # Keep timeout for stability
+                        'streaming': True,  # Enable streaming
+                        'seed': 42  # Add seed for consistent responses
+                    }
+                    
+                    # Add frequency and presence penalties if supported by Ollama
+                    # Note: These might not be directly supported by Ollama, but we'll include them for future compatibility
+                    freq_penalty = self.model_parameters.get('frequency_penalty', 0.0)
+                    presence_penalty = self.model_parameters.get('presence_penalty', 0.0)
+                    
+                    if freq_penalty != 0.0:
+                        model_kwargs['frequency_penalty'] = freq_penalty
+                    if presence_penalty != 0.0:
+                        model_kwargs['presence_penalty'] = presence_penalty
+                    
+                    self.model = ChatOllama(**model_kwargs)
+                    logger.info("LLM model loaded successfully with custom parameters")
                 
                 # Mark models as loaded after successful initialization
                 self.models_loaded = True
@@ -1784,9 +871,11 @@ class ChatPDF:
                 
                 # Initialize or update retriever
                 if not self.retriever:
-                    retrieval_config = self._get_retrieval_config()
-                    self.retriever = self._create_retriever_with_config(retrieval_config)
-                    logger.debug(f"Initialized retriever (k={retrieval_config.max_chunks})")
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    logger.debug("Initialized retriever")
                 
                 # No need to call persist() with PersistentClient - it auto-persists
                 logger.info(f"Successfully processed PDF: {pdf_file_path}")
@@ -1805,9 +894,10 @@ class ChatPDF:
                         if self.vector_store:
                             self._handle_chromadb_operation(self.vector_store.add_documents, chunks)
                             if not self.retriever:
-                                retrieval_config = self._get_retrieval_config()
-                                self.retriever = self._create_retriever_with_config(retrieval_config)
-                                logger.debug(f"Initialized retriever after migration (k={retrieval_config.max_chunks})")
+                                self.retriever = self.vector_store.as_retriever(
+                                    search_type="similarity",
+                                    search_kwargs={"k": 3}
+                                )
                             logger.info(f"Successfully processed PDF after migration: {pdf_file_path}")
                             return True
                     except Exception as migration_error:
@@ -1853,7 +943,7 @@ class ChatPDF:
             return False
     
     def _ingest_for_current_model(self, document_id: int, file_path: str = None) -> bool:
-        """Ingest a specific document for the current embedding model using stored chunking configuration"""
+        """Ingest a specific document for the current embedding model"""
         try:
             # Get file path if not provided
             if file_path is None:
@@ -1862,69 +952,54 @@ class ChatPDF:
             else:
                 cleanup_temp_file = False
             
-            # Get document info with chunking configuration
-            doc_info = self.doc_storage.get_document_with_config(document_id)
+            # Get document info to determine file type
+            doc_info = self.doc_storage._get_document_by_id(document_id)
             if not doc_info:
                 logger.error(f"Document {document_id} not found in database")
                 return False
-            
+                
             filename = doc_info['filename']
+            file_extension = Path(filename).suffix.lower()
             
-            # Get stored chunking configuration
-            stored_method = doc_info.get('chunking_method', 'general')
-            stored_config = doc_info.get('chunking_config')
+            # Extract text using the appropriate method based on file type
+            text_content = None
             
-            # Convert stored method to ChunkingMethod enum
-            try:
-                from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
-                chunking_method = ChunkingMethod(stored_method)
-            except ValueError:
-                logger.warning(f"Unknown stored chunking method '{stored_method}', using general")
-                chunking_method = ChunkingMethod.GENERAL
-            
-            # Get chunking configuration
-            config_manager = get_chunking_config_manager()
-            if stored_config:
+            if file_extension == '.pdf':
+                # Use PDF extraction
+                text_content = self._extract_text_from_pdf(file_path)
+            elif file_extension in ['.docx', '.doc']:
+                # Use enhanced document processor for Word documents
                 try:
-                    chunking_config = ChunkingConfig.from_dict(stored_config)
-                    logger.info(f"Using stored chunking config for document {document_id}: {chunking_method.value}")
+                    from enhanced_document_processor import get_document_processor
+                    processor = get_document_processor()
+                    # Process as Word document
+                    docs = processor.process_document(file_path, filename=filename)
+                    if docs:
+                        # Combine all document chunks into single text
+                        text_content = '\n\n'.join([doc.page_content for doc in docs])
+                    else:
+                        logger.warning(f"No content extracted from Word document: {filename}")
                 except Exception as e:
-                    logger.warning(f"Failed to load stored chunking config for document {document_id}: {e}")
-                    chunking_config = config_manager.get_config(chunking_method)
+                    logger.warning(f"Enhanced processor failed for {filename}, trying fallback: {e}")
+                    # Fallback to basic PDF extraction (might work for some formats)
+                    text_content = self._extract_text_from_pdf(file_path)
             else:
-                # Get default config for the method
-                chunking_config = config_manager.get_config(chunking_method)
-                logger.info(f"Using default chunking config for document {document_id}: {chunking_method.value}")
+                # Try enhanced processor for other file types
+                try:
+                    from enhanced_document_processor import get_document_processor
+                    processor = get_document_processor()
+                    docs = processor.process_document(file_path, filename=filename)
+                    if docs:
+                        text_content = '\n\n'.join([doc.page_content for doc in docs])
+                    else:
+                        # Fallback to PDF extraction
+                        text_content = self._extract_text_from_pdf(file_path)
+                except Exception as e:
+                    logger.warning(f"Enhanced processor failed for {filename}, trying PDF extraction: {e}")
+                    text_content = self._extract_text_from_pdf(file_path)
             
-            # Use enhanced document processor with stored configuration
-            try:
-                from enhanced_document_processor import get_document_processor
-                doc_processor = get_document_processor()
-                
-                chunking_result = doc_processor.process_document(
-                    file_path,
-                    chunking_method,
-                    chunking_config,
-                    None,  # user_id not needed for reingestion
-                    original_filename=filename,
-                    document_id=document_id  # Pass document_id for chunk metadata
-                )
-                
-                if not chunking_result or not chunking_result.chunks:
-                    error_msg = f"No chunks created from document {filename} using {chunking_method.value} method"
-                    logger.error(error_msg)
-                    self.doc_storage.mark_ingestion_failed(
-                        document_id, 
-                        self.embedding_model, 
-                        error_msg
-                    )
-                    return False
-                
-                chunks = chunking_result.chunks
-                logger.info(f"Document {document_id} reprocessed: {len(chunks)} chunks created using stored {chunking_result.method_used.value} method")
-                
-            except Exception as e:
-                error_msg = f"Enhanced processor failed for {filename}: {e}"
+            if not text_content or not text_content.strip():
+                error_msg = f"No text content extracted from {filename} (type: {file_extension})"
                 logger.error(error_msg)
                 self.doc_storage.mark_ingestion_failed(
                     document_id, 
@@ -1932,7 +1007,31 @@ class ChatPDF:
                     error_msg
                 )
                 return False
+             # Create document and split into chunks
+            docs = [Document(page_content=text_content)]
+            chunks = self.text_splitter.split_documents(docs)
             
+            if not chunks:
+                self.doc_storage.mark_ingestion_failed(
+                    document_id, 
+                    self.embedding_model, 
+                    "No chunks created from text splitting"
+                )
+                return False
+
+            # Get document info to add filename to chunk metadata
+            filename = doc_info['filename'] if doc_info else f"document_{document_id}"
+            
+            # Add filename to chunk metadata
+            for chunk in chunks:
+                if not chunk.metadata:
+                    chunk.metadata = {}
+                chunk.metadata['source'] = filename
+                chunk.metadata['document_id'] = document_id
+
+            # Debug: Log metadata before filtering
+            logger.info(f"Before filtering - first chunk metadata: {chunks[0].metadata if chunks else 'No chunks'}")
+
             # Use our custom metadata filtering instead of langchain's filter_complex_metadata
             chunks = self._filter_metadata_for_chromadb(chunks)
             
@@ -1947,29 +1046,19 @@ class ChatPDF:
             success = self._add_chunks_to_vector_store(chunks, collection_name)
             
             if success:
-                # Track successful ingestion with enhanced metadata
-                simple_metadata = {
-                    'method_used': chunking_result.method_used.value,
-                    'chunk_count': len(chunks),
-                    'file_format': chunking_result.metadata.get('file_format', 'unknown') if chunking_result.metadata else 'unknown',
-                    'processing_time': chunking_result.metadata.get('processing_time', 0) if chunking_result.metadata else 0,
-                    'file_size': chunking_result.metadata.get('file_size', 0) if chunking_result.metadata else 0,
-                    'warnings_count': len(chunking_result.warnings) if chunking_result.warnings else 0
-                }
-                
-                if chunking_result.warnings:
-                    simple_metadata['warnings'] = '; '.join(chunking_result.warnings[:3])
-                
+                # Track successful ingestion
                 self.doc_storage.track_ingestion(
                     document_id=document_id,
                     embedding_model=self.embedding_model,
                     vector_store_collection=collection_name,
                     chunk_count=len(chunks),
-                    metadata=simple_metadata,
-                    chunking_method=chunking_result.method_used.value,
-                    chunking_config=chunking_result.config_used.to_dict()
+                    metadata={
+                        'text_length': len(text_content),
+                        'chunk_size': self.text_splitter._chunk_size,
+                        'chunk_overlap': self.text_splitter._chunk_overlap
+                    }
                 )
-                logger.info(f"Successfully reingested document {document_id} for model {self.embedding_model} using {chunking_result.method_used.value} method")
+                logger.info(f"Successfully ingested document {document_id} for model {self.embedding_model}")
             else:
                 self.doc_storage.mark_ingestion_failed(
                     document_id, 
@@ -2231,9 +1320,10 @@ class ChatPDF:
                     logger.error(f"🔍 DEBUG: Could not verify stored chunks: {verify_error}")
                 
                 # Update retriever
-                retrieval_config = self._get_retrieval_config()
-                self.retriever = self._create_retriever_with_config(retrieval_config)
-                logger.debug(f"Updated retriever after adding chunks (k={retrieval_config.max_chunks})")
+                self.retriever = self.vector_store.as_retriever(
+                    search_type="similarity",
+                    search_kwargs={"k": 3}
+                )
                 
                 # Backup to MinIO after successful ingestion
                 backup_success = self._backup_vector_store_to_minio(collection_name)
@@ -2606,10 +1696,36 @@ class ChatPDF:
             
             # Reinitialize the embeddings with new model
             try:
-                # Auto-detect embedding provider and create appropriate model
-                embedding_provider = detect_model_provider(model_name)
-                self.embeddings = create_embedding_model(model_name, embedding_provider)
-                logger.info(f"Switched to embedding model '{model_name}' using {embedding_provider} provider")
+                # Determine the provider for the embedding model
+                embedding_provider = getattr(self, 'embedding_provider', 'ollama')
+                
+                # Apply compatibility override for mxbai-embed-large (BERT models need HuggingFace)
+                if model_name.startswith("mxbai-embed-large"):
+                    embedding_provider = "huggingface"
+                    logger.info(f"Using HuggingFace provider for BERT-based model: {model_name}")
+                
+                if embedding_provider == "huggingface":
+                    # Use HuggingFace embeddings
+                    from langchain_huggingface import HuggingFaceEmbeddings
+                    
+                    # Map short model name to full HuggingFace model name
+                    if model_name == "mxbai-embed-large":
+                        hf_model_name = "mixedbread-ai/mxbai-embed-large-v1"
+                    else:
+                        hf_model_name = model_name
+                    
+                    self.embeddings = HuggingFaceEmbeddings(
+                        model_name=hf_model_name,
+                        model_kwargs={'device': 'cuda' if torch and torch.cuda.is_available() else 'cpu'}
+                    )
+                    logger.info(f"Switched to HuggingFace embedding model: {hf_model_name}")
+                else:
+                    # Use Ollama embeddings (default)
+                    self.embeddings = OllamaEmbeddings(
+                        model=model_name,
+                        base_url=self.ollama_url
+                    )
+                    logger.info(f"Switched to Ollama embedding model: {model_name}")
                 
                 # Clear the vector store to force reinitialization with new embeddings
                 self.vector_store = None
@@ -2632,17 +1748,15 @@ class ChatPDF:
             logger.error(f"Error switching embedding model: {e}")
             return False
 
-    async def stream_response(self, question: str, style: str = "standard", user_id: Optional[str] = None):
+    async def stream_response(self, question: str, style: str = "standard"):
         """
         Generate a streaming response to a question based on the ingested documents
         
         Args:
             question: The user's question
             style: Response style ("standard", "conversational", "detailed")
-            user_id: User ID for loading user-specific configuration
         """
         try:
-            logger.info(f"🔧 STREAM DEBUG: stream_response called with user_id='{user_id}'")
             # Ensure models are loaded
             self.ensure_models_loaded()
             
@@ -2656,17 +1770,7 @@ class ChatPDF:
                     return
             
             # Retrieve relevant documents
-            retrieval_config = self._get_retrieval_config(user_id)
-            
-            # Use the new search method with configuration
-            if self.vector_store:
-                relevant_docs = self._perform_search_with_config(question, retrieval_config)
-            else:
-                # Fallback to retriever's get_relevant_documents if vector store not available
-                relevant_docs = self.retriever.get_relevant_documents(question)
-            
-            # Apply reranking if enabled
-            relevant_docs = await self._apply_reranking(question, relevant_docs, retrieval_config)
+            relevant_docs = self.retriever.get_relevant_documents(question)
             
             if not relevant_docs:
                 logger.warning("No relevant documents found for query")
@@ -2719,22 +1823,7 @@ class ChatPDF:
                     return "I don't have any documents to reference. Please upload some documents first."
             
             # Retrieve relevant documents
-            retrieval_config = self._get_retrieval_config()
-            
-            # Use the new search method with configuration
-            if self.vector_store:
-                relevant_docs = self._perform_search_with_config(question, retrieval_config)
-            else:
-                # Fallback to retriever's get_relevant_documents if vector store not available
-                relevant_docs = self.retriever.get_relevant_documents(question)
-            
-            # Apply reranking if enabled (sync version)
-            if retrieval_config.reranker_enabled and retrieval_config.reranker_model:
-                try:
-                    import asyncio
-                    relevant_docs = asyncio.run(self._apply_reranking(question, relevant_docs, retrieval_config))
-                except Exception as e:
-                    logger.warning(f"Reranking failed in sync mode: {e}")
+            relevant_docs = self.retriever.get_relevant_documents(question)
             
             if not relevant_docs:
                 logger.warning("No relevant documents found for query")
@@ -2742,9 +1831,6 @@ class ChatPDF:
             
             # Create context from relevant documents
             context = "\n\n".join([doc.page_content for doc in relevant_docs])
-            
-            # Store context docs for evaluation (last query context)
-            self.last_context_docs = relevant_docs
             
             # Choose prompt based on style
             if style == "conversational":
@@ -2762,53 +1848,11 @@ class ChatPDF:
             
             # Get the response
             response = chain.invoke({"context": context, "question": question})
-            
-            # Perform evaluation asynchronously (fire and forget)
-            self._evaluate_response_async(question, response, context)
-            
             return response
                 
         except Exception as e:
             logger.error(f"Error in query: {e}")
             return f"An error occurred while processing your question: {str(e)}"
-    
-    def _evaluate_response_async(self, question: str, response: str, context: str):
-        """Perform evaluation asynchronously without blocking the response"""
-        try:
-            # Import evaluation system
-            from evaluation_system import evaluate_chat_response
-            
-            # Run evaluation in background
-            import asyncio
-            import threading
-            
-            def run_evaluation():
-                try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    
-                    # Run the evaluation
-                    result = loop.run_until_complete(
-                        evaluate_chat_response(
-                            question=question,
-                            answer=response,
-                            context=context
-                        )
-                    )
-                    
-                    logger.info(f"Background evaluation completed - Overall: {result.overall_score:.3f}")
-                    
-                except Exception as e:
-                    logger.warning(f"Background evaluation failed: {e}")
-                finally:
-                    loop.close()
-            
-            # Start evaluation in background thread
-            thread = threading.Thread(target=run_evaluation, daemon=True)
-            thread.start()
-            
-        except Exception as e:
-            logger.warning(f"Could not start background evaluation: {e}")
     
     def _backup_vector_store_to_minio(self, collection_name: str):
         """Backup vector store collection to MinIO"""
@@ -2965,9 +2009,11 @@ class ChatPDF:
                         logger.info(f"Vector store initialized for collection '{collection_name}'")
                     
                     # Initialize retriever
-                    retrieval_config = self._get_retrieval_config()
-                    self.retriever = self._create_retriever_with_config(retrieval_config)
-                    logger.info(f"Retriever reinitialized with {doc_count} documents (k={retrieval_config.max_chunks})")
+                    self.retriever = self.vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    logger.info(f"Retriever reinitialized with {doc_count} documents")
                     return True
                 else:
                     logger.warning(f"Collection '{collection_name}' is empty")
@@ -3100,55 +2146,43 @@ class ChatPDF:
             return False
 
     def remove_document_from_vectorstore(self, filename: str) -> bool:
-        """Remove document chunks from vector store by filename across ALL embedding models"""
+        """Remove document chunks from vector store by filename"""
         try:
             if not self.vector_store:
                 logger.warning("Vector store not initialized")
                 return False
             
+            # Get collection name for current embedding model
+            collection_name = f"collection_{self.embedding_model.replace('/', '_').replace('-', '_')}"
+            
             # Get ChromaDB client
             chroma_client = self.vector_store._client
             
-            # Get all collections (all embedding models)
+            # Get the collection
             try:
-                collections = chroma_client.list_collections()
-                collection_names = [col.name for col in collections]
+                collection = chroma_client.get_collection(collection_name)
             except Exception as e:
-                logger.warning(f"Could not list collections: {e}")
-                # Fallback to current model only
-                collection_names = [f"collection_{self.embedding_model.replace('/', '_').replace('-', '_')}"]
+                logger.warning(f"Collection {collection_name} not found: {e}")
+                return True  # Consider it success if collection doesn't exist
             
-            total_deleted = 0
-            
-            # Remove from all collections
-            for collection_name in collection_names:
-                try:
-                    collection = chroma_client.get_collection(collection_name)
+            # Query for documents with this filename in metadata
+            try:
+                results = collection.get(
+                    where={"source": filename}
+                )
+                
+                if results and results.get('ids'):
+                    # Delete all chunks for this document
+                    collection.delete(ids=results['ids'])
+                    logger.info(f"Removed {len(results['ids'])} chunks for document {filename}")
+                    return True
+                else:
+                    logger.info(f"No chunks found for document {filename}")
+                    return True
                     
-                    # Query for documents with this filename in metadata
-                    results = collection.get(
-                        where={"source": filename}
-                    )
-                    
-                    if results and results.get('ids'):
-                        # Delete all chunks for this document
-                        collection.delete(ids=results['ids'])
-                        deleted_count = len(results['ids'])
-                        total_deleted += deleted_count
-                        logger.info(f"Removed {deleted_count} chunks for document {filename} from collection {collection_name}")
-                    else:
-                        logger.debug(f"No chunks found for document {filename} in collection {collection_name}")
-                        
-                except Exception as e:
-                    logger.warning(f"Could not remove from collection {collection_name}: {e}")
-                    continue
-            
-            if total_deleted > 0:
-                logger.info(f"Successfully removed {total_deleted} total chunks for document {filename} from all collections")
-            else:
-                logger.info(f"No chunks found for document {filename} in any collection")
-            
-            return True
+            except Exception as e:
+                logger.error(f"Error removing document {filename} from vector store: {e}")
+                return False
                 
         except Exception as e:
             logger.error(f"Error removing document from vectorstore: {e}")
@@ -3195,11 +2229,7 @@ class ChatPDF:
             # Remove from all relevant embedding model collections
             for model in embedding_models:
                 try:
-                    # Store current embedding model and temporarily switch to the target model
-                    original_model = self.embedding_model
-                    self.embedding_model = model
-                    collection_name = self._get_collection_name()
-                    self.embedding_model = original_model
+                    collection_name = f"collection_{model.replace('/', '_').replace('-', '_')}"
                     
                     # Get the collection
                     try:
@@ -3210,43 +2240,18 @@ class ChatPDF:
                     
                     # Query for documents with this document_id in metadata
                     try:
-                        # First, debug what metadata keys and values exist in the collection
-                        logger.info(f"🔍 DEBUG: Searching for document_id={document_id} in collection {collection_name}")
-                        
-                        # Get a few sample documents to see what metadata looks like
-                        sample_results = collection.get(limit=5, include=["metadatas"])
-                        if sample_results and sample_results.get('metadatas'):
-                            logger.info(f"🔍 DEBUG: Sample metadata in collection: {sample_results['metadatas'][:3]}")
-                        
-                        # Try both string and integer document_id searches
                         results = collection.get(
                             where={"document_id": str(document_id)}
                         )
                         
-                        # If not found, try with integer document_id
-                        if not results or not results.get('ids'):
-                            logger.info(f"🔍 DEBUG: No results found with string document_id, trying integer")
-                            results = collection.get(
-                                where={"document_id": document_id}
-                            )
-                        
                         if results and results.get('ids'):
                             # Delete all chunks for this document
-                            logger.info(f"🔍 DEBUG: Found {len(results['ids'])} chunks with document_id {document_id}")
                             collection.delete(ids=results['ids'])
                             deleted_count = len(results['ids'])
                             total_deleted += deleted_count
                             logger.info(f"Removed {deleted_count} chunks for document {document_id} from model {model}")
                         else:
-                            logger.warning(f"🔍 DEBUG: No chunks found for document_id {document_id} in model {model}")
-                            # Let's try to find all chunks and see their document_ids
-                            all_results = collection.get(include=["metadatas"])
-                            document_ids_found = set()
-                            if all_results and all_results.get('metadatas'):
-                                for metadata in all_results['metadatas']:
-                                    if 'document_id' in metadata:
-                                        document_ids_found.add(metadata['document_id'])
-                            logger.warning(f"🔍 DEBUG: All document_ids found in collection: {sorted(document_ids_found)}")
+                            logger.info(f"No chunks found for document {document_id} in model {model}")
                             
                     except Exception as e:
                         logger.error(f"Error removing document {document_id} from vector store {model}: {e}")
@@ -3261,18 +2266,6 @@ class ChatPDF:
                 
         except Exception as e:
             logger.error(f"Error removing document {document_id} from vectorstore: {e}")
-            return False
-
-    def remove_document_completely(self, document_id: str) -> bool:
-        """
-        Completely remove a document from all embedding model collections
-        This is used during reingestion to ensure old chunks are fully deleted
-        """
-        try:
-            logger.info(f"Completely removing document {document_id} from all collections")
-            return self.remove_document_from_vectorstore(document_id)
-        except Exception as e:
-            logger.error(f"Error completely removing document {document_id}: {e}")
             return False
 
     def clear_vectorstore(self):
@@ -3349,8 +2342,6 @@ class ChatPDF:
             
             for doc_id in document_ids:
                 try:
-                    logger.info(f"Processing document {doc_id}")
-                    
                     # Step 1: Check if document exists in DB and MinIO
                     doc_info = self.doc_storage.get_document_with_config(doc_id)
                     if not doc_info:
@@ -3379,7 +2370,7 @@ class ChatPDF:
                     # Step 2: Delete old chunks from vector store for this document+model
                     logger.info(f"Removing old chunks for document {doc_id}")
                     try:
-                        self.remove_document_completely(doc_id)
+                        self.remove_document_by_id(doc_id, [self.embedding_model])
                     except Exception as e:
                         logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
                     
@@ -3419,8 +2410,7 @@ class ChatPDF:
                             chunking_method,
                             chunking_config,
                             None,  # user_id not needed for reingestion
-                            original_filename=doc_info['filename'],
-                            document_id=doc_id
+                            doc_info['filename']
                         )
                         
                         if not chunking_result.chunks:
@@ -3545,8 +2535,6 @@ class ChatPDF:
                 chunking_config = doc_config.get('chunking_config')
                 
                 try:
-                    logger.info(f"Processing document {doc_id} with custom config")
-                    
                     # Step 1: Check if document exists in DB and MinIO
                     doc_info = self.doc_storage.get_document_with_config(doc_id)
                     if not doc_info:
@@ -3575,7 +2563,7 @@ class ChatPDF:
                     # Step 2: Delete old chunks from vector store for this document+model
                     logger.info(f"Removing old chunks for document {doc_id}")
                     try:
-                        self.remove_document_completely(doc_id)
+                        self.remove_document_by_id(doc_id, [self.embedding_model])
                     except Exception as e:
                         logger.warning(f"Could not remove old chunks for document {doc_id}: {e}")
                     
@@ -3615,8 +2603,7 @@ class ChatPDF:
                             chunking_method,
                             chunking_config,
                             None,  # user_id not needed for reingestion
-                            original_filename=doc_info['filename'],
-                            document_id=doc_id
+                            doc_info['filename']
                         )
                         
                         if not chunking_result.chunks:
@@ -3795,8 +2782,7 @@ class ChatPDF:
                     chunking_method, 
                     chunking_config, 
                     user_id,
-                    original_filename,  # Pass the original filename
-                    document_id=doc_info['id']  # Pass document_id for chunk metadata
+                    original_filename  # Pass the original filename
                 )
                 
                 logger.info(f"Document processed: {len(chunking_result.chunks)} chunks created using {chunking_result.method_used.value}")
@@ -3907,9 +2893,14 @@ def get_chatpdf_instance():
                 embedding_model = db_settings.get('embedding', embedding_model)
                 logger.info(f"Loaded current models from database for singleton: LLM={llm_model}, Embedding={embedding_model}")
             else:
-                # No database settings found - use defaults
-                logger.warning("No model settings found in database for singleton, using defaults")
-                logger.info(f"Using default models for singleton: LLM={llm_model}, Embedding={embedding_model}")
+                # Fallback to config file
+                config_path = "model_settings.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        settings = json.load(f)
+                        llm_model = settings.get('llm', llm_model)
+                        embedding_model = settings.get('embedding', embedding_model)
+                        logger.info(f"Loaded current models from config for singleton: LLM={llm_model}, Embedding={embedding_model}")
         except Exception as e:
             logger.warning(f"Could not load current models for singleton, using defaults: {e}")
         

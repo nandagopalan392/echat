@@ -172,9 +172,8 @@ class DatasetGenerator:
                 # Select difficulty level
                 difficulty = random.choice(difficulty_levels)
                 
-                # Select relevant chunks (1-3 chunks per question)
-                num_chunks = random.randint(1, min(3, len(chunks)))
-                selected_chunks = random.sample(chunks, num_chunks)
+                # Select single chunk per question for focused evaluation
+                selected_chunks = [random.choice(chunks)]
                 
                 # Generate question and answer
                 item = await self._generate_single_qa_pair(

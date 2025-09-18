@@ -1222,6 +1222,469 @@ export const api = {
             throw error;
         }
     },
+
+    // ========================================
+    // FINETUNING API ENDPOINTS
+    // ========================================
+    
+    // Create a new finetuning experiment
+    createFineTuningExperiment: async (formData) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments`, {
+                method: 'POST',
+                headers: {
+                    ...getAuthHeader()
+                },
+                body: formData  // FormData for file upload
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+                throw new Error(errorData.detail || 'Failed to create experiment');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error creating finetuning experiment:', error);
+            throw error;
+        }
+    },
+
+    // Get all finetuning experiments
+    getFineTuningExperiments: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch experiments');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching finetuning experiments:', error);
+            throw error;
+        }
+    },
+
+    // Get a specific finetuning experiment
+    getFineTuningExperiment: async (experimentId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments/${experimentId}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch experiment');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching finetuning experiment:', error);
+            throw error;
+        }
+    },
+
+    // Update finetuning experiment
+    updateFineTuningExperiment: async (experimentId, updates) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments/${experimentId}`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(updates)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to update experiment');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error updating finetuning experiment:', error);
+            throw error;
+        }
+    },
+
+    // Delete finetuning experiment
+    deleteFineTuningExperiment: async (experimentId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments/${experimentId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to delete experiment');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error deleting finetuning experiment:', error);
+            throw error;
+        }
+    },
+
+    // Start training
+    startFineTuningTraining: async (experimentId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments/${experimentId}/start`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to start training');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error starting finetuning training:', error);
+            throw error;
+        }
+    },
+
+    // Stop training
+    stopFineTuningTraining: async (experimentId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments/${experimentId}/stop`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to stop training');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error stopping finetuning training:', error);
+            throw error;
+        }
+    },
+
+    // Get training logs
+    getFineTuningLogs: async (experimentId, offset = 0, limit = 100) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments/${experimentId}/logs?offset=${offset}&limit=${limit}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch training logs');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching finetuning logs:', error);
+            throw error;
+        }
+    },
+
+    // Get training metrics
+    getFineTuningMetrics: async (experimentId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/experiments/${experimentId}/metrics`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch training metrics');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching finetuning metrics:', error);
+            throw error;
+        }
+    },
+
+    // Get available HuggingFace models
+    getAvailableHFModels: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/models`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch available models');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching available HF models:', error);
+            throw error;
+        }
+    },
+
+    // Validate dataset
+    validateFineTuningDataset: async (file) => {
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/validate-dataset`, {
+                method: 'POST',
+                headers: {
+                    ...getAuthHeader()
+                },
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: 'Validation failed' }));
+                throw new Error(errorData.detail || 'Dataset validation failed');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error validating dataset:', error);
+            throw error;
+        }
+    },
+
+    // Get finetuning datasets
+    getFineTuningDatasets: async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch datasets');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching finetuning datasets:', error);
+            throw error;
+        }
+    },
+
+    // Upload finetuning dataset
+    uploadFineTuningDataset: async (file, name, description = '') => {
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('name', name);
+            formData.append('description', description);
+
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/upload-dataset`, {
+                method: 'POST',
+                headers: {
+                    ...getAuthHeader()
+                },
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: 'Upload failed' }));
+                throw new Error(errorData.detail || 'Dataset upload failed');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error uploading dataset:', error);
+            throw error;
+        }
+    },
+
+    // Create finetuning dataset from documents
+    createFinetuningDataset: async (datasetConfig) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets/create`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify(datasetConfig)
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error creating dataset:', error);
+            throw error;
+        }
+    },
+
+    // Convert evaluation dataset to finetuning format
+    convertEvaluationDataset: async (evaluationDatasetId, name, description = '') => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets/convert`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                body: JSON.stringify({
+                    evaluation_dataset_id: evaluationDatasetId,
+                    name: name,
+                    description: description
+                })
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: 'Conversion failed' }));
+                throw new Error(errorData.detail || 'Dataset conversion failed');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error converting evaluation dataset:', error);
+            throw error;
+        }
+    },
+
+    // Get dataset details
+    getFineTuningDatasetDetails: async (datasetId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets/${datasetId}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to fetch dataset details');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error fetching dataset details:', error);
+            throw error;
+        }
+    },
+
+    // Download dataset
+    downloadFineTuningDataset: async (datasetId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets/${datasetId}/download`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to download dataset');
+            }
+
+            // Return blob for download
+            const blob = await response.blob();
+            return blob;
+        } catch (error) {
+            console.error('Error downloading dataset:', error);
+            throw error;
+        }
+    },
+
+    // Delete finetuning dataset
+    deleteFineTuningDataset: async (datasetId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets/${datasetId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to delete dataset');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error deleting finetuning dataset:', error);
+            throw error;
+        }
+    },
+
+    // Create WebSocket connection for training progress
+    createFineTuningWebSocket: (experimentId, onMessage, onError, onClose) => {
+        // Build ws/wss URL and correct backend path: /api/ws/finetuning/{experiment_id}
+        try {
+            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            const host = window.location.host; // includes hostname:port
+            const wsUrl = `${protocol}://${host}/api/ws/finetuning/${experimentId}`;
+            const ws = new WebSocket(wsUrl);
+            
+            ws.onopen = () => {
+                // Optional: can log or send a ping if needed
+                // console.debug('WebSocket connected to', wsUrl);
+            };
+        
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    onMessage(data);
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                    onError(error);
+                }
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                onError(error);
+            };
+            
+            ws.onclose = () => {
+                console.log('WebSocket connection closed');
+                onClose();
+            };
+            
+            return ws;
+        } catch (e) {
+            console.error('Failed to create WebSocket:', e);
+            // Surface error to caller
+            onError(e);
+            return null;
+        }
+    },
 };
 
 export default api;

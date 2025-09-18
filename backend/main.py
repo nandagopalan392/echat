@@ -1,6 +1,15 @@
-import sys
 import os
+# Disable DeepSpeed and problematic integrations before any transformers imports
+os.environ["DISABLE_MLFLOW_INTEGRATION"] = "TRUE"
+os.environ["WANDB_DISABLED"] = "true"
+os.environ["DEEPSPEED_DISABLE"] = "true"
+os.environ["ACCELERATE_USE_DEEPSPEED"] = "false"
+os.environ["ACCELERATE_USE_FSDP"] = "false"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+import sys
 import json
+import uuid
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Request, status, Form, BackgroundTasks, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -5333,6 +5342,8 @@ async def generate_dataset_background(
                         logger.warning(f"No content extracted from document {document.get('filename')}")
                         continue
                     
+                    logger.info(f"Extracted {len(content)} characters from document {document.get('filename')}")
+                    
                     # Generate questions for this document
                     doc_items = await generator._generate_questions_for_document(
                         content=content,
@@ -6607,3 +6618,657 @@ async def get_trulens_health():
             "error": str(e),
             "timestamp": datetime.datetime.now().isoformat()
         }
+
+# ================================
+# FINETUNING API ENDPOINTS
+# ================================
+
+from experiment_db import experiment_db, ExperimentStatus
+from hf_finetuner import hf_finetuner
+
+@app.get("/api/finetuning/models")
+async def get_available_models(token: str = Depends(oauth2_scheme)):
+    """Get list of available models for finetuning"""
+    try:
+        models = hf_finetuner.get_available_models()
+        return {"models": models}
+    except Exception as e:
+        logger.error(f"Error getting available models: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/finetuning/experiments")
+async def create_experiment(
+    background_tasks: BackgroundTasks,
+    name: str = Form(...),
+    description: str = Form(""),
+    model_name: str = Form(...),
+    dataset_id: str = Form(...),
+    learning_rate: float = Form(0.0001),
+    num_epochs: int = Form(3),
+    batch_size: int = Form(4),
+    lora_r: int = Form(16),
+    lora_alpha: int = Form(32),
+    lora_dropout: float = Form(0.1),
+    target_modules: str = Form("q_proj,v_proj"),
+    max_seq_length: int = Form(512),
+    warmup_ratio: float = Form(0.03),
+    weight_decay: float = Form(0.01),
+    gradient_accumulation_steps: int = Form(1),
+    logging_steps: int = Form(10),
+    save_steps: int = Form(500),
+    eval_steps: int = Form(100),
+    save_total_limit: int = Form(2),
+    load_best_model_at_end: bool = Form(True),
+    metric_for_best_model: str = Form("eval_loss"),
+    greater_is_better: bool = Form(False),
+    evaluation_strategy: str = Form("steps"),
+    save_strategy: str = Form("steps"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new finetuning experiment"""
+    try:
+        # Get user ID from current user
+        user_id = current_user['sub']
+        
+        # Get dataset info from database
+        dataset_info = experiment_db.get_dataset(dataset_id)
+        if not dataset_info:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        # Create experiment configuration
+        config = {
+            'base_model': model_name,
+            'learning_rate': learning_rate,
+            'batch_size': batch_size,
+            'epochs': num_epochs,
+            'use_lora': True,  # Always use LoRA for now
+            'lora_r': lora_r,
+            'lora_alpha': lora_alpha,
+            'lora_dropout': lora_dropout,
+            'target_modules': target_modules,
+            'max_length': max_seq_length,
+            'warmup_ratio': warmup_ratio,
+            'weight_decay': weight_decay,
+            'gradient_accumulation_steps': gradient_accumulation_steps,
+            'logging_steps': logging_steps,
+            'save_steps': save_steps,
+            'eval_steps': eval_steps,
+            'save_total_limit': save_total_limit,
+            'load_best_model_at_end': load_best_model_at_end,
+            'metric_for_best_model': metric_for_best_model,
+            'greater_is_better': greater_is_better,
+            'evaluation_strategy': evaluation_strategy,
+            'save_strategy': save_strategy,
+            'dataset_path': dataset_info['file_path'],
+            'dataset_id': dataset_id
+        }
+        
+        # Create experiment
+        experiment_data = {
+            'name': name,
+            'description': description,
+            'user_id': user_id,
+            'base_model': model_name,
+            'model_provider': 'huggingface',
+            'config': config
+        }
+        
+        experiment_id = experiment_db.create_experiment(experiment_data)
+        
+        logger.info(f"Created experiment {experiment_id} for user {user_id}")
+        
+        # Automatically start training after creation
+        try:
+            background_tasks.add_task(hf_finetuner.start_training, experiment_id, config)
+            logger.info(f"Auto-started training for experiment {experiment_id}")
+            training_status = "training_started"
+        except Exception as e:
+            logger.error(f"Failed to start training for experiment {experiment_id}: {e}")
+            training_status = "draft"
+        
+        return {
+            "experiment": {
+                "id": experiment_id,
+                "name": name,
+                "description": description,
+                "base_model": model_name,
+                "dataset_id": dataset_id
+            },
+            "status": "created",
+            "training_status": training_status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating experiment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/finetuning/experiments/{experiment_id}/start")
+async def start_experiment(
+    experiment_id: str,
+    background_tasks: BackgroundTasks,
+    token: str = Depends(oauth2_scheme)
+):
+    """Start training for an experiment"""
+    try:
+        user_id = get_user_from_token(token)
+        
+        # Get experiment
+        experiment = experiment_db.get_experiment(experiment_id)
+        if not experiment:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        
+        # Check ownership
+        if experiment['user_id'] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Check status
+        if experiment['status'] not in [ExperimentStatus.DRAFT.value, ExperimentStatus.FAILED.value]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot start experiment in {experiment['status']} status"
+            )
+        
+        # Start training in background
+        asyncio.create_task(hf_finetuner.start_training(experiment_id, experiment['config']))
+        
+        return {"status": "training_started", "experiment_id": experiment_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting experiment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/finetuning/experiments")
+async def get_user_experiments(
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get experiments for the current user"""
+    try:
+        user_id = current_user['sub']
+        experiments = experiment_db.get_user_experiments(user_id, limit)
+        return {"experiments": experiments}
+        
+    except Exception as e:
+        logger.error(f"Error getting experiments: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/finetuning/experiments/{experiment_id}")
+async def get_experiment_details(
+    experiment_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get detailed information about an experiment"""
+    try:
+        user_id = current_user['sub']
+        
+        experiment = experiment_db.get_experiment(experiment_id)
+        if not experiment:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        
+        # Check ownership
+        if experiment['user_id'] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        # Get training logs
+        training_logs = experiment_db.get_training_logs(experiment_id)
+        experiment['training_logs'] = training_logs
+        
+        return experiment
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting experiment details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/finetuning/experiments/{experiment_id}/logs")
+async def get_experiment_logs(
+    experiment_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get training logs for an experiment"""
+    try:
+        user_id = current_user['sub']
+        
+        experiment = experiment_db.get_experiment(experiment_id)
+        if not experiment:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        
+        if experiment['user_id'] != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        
+        logs = experiment_db.get_training_logs(experiment_id)
+        return {"logs": logs}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting experiment logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/finetuning/experiments/{experiment_id}")
+async def delete_experiment(
+    experiment_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete an experiment"""
+    try:
+        user_id = current_user['sub']
+        
+        success = experiment_db.delete_experiment(experiment_id, user_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Experiment not found or not authorized")
+        
+        return {"status": "deleted"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting experiment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/finetuning/experiments/{experiment_id}/metrics")
+async def get_experiment_metrics(
+    experiment_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get live training metrics for an experiment"""
+    try:
+        from training_metrics import get_metrics_collector
+        
+        user_id = current_user['sub']
+        
+        # Check if experiment belongs to user
+        experiment = experiment_db.get_experiment(experiment_id)
+        if not experiment:
+            raise HTTPException(status_code=404, detail="Experiment not found")
+        
+        if experiment.get('user_id') != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Get metrics collector if training is active
+        metrics_collector = get_metrics_collector(experiment_id)
+        if metrics_collector:
+            return metrics_collector.get_metrics_summary()
+        else:
+            # Return historical data from database if available
+            if experiment.get('metrics') and experiment['metrics'].get('training_history'):
+                training_history = experiment['metrics']['training_history']
+                final_progress = experiment['metrics'].get('final_progress', {})
+                
+                return {
+                    "experiment_id": experiment_id,
+                    "progress": final_progress,
+                    "metrics": training_history,
+                    "system": {"current": {}, "history": []},
+                    "training_logs": experiment_db.get_training_logs(experiment_id)[-20:],
+                    "training_completed": True
+                }
+            else:
+                # Return empty structure if no training data available
+                logs = experiment_db.get_training_logs(experiment_id)
+                return {
+                    "experiment_id": experiment_id,
+                    "progress": {"current_epoch": 0, "total_epochs": 0, "current_step": 0, "total_steps": 0},
+                    "metrics": {"train_losses": [], "eval_losses": [], "learning_rates": [], "accuracies": []},
+                    "system": {"current": {}, "history": []},
+                    "training_logs": logs[-20:] if logs else [],
+                    "training_completed": False
+                }
+    except Exception as e:
+        logger.error(f"Error getting experiment metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/finetuning/datasets")
+async def get_user_datasets(current_user: dict = Depends(get_current_user)):
+    """Get datasets for the current user"""
+    try:
+        user_id = current_user['sub']
+        datasets = experiment_db.get_user_datasets(user_id)
+        return {"datasets": datasets}
+        
+    except Exception as e:
+        logger.error(f"Error getting datasets: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/finetuning/validate-dataset")
+async def validate_dataset_file(
+    dataset: UploadFile = File(...),
+    token: str = Depends(oauth2_scheme)
+):
+    """Validate a dataset file without creating an experiment"""
+    try:
+        if not dataset.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        if not dataset.filename.endswith(('.jsonl', '.csv')):
+            raise HTTPException(
+                status_code=400, 
+                detail="Dataset must be in JSONL or CSV format"
+            )
+        
+        # Save temporary file
+        temp_id = str(uuid.uuid4())
+        temp_path = f"/tmp/{temp_id}_{dataset.filename}"
+        
+        with open(temp_path, "wb") as buffer:
+            content = await dataset.read()
+            buffer.write(content)
+        
+        try:
+            # Validate
+            result = hf_finetuner.validate_dataset(temp_path)
+            return result
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error validating dataset: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/api/ws/finetuning/{experiment_id}")
+async def websocket_experiment_progress(websocket: WebSocket, experiment_id: str):
+    """WebSocket endpoint for real-time experiment progress updates"""
+    await websocket.accept()
+    
+    try:
+        while True:
+            # Check experiment status
+            experiment = experiment_db.get_experiment(experiment_id)
+            if experiment:
+                # Get latest logs
+                logs = experiment_db.get_training_logs(experiment_id)
+                latest_logs = logs[-10:] if logs else []  # Last 10 entries
+                
+                # Get live training metrics if available
+                from training_metrics import get_metrics_collector
+                metrics_collector = get_metrics_collector(experiment_id)
+                training_metrics = None
+                if metrics_collector:
+                    training_metrics = metrics_collector.get_metrics_summary()
+                
+                status = experiment.get('status')
+                status_lower = (status or "").lower()
+                message_data = {
+                    "type": "experiment_update",
+                    "experiment_id": experiment_id,
+                    "status": status_lower,
+                    "metrics": experiment.get('metrics', {}),
+                    "latest_logs": latest_logs,
+                    "error_message": experiment.get('error_message'),
+                    "training_metrics": training_metrics  # Include live training metrics
+                }
+                
+                await websocket.send_json(message_data)
+                logger.info(f"WebSocket sent update for experiment {experiment_id}: status={status_lower}")
+                
+                # Close connection if experiment is completed or failed (check both original and lowercase)
+                if status_lower in ["completed", "failed", "cancelled"] or status in [ExperimentStatus.COMPLETED.value, ExperimentStatus.FAILED.value, ExperimentStatus.CANCELLED.value]:
+                    logger.info(f"Experiment {experiment_id} finished with status {status_lower}, closing WebSocket")
+                    await websocket.close()
+                    break
+            else:
+                # Experiment not found
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Experiment {experiment_id} not found"
+                })
+                break
+            
+            await asyncio.sleep(2)  # Update every 2 seconds for more responsive UI
+            
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for experiment {experiment_id}")
+        pass
+    except Exception as e:
+        logger.error(f"WebSocket error for experiment {experiment_id}: {e}")
+        await websocket.close()
+    except Exception as e:
+        logger.error(f"WebSocket error for experiment {experiment_id}: {e}")
+        await websocket.close()
+
+# Additional Dataset Management Endpoints
+
+@app.post("/api/finetuning/datasets/create")
+async def create_finetuning_dataset(
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new finetuning dataset from documents using Q-C-A format"""
+    try:
+        data = await request.json()
+        name = data.get('name')
+        description = data.get('description', '')
+        document_ids = data.get('document_ids', [])
+        questions_per_doc = data.get('questions_per_doc', 5)
+        
+        if not name:
+            raise HTTPException(status_code=400, detail="Dataset name is required")
+        
+        if not document_ids:
+            raise HTTPException(status_code=400, detail="At least one document must be selected")
+        
+        # Get documents from document storage
+        from document_storage import get_document_storage
+        doc_storage = get_document_storage()
+        
+        documents = []
+        for doc_id in document_ids:
+            try:
+                doc = doc_storage.get_document(doc_id)
+                if doc:
+                    documents.append(doc)
+                else:
+                    logger.warning(f"Document {doc_id} not found")
+            except Exception as e:
+                logger.error(f"Error loading document {doc_id}: {e}")
+                continue
+        
+        if not documents:
+            raise HTTPException(status_code=404, detail="No valid documents found")
+        
+        # Start background task for dataset generation
+        from qca_dataset_generator import QCADatasetGenerator
+        
+        # Create unique dataset ID for tracking
+        import time
+        dataset_id = f"qca_{int(time.time())}"
+        
+        # Store generation progress
+        global dataset_generation_progress
+        if 'dataset_generation_progress' not in globals():
+            dataset_generation_progress = {}
+        
+        dataset_generation_progress[dataset_id] = {
+            "status": "starting",
+            "progress": 0,
+            "current_document": "",
+            "completed_documents": 0,
+            "total_documents": len(documents),
+            "created_at": datetime.datetime.now().isoformat()
+        }
+        
+        # Start background generation using Celery
+        from qca_tasks import create_qca_dataset_background
+        
+        task = create_qca_dataset_background.delay(
+            name=name,
+            description=description,
+            document_ids=document_ids,
+            questions_per_doc=questions_per_doc,
+            model_name="gemma2:2b",
+            user_id=current_user['sub']
+        )
+        
+        logger.info(f"Started Q-C-A dataset generation task: {task.id}")
+        
+        return {
+            "success": True,
+            "task_id": task.id,
+            "message": f"Dataset creation started. Processing {len(documents)} documents with {questions_per_doc} questions per document.",
+            "total_documents": len(documents)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating finetuning dataset: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/api/ws/qca-dataset/{task_id}")
+async def qca_dataset_websocket(websocket: WebSocket, task_id: str):
+    """WebSocket endpoint for Q-C-A dataset generation progress"""
+    await websocket.accept()
+    logger.info(f"Q-C-A dataset WebSocket connected for task {task_id}")
+    
+    try:
+        # Check for progress updates from Celery backend
+        import redis
+        redis_client = redis.Redis(host=os.getenv('REDIS_HOST', 'redis'), port=6379, db=0)
+        
+        last_update = None
+        while True:
+            try:
+                # Get progress from Redis
+                progress_key = f"qca_progress_{task_id}"
+                progress_data = redis_client.get(progress_key)
+                
+                if progress_data:
+                    import json
+                    progress_info = json.loads(progress_data)
+                    
+                    # Only send if there's a new update
+                    if progress_info != last_update:
+                        await websocket.send_json(progress_info)
+                        last_update = progress_info
+                        
+                        # Break if task is complete or failed
+                        if progress_info.get("status") in ["SUCCESS", "FAILURE"]:
+                            break
+                
+                await asyncio.sleep(1)  # Check every second
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error sending WebSocket message: {e}")
+                break
+                
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+    finally:
+        logger.info(f"Q-C-A dataset WebSocket disconnected for task {task_id}")
+
+@app.get("/api/finetuning/datasets/create/{dataset_id}/progress")
+async def get_dataset_creation_progress(
+    dataset_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get progress of dataset creation"""
+    global dataset_generation_progress
+    
+    if dataset_id not in dataset_generation_progress:
+        raise HTTPException(status_code=404, detail="Dataset creation not found")
+    
+    return dataset_generation_progress[dataset_id]
+
+@app.get("/api/finetuning/datasets/{dataset_id}")
+async def get_dataset_details(
+    dataset_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get detailed information about a finetuning dataset"""
+    try:
+        dataset = experiment_db.get_dataset(dataset_id)
+        
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        # Get sample data (first 10 samples for preview)
+        samples = experiment_db.get_dataset_samples(dataset_id, limit=10)
+        
+        return {
+            "id": dataset['id'],
+            "name": dataset['name'],
+            "description": dataset['description'],
+            "num_samples": dataset['num_samples'],
+            "file_size": dataset.get('file_size', 0),
+            "format": dataset.get('format', 'jsonl'),
+            "created_at": dataset['created_at'],
+            "samples": samples
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting dataset details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/finetuning/datasets/{dataset_id}/download")
+async def download_dataset(
+    dataset_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a finetuning dataset in JSONL format"""
+    try:
+        dataset = experiment_db.get_dataset(dataset_id)
+        
+        if not dataset:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        # Get all samples
+        samples = experiment_db.get_dataset_samples(dataset_id)
+        
+        # Create JSONL content
+        jsonl_lines = []
+        for sample in samples:
+            jsonl_lines.append(json.dumps(sample, ensure_ascii=False))
+        
+        jsonl_content = '\n'.join(jsonl_lines)
+        
+        # Create filename
+        safe_name = "".join(c for c in dataset['name'] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        filename = f"{safe_name}.jsonl"
+        
+        # Return as file download
+        return Response(
+            content=jsonl_content.encode('utf-8'),
+            media_type='application/jsonl',
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"'
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading dataset: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/finetuning/datasets/{dataset_id}")
+async def delete_dataset(
+    dataset_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a finetuning dataset"""
+    try:
+        success = experiment_db.delete_dataset(dataset_id)
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        
+        return {"success": True, "message": "Dataset deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting dataset: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

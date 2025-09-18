@@ -68,6 +68,10 @@ celery_app.conf.update(
             'priority': 1,  # Highest priority for single evaluations
             'rate_limit': '10/m',  # Max 10 single evaluations per minute
         },
+        'qca_tasks.create_qca_dataset_background': {
+            'priority': 6,  # Medium-low priority for Q-C-A dataset creation
+            'rate_limit': '1/m',  # Max 1 Q-C-A dataset creation per minute
+        },
     },
     
     # Monitoring

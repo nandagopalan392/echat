@@ -14,6 +14,10 @@ transformers
 sentence-transformers
 beautifulsoup4>=4.12.0
 
+# System monitoring
+psutil>=5.9.0
+GPUtil>=1.4.0
+
 # Document Processing
 python-magic
 pypdf
@@ -69,12 +73,8 @@ asyncio>=3.4.3
 beautifulsoup4>=4.11.0
 lxml>=4.9.0
 
-# UI
-streamlit
-streamlit-chat
 
 # Monitoring
-prometheus-client>=0.17.0  # Added for monitoring
 psutil>=5.9.5  # Added for system resource monitoring
 
 # Storage and database
@@ -93,3 +93,10 @@ redis>=4.5.0  # Redis client
 gevent>=22.10.0  # Async support for Celery workers
 websockets>=11.0.0  # WebSocket support
 posthog>=3.0.0  # Analytics library for ChromaDB
+
+# Finetuning and model training
+datasets>=2.14.0  # HuggingFace datasets library
+peft>=0.6.0  # Parameter-Efficient Fine-Tuning (LoRA)
+accelerate>=0.24.0  # For distributed training and memory optimization
+evaluate>=0.4.0  # Model evaluation metrics
+bitsandbytes>=0.41.0  # For quantization and memory efficiency

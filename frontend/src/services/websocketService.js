@@ -33,7 +33,8 @@ class WebSocketService {
             onClose = () => {},
             onStatusChange = () => {},
             pollCallback = null,
-            enablePolling = true
+            enablePolling = true,
+            endpointType = 'evaluation' // 'evaluation' or 'qca-dataset'
         } = options;
 
         // If connection already exists, return it
@@ -59,7 +60,8 @@ class WebSocketService {
             callbacks: { onMessage, onError, onClose, onStatusChange },
             pollCallback,
             enablePolling,
-            isManualClose: false
+            isManualClose: false,
+            endpointType // Store endpoint type for WebSocket URL generation
         };
 
         this.connections.set(taskId, connection);
@@ -172,12 +174,20 @@ class WebSocketService {
      * Create WebSocket connection
      */
     _createWebSocket(connection) {
-        const { taskId } = connection;
+        const { taskId, endpointType } = connection;
         
         // Get current origin and convert to WebSocket protocol
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
-        const wsUrl = `${protocol}//${host}/api/evaluation/ws/evaluation/${taskId}`;
+        
+        // Generate WebSocket URL based on endpoint type
+        let wsUrl;
+        if (endpointType === 'qca-dataset') {
+            wsUrl = `${protocol}//${host}/api/ws/qca-dataset/${taskId}`;
+        } else {
+            // Default to evaluation endpoint
+            wsUrl = `${protocol}//${host}/api/evaluation/ws/evaluation/${taskId}`;
+        }
 
         console.log(`🔌 Creating WebSocket connection for task ${taskId}`);
         console.log(`🔗 WebSocket URL: ${wsUrl}`);

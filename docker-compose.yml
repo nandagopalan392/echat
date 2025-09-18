@@ -91,7 +91,6 @@ services:
     container_name: echat-ollama
     ports:
       - "127.0.0.1:11434:11434"
-    pid: "host"
     privileged: true
     volumes:
       - ollama_data:/root/.ollama
@@ -108,6 +107,10 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=all
       - CUDA_VISIBLE_DEVICES=0
       - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_MAX_QUEUE=128
+      - OLLAMA_MAX_VRAM=8192
+      - MLOCK_LIMIT=0
     devices:
       - /dev/nvidia0:/dev/nvidia0
       - /dev/nvidiactl:/dev/nvidiactl
@@ -115,8 +118,11 @@ services:
       - /dev/nvidia-modeset:/dev/nvidia-modeset
       - /dev/nvidia-caps:/dev/nvidia-caps
     restart: unless-stopped
-    logging:
-      driver: "none"  # Suppress all logging output
+    shm_size: 4g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
 
 
 

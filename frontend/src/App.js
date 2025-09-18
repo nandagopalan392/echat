@@ -9,6 +9,7 @@ import DocumentChunksPage from './pages/DocumentChunksPage';
 import ModelSettingsPage from './pages/ModelSettingsPage';
 import ManageUserPage from './pages/ManageUserPage';
 import EvaluationPage from './pages/EvaluationPage';
+import FinetuningPage from './pages/FinetuningPage';
 
 const PrivateRoute = ({ children }) => {
     const isAuthenticated = !!localStorage.getItem('token');
@@ -68,6 +69,14 @@ function App() {
                     element={
                         <PrivateRoute>
                             <EvaluationPage />
+                        </PrivateRoute>
+                    }
+                />
+                <Route
+                    path="/finetuning"
+                    element={
+                        <PrivateRoute>
+                            <FinetuningPage />
                         </PrivateRoute>
                     }
                 />
