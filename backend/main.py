@@ -18,6 +18,14 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import jwt
 import datetime
+# Import centralized configuration
+from app.config import settings
+
+# Authentication imports
+from app.dependencies import get_current_user, get_current_admin_user
+from app.api.v1.endpoints.auth import router as auth_router
+from app.api.v1.endpoints.users import router as users_router
+from app.api.v1.endpoints.admin import router as admin_router
 from chat_db import ChatDB
 from rag import ChatPDF, get_chatpdf_instance
 from rlhf import RLHF
@@ -507,370 +515,26 @@ async def shutdown_event():
     except Exception as e:
         logger.error(f"Shutdown error: {str(e)}")
 
-# JWT Settings
-SECRET_KEY = "your-secret-key"  # Change this to a secure key in production
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="api/auth/login",  # Changed from "/api/auth/login"
-    scheme_name="JWT"
-)
 
-# Models
-class UserLogin(BaseModel):
-    username: str
-    password: str
 
 class Message(BaseModel):
     content: str
     session_id: Optional[int] = None
 
-class UserCreate(BaseModel):
-    username: str
-    password: str
-    role: str
-    
+  
 class RLHFFeedback(BaseModel):
     session_id: int
     chosen_index: int  # 0 for first response, 1 for second response
-
-# Auth endpoints
-@app.post("/api/auth/login")
-@app.options("/api/auth/login")  # Add explicit OPTIONS handler
-async def login(request: Request):
-    # Log request method to debug preflight issues
-    logger.info(f"Auth request method: {request.method}")
-    
-    # Handle OPTIONS request (preflight)
-    if request.method == "OPTIONS":
-        return JSONResponse(
-            content={},
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Authorization, Content-Type, Accept, X-Requested-With",
-                "Access-Control-Max-Age": "86400",
-                "Access-Control-Allow-Credentials": "true",
-            }
-        )
-    
-    try:
-        # Add CORS headers to response
-        headers = {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        }
-        
-        # Log the request headers for debugging
-        logger.info(f"Request headers: {request.headers}")
-        
-        # Try to get form data first
-        content_type = request.headers.get('content-type', '')
-        logger.info(f"Content-Type: {content_type}")
-        
-        username = None
-        password = None
-        
-        if 'application/json' in content_type:
-            # Handle JSON data
-            data = await request.json()
-            username = data.get('username')
-            password = data.get('password')
-            logger.info(f"Received JSON login request for user: {username}")
-        else:
-            # Handle form data
-            form_data = await request.form()
-            username = form_data.get('username')
-            password = form_data.get('password')
-            logger.info(f"Received form login request for user: {username}")
-        
-        logger.info(f"Login attempt for user: {username}")
-        
-        # For testing - accept fixed credentials directly
-        if (username == "admin" and password == "admin") or (username == "test" and password == "test"):
-            logger.info(f"Using direct auth for: {username}")
-            token_data = {
-                "sub": username,
-                "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-            }
-            access_token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
-            
-            response_data = {
-                "access_token": access_token,
-                "token_type": "bearer",
-                "username": username
-            }
-            
-            return JSONResponse(
-                content=response_data,
-                headers=headers
-            )
-        
-        if not username or not password:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username and password are required"
-            )
-
-        authenticated = chat_db.authenticate_user(username, password)
-        logger.info(f"Authentication result for {username}: {authenticated}")
-        
-        if not authenticated:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials"
-            )
-        
-        token_data = {
-            "sub": username,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        }
-        access_token = jwt.encode(token_data, SECRET_KEY, algorithm=ALGORITHM)
-        
-        logger.info(f"Login successful for user: {username}")
-        
-        response_data = {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "username": username
-        }
-        
-        return JSONResponse(
-            content=response_data,
-            headers=headers
-        )
-    except HTTPException as he:
-        # Return structured error response with proper headers
-        logger.error(f"HTTP Exception in login: {str(he)}")
-        return JSONResponse(
-            content={"detail": he.detail},
-            status_code=he.status_code,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Credentials": "true",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            }
-        )
-    except Exception as e:
-        logger.error(f"Login error: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": str(e)},
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Credentials": "true",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            }
-        )
-
-# Add admin check function
-async def check_if_admin(token: str = Depends(oauth2_scheme)):
-    try:
-        user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if not chat_db.is_admin(user["sub"]):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Admin access required"
-            )
-        return user
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
-
-# Add user authentication function
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    try:
-        user = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return user
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
-        )
 
 # Include TruLens evaluation routes (after defining get_current_user to avoid circular imports)
 from routes.evaluation import router as evaluation_router
 app.include_router(evaluation_router, prefix="/api/evaluation", tags=["evaluation"])
 
-# Add admin-only user management endpoint
-@app.post("/api/admin/add-user")
-async def add_user(user_data: UserCreate, admin: dict = Depends(check_if_admin)):
-    try:
-        if chat_db.user_exists(user_data.username):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Username already exists"
-            )
-        
-        if user_data.role not in ['Engineer', 'Manager', 'Business Development', 'Associate']:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid role"
-            )
-        
-        success = chat_db.add_user(user_data.username, user_data.password, user_data.role)
-        return {"message": "User added successfully"}
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-
-@app.get("/api/admin/users")
-async def get_users(admin: dict = Depends(check_if_admin)):
-    users = chat_db.get_all_users()
-    return {"users": users}
-
-# Add new endpoints for dashboard data
-@app.get("/api/admin/user-stats/{username}")
-async def get_user_stats(username: str, admin: dict = Depends(check_if_admin)):
-    try:
-        stats = chat_db.get_user_stats(username)
-        return {"data": stats}  # Wrap the stats in a data field
-    except Exception as e:
-        logger.error(f"Error getting user stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/admin/activity-stats")
-async def get_activity_stats(admin: dict = Depends(check_if_admin)):
-    try:
-        stats = chat_db.get_activity_stats()
-        return {"data": stats}  # Wrap stats in data field
-    except Exception as e:
-        logger.error(f"Error getting activity stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# User endpoints for ManageUserPage
-@app.get("/api/users/profile")
-async def get_user_profile(current_user: dict = Depends(get_current_user)):
-    """Get current user's profile"""
-    try:
-        username = current_user["sub"]
-        # Get user data from database
-        user_data = chat_db.get_user_by_username(username)
-        if not user_data:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Return user profile data
-        return {
-            "user": {
-                "username": user_data.get("username", username),
-                "email": user_data.get("email", ""),
-                "role": user_data.get("role", "user"),
-                "created_at": user_data.get("created_at", ""),
-                "last_login": user_data.get("last_login", ""),
-                "is_active": user_data.get("is_active", True)
-            }
-        }
-    except Exception as e:
-        logger.error(f"Error getting user profile: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/users/activities")
-async def get_user_activities(current_user: dict = Depends(get_current_user)):
-    """Get user activities/recent actions"""
-    try:
-        username = current_user["sub"]
-        
-        # Get recent user activities from chat history and other sources
-        activities = []
-        
-        # Get recent chat sessions
-        try:
-            sessions = chat_db.get_user_sessions(username, limit=10)
-            for session in sessions:
-                activities.append({
-                    "id": f"chat_{session.get('id', '')}",
-                    "type": "chat",
-                    "action": "Started conversation",
-                    "details": session.get("title", "Chat session")[:100],
-                    "timestamp": session.get("created_at", ""),
-                    "metadata": {
-                        "session_id": session.get("id"),
-                        "message_count": session.get("message_count", 0)
-                    }
-                })
-        except Exception as e:
-            logger.warning(f"Error getting chat sessions: {e}")
-        
-        # Add document upload activities if available
-        try:
-            # This would need to be implemented based on your document tracking
-            # For now, we'll add placeholder data
-            activities.append({
-                "id": "doc_recent",
-                "type": "document",
-                "action": "Document processing",
-                "details": "Recent document activities",
-                "timestamp": datetime.datetime.now().isoformat(),
-                "metadata": {"source": "system"}
-            })
-        except Exception as e:
-            logger.warning(f"Error getting document activities: {e}")
-        
-        # Sort by timestamp (newest first)
-        activities.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-        
-        return {"activities": activities[:20]}  # Return last 20 activities
-        
-    except Exception as e:
-        logger.error(f"Error getting user activities: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/users/stats")
-async def get_user_stats_general(current_user: dict = Depends(get_current_user)):
-    """Get general system statistics for admin dashboard"""
-    try:
-        # Get overall system statistics
-        stats = {
-            "totalUsers": 0,
-            "activeUsers": 0,
-            "totalSessions": 0,
-            "totalMessages": 0
-        }
-        
-        try:
-            # Get total users count
-            with sqlite3.connect(chat_db.db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Total users
-                cursor.execute("SELECT COUNT(*) FROM users")
-                stats["totalUsers"] = cursor.fetchone()[0]
-                
-                # Active users (users with sessions in last 30 days)
-                cursor.execute("""
-                    SELECT COUNT(DISTINCT username) 
-                    FROM chat_sessions 
-                    WHERE created_at >= datetime('now', '-30 days')
-                """)
-                stats["activeUsers"] = cursor.fetchone()[0]
-                
-                # Total sessions
-                cursor.execute("SELECT COUNT(*) FROM chat_sessions")
-                stats["totalSessions"] = cursor.fetchone()[0]
-                
-                # Total messages
-                cursor.execute("SELECT COUNT(*) FROM messages")
-                stats["totalMessages"] = cursor.fetchone()[0]
-                
-        except Exception as e:
-            logger.warning(f"Error getting system stats: {e}")
-        
-        return {"stats": stats}
-        
-    except Exception as e:
-        logger.error(f"Error getting user stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+# Include API routers
+app.include_router(auth_router, prefix="/api/auth", tags=["authentication"])
+app.include_router(users_router, prefix="/api/users", tags=["users"])
+app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
 
 # Chat endpoints
 @contextmanager
@@ -1336,7 +1000,7 @@ async def upload_file(
     preserve_formatting: bool = Form(default=True),
     extract_tables: bool = Form(default=True),
     extract_images: bool = Form(default=False),
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     failed_files = []
     processed_files = []
@@ -1527,7 +1191,7 @@ async def list_ingested_documents(token: str = Depends(oauth2_scheme)):
 @app.post("/api/documents/reingest")
 async def reingest_documents(
     embedding_model: str,
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     """Re-ingest all documents for a new embedding model"""
     try:
@@ -1545,7 +1209,7 @@ async def reingest_documents(
 @app.post("/api/documents/reingest-specific")
 async def reingest_specific_documents(
     request: dict,
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     """Re-ingest specific documents with per-document chunking configuration"""
     try:
@@ -1726,7 +1390,7 @@ async def retry_document_processing(
 @app.delete("/api/documents/{document_id}")
 async def delete_document(
     document_id: int,
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     """Delete a document from storage"""
     try:
@@ -1742,7 +1406,7 @@ async def delete_document(
 @app.post("/api/documents/bulk-delete")
 async def bulk_delete_documents(
     request_data: dict,
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     """Bulk delete multiple documents from storage"""
     try:
@@ -1775,7 +1439,7 @@ async def bulk_delete_documents(
 
 @app.post("/api/admin/clear-all-documents")
 async def clear_all_documents(
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     """Clear all documents from storage - admin only"""
     try:
@@ -1790,7 +1454,7 @@ async def clear_all_documents(
 
 @app.post("/api/admin/cleanup-orphaned")
 async def cleanup_orphaned_documents(
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     """Cleanup orphaned documents - admin only"""
     try:
@@ -1840,7 +1504,7 @@ async def check_file_duplicate(
 @app.delete("/api/files/{filename}")
 async def delete_file_by_filename(
     filename: str,
-    admin: dict = Depends(check_if_admin)
+    admin: dict = Depends(get_current_admin_user)
 ):
     """Delete a document by filename"""
     try:
@@ -2109,7 +1773,7 @@ async def get_vector_store_stats(current_user: dict = Depends(get_current_user))
         raise HTTPException(status_code=500, detail=f"Failed to get vector store stats: {str(e)}")
 
 @app.delete("/api/vector-store/clear")
-async def clear_vector_store(admin: dict = Depends(check_if_admin)):
+async def clear_vector_store(admin: dict = Depends(get_current_admin_user)):
     """Clear the entire vector store - admin only"""
     try:
         rag = get_rag()
