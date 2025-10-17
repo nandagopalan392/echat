@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
 
-from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
-from table_extraction import (
+from app.config.chunking import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
+from app.core.rag.chunking.table_extraction import (
     get_table_extractor, detect_table_in_text, 
     create_table_chunk_metadata, create_adaptive_table_chunks, 
     create_contextual_table_chunks
@@ -498,7 +498,7 @@ class EnhancedDocumentProcessor:
             source_filename = Path(file_path).name
             
         if method is None:
-            from chunking_config import FileFormatSupport
+            from app.config.chunking import FileFormatSupport
             method = FileFormatSupport.get_optimal_method(file_ext[1:])  # Remove dot
         
         # Get configuration if not specified
