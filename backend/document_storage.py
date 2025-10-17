@@ -137,7 +137,7 @@ class DocumentStorageService:
                 return None
             
             try:
-                from enhanced_document_processor import get_document_processor
+                from app.core.rag.chunking.enhanced_document_processor import get_document_processor
                 processor = get_document_processor()
                 
                 # Extract text using enhanced document processor
@@ -188,7 +188,7 @@ class DocumentStorageService:
                 return None
             
             try:
-                from enhanced_document_processor import get_document_processor
+                from app.core.rag.chunking.enhanced_document_processor import get_document_processor
                 processor = get_document_processor()
                 
                 # Try to extract using enhanced document processor first

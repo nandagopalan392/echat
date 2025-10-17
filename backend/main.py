@@ -32,7 +32,7 @@ from rag import ChatPDF, get_chatpdf_instance
 from rlhf import RLHF
 import logging
 from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
-from enhanced_document_processor import get_document_processor
+from app.core.rag.chunking.enhanced_document_processor import get_document_processor
 import pandas as pd
 from docx import Document
 import sqlite3
@@ -481,7 +481,7 @@ async def startup_event():
         docling_start = time.time()
         
         try:
-            from enhanced_document_processor import get_document_processor
+            from app.core.rag.chunking.enhanced_document_processor import get_document_processor
             doc_processor = get_document_processor()
             docling_init_time = time.time() - docling_start
             logger.info(f"🚀 DEBUG: Docling document processor initialized in {docling_init_time:.2f} seconds")

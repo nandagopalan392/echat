@@ -16,7 +16,7 @@ from datetime import datetime
 from app.core.rag import get_rag_engine, RAGEngine
 from app.services.storage_service import get_storage_service, StorageService
 from app.config.chunking import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
-from enhanced_document_processor import get_document_processor
+from app.core.rag.chunking.enhanced_document_processor import get_document_processor
 from langchain.schema import Document
 
 logger = logging.getLogger(__name__)

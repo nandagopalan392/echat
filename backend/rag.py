@@ -43,7 +43,7 @@ from langchain.schema import Document
 from document_storage import get_document_storage
 import subprocess
 import re
-from enhanced_document_processor import get_document_processor
+from app.core.rag.chunking.enhanced_document_processor import get_document_processor
 from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
 
 # Add stub for reranker that will be dynamically loaded
@@ -970,7 +970,7 @@ class ChatPDF:
             elif file_extension in ['.docx', '.doc']:
                 # Use enhanced document processor for Word documents
                 try:
-                    from enhanced_document_processor import get_document_processor
+                    from app.core.rag.chunking.enhanced_document_processor import get_document_processor
                     processor = get_document_processor()
                     # Process as Word document
                     docs = processor.process_document(file_path, filename=filename)
@@ -986,7 +986,7 @@ class ChatPDF:
             else:
                 # Try enhanced processor for other file types
                 try:
-                    from enhanced_document_processor import get_document_processor
+                    from app.core.rag.chunking.enhanced_document_processor import get_document_processor
                     processor = get_document_processor()
                     docs = processor.process_document(file_path, filename=filename)
                     if docs:
@@ -2402,7 +2402,7 @@ class ChatPDF:
                         logger.info(f"Reingesting document {doc_id} with method {chunking_method.value}")
                         
                         # Step 5-7: Process document with enhanced processor
-                        from enhanced_document_processor import get_document_processor
+                        from app.core.rag.chunking.enhanced_document_processor import get_document_processor
                         doc_processor = get_document_processor()
                         
                         chunking_result = doc_processor.process_document(
@@ -2595,7 +2595,7 @@ class ChatPDF:
                         logger.info(f"Reingesting document {doc_id} with method {chunking_method.value}")
                         
                         # Step 5-7: Process document with enhanced processor
-                        from enhanced_document_processor import get_document_processor
+                        from app.core.rag.chunking.enhanced_document_processor import get_document_processor
                         doc_processor = get_document_processor()
                         
                         chunking_result = doc_processor.process_document(
