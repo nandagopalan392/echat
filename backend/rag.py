@@ -54,7 +54,7 @@ def get_reranker():
     global _reranker_instance
     if (_reranker_instance is None):
         # Import at runtime to avoid circular imports
-        from reranker import get_reranker as _get_reranker
+        from app.core.rag.reranker import get_reranker as _get_reranker
         _reranker_instance = _get_reranker()
     return _reranker_instance
 
