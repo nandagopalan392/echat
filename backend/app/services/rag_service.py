@@ -17,6 +17,8 @@ from app.core.rag import get_rag_engine, RAGEngine
 from app.services.storage_service import get_storage_service, StorageService
 from app.config.chunking import ChunkingMethod, ChunkingConfig, get_chunking_config_manager, FileFormatSupport
 from app.core.rag.chunking.enhanced_document_processor import get_document_processor
+from app.db import DatabaseConnection
+from app.db.repositories import ConfigRepository
 from langchain.schema import Document
 
 logger = logging.getLogger(__name__)
@@ -36,15 +38,17 @@ class RAGService:
         self.doc_processor = get_document_processor()
         self.config_manager = get_chunking_config_manager()
         
+        # Initialize database connection and repositories
+        self.db = DatabaseConnection()
+        self.config_repo = ConfigRepository(self.db)
+        
         # Load model settings from database
         self._load_model_settings()
 
     def _load_model_settings(self):
         """Load model settings from database"""
         try:
-            from chat_db import ChatDB
-            chat_db = ChatDB()
-            db_settings = chat_db.get_latest_model_settings()
+            db_settings = self.config_repo.get_model_settings()
             
             if db_settings:
                 llm_model = db_settings.get('llm')

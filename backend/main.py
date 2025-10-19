@@ -27,6 +27,8 @@ from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.users import router as users_router
 from app.api.v1.endpoints.admin import router as admin_router
 from app.api.v1.endpoints.documents import router as documents_router
+from app.api.v1.endpoints.vector_store import router as vector_store_router
+from app.api.v1.endpoints.chat import router as chat_router
 from chat_db import ChatDB
 from rag import ChatPDF, get_chatpdf_instance
 from rlhf import RLHF
@@ -537,8 +539,10 @@ app.include_router(auth_router, prefix="/api/auth", tags=["authentication"])
 app.include_router(users_router, prefix="/api/users", tags=["users"])
 app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
 app.include_router(documents_router, prefix="/api", tags=["documents"])
+app.include_router(vector_store_router, tags=["vector-store"])
+app.include_router(chat_router, prefix="/api", tags=["chat"])
 
-# Chat endpoints
+# Chat endpoints (LEGACY - Being migrated to app/api/v1/endpoints/chat.py)
 @contextmanager
 def timeout(seconds):
     def timeout_handler(signum, frame):
@@ -988,41 +992,10 @@ async def upload_file(file: UploadFile = File(...), token: str = Depends(oauth2_
             del upload_progress[file_id]
         raise HTTPException(status_code=400, detail=str(e))
 
-# Debug collection info endpoint kept for diagnostics
-@app.get("/api/debug/collection-info")
-async def get_collection_debug_info(current_user: dict = Depends(get_current_user)):
-    """Debug endpoint to inspect collection structure"""
-    try:
-        from rag import get_chatpdf_instance
-        chatpdf = get_chatpdf_instance()
-        
-        if not chatpdf or not chatpdf.vector_store:
-            raise HTTPException(status_code=503, detail="Vector store not available")
-        
-        chroma_client = chatpdf.vector_store._client
-        collection_name = chatpdf._get_collection_name()
-        
-        try:
-            collection = chroma_client.get_collection(collection_name)
-            
-            # Get basic collection info
-            count = collection.count()
-            
-            # Get sample documents
-            sample_results = collection.get(limit=10, include=["metadatas", "documents"])
-            
-            return {
-                "collection_name": collection_name,
-                "total_documents": count,
-                "sample_metadata": sample_results.get('metadatas', []),
-                "sample_document_previews": [doc[:100] + "..." if len(doc) > 100 else doc for doc in sample_results.get('documents', [])]
-            }
-            
-        except Exception as e:
-            raise HTTPException(status_code=404, detail=f"Collection error: {e}")
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Vector Store endpoints moved to app/api/v1/endpoints/vector_store.py
+# - GET /api/debug/collection-info
+# - GET /api/vector-store/stats  
+# - DELETE /api/vector-store/clear
 
 @app.get("/")
 async def root():
@@ -1066,38 +1039,6 @@ async def get_model_status(current_user: dict = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error getting model status: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get model status: {str(e)}")
-
-@app.get("/api/vector-store/stats")
-async def get_vector_store_stats(current_user: dict = Depends(get_current_user)):
-    """Get detailed statistics about the vector store and collections"""
-    try:
-        rag = get_rag()
-        stats = rag.get_vector_store_stats()
-        
-        return {
-            "success": True,
-            "stats": stats
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting vector store stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to get vector store stats: {str(e)}")
-
-@app.delete("/api/vector-store/clear")
-async def clear_vector_store(admin: dict = Depends(get_current_admin_user)):
-    """Clear the entire vector store - admin only"""
-    try:
-        rag = get_rag()
-        success = rag.clear_vectorstore()
-        
-        if success:
-            return {"success": True, "message": "Vector store cleared successfully"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to clear vector store")
-        
-    except Exception as e:
-        logger.error(f"Error clearing vector store: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to clear vector store: {str(e)}")
 
 
 # Chunking configuration endpoints

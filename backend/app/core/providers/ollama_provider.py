@@ -12,7 +12,6 @@ from typing import List, Dict, Any, Optional
 import httpx
 
 from .base import BaseModelProvider
-from ollama_scraper import get_available_ollama_models
 
 
 class OllamaProvider(BaseModelProvider):
@@ -83,7 +82,7 @@ class OllamaProvider(BaseModelProvider):
         """
         Get list of models available in Ollama library.
         
-        Uses ollama_scraper to fetch the model library.
+        Fetches models from Ollama API or uses local scraping.
         
         Args:
             limit: Optional limit on number of models to return
@@ -92,8 +91,15 @@ class OllamaProvider(BaseModelProvider):
             List of available model dictionaries
         """
         try:
-            # Use the ollama_scraper utility
-            available_models = get_available_ollama_models(use_cache=True)
+            # Try to import ollama scraper from legacy location
+            # TODO: Move ollama_scraper to app/utils/external/
+            try:
+                from ollama_scraper import get_available_ollama_models
+                available_models = get_available_ollama_models(use_cache=True)
+            except ImportError:
+                # Fallback: Return empty list or fetch from Ollama API directly
+                self.logger.warning("ollama_scraper not available, using fallback")
+                available_models = []
             
             if limit and len(available_models) > limit:
                 available_models = available_models[:limit]

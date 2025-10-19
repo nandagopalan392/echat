@@ -23,7 +23,7 @@ from app.core.rag.chunking.table_extraction import (
     create_table_chunk_metadata, create_adaptive_table_chunks, 
     create_contextual_table_chunks
 )
-from gpu_utils import configure_docling_device, is_cuda_memory_error, clear_gpu_memory
+from app.utils.gpu_utils import configure_docling_device, is_cuda_memory_error, clear_gpu_memory
 
 logger = logging.getLogger(__name__)
 

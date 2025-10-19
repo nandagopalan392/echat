@@ -11,7 +11,7 @@ from typing import List, Dict, Any, Optional
 import requests
 
 from .base import BaseModelProvider
-from rag import HuggingFaceProvider as HFProviderRAG, create_embedding_model
+from app.utils.rag_utils import create_embedding_model
 
 
 class HuggingFaceProvider(BaseModelProvider):
@@ -229,11 +229,13 @@ class HuggingFaceProvider(BaseModelProvider):
             Download status dictionary
         """
         try:
-            # Use the HuggingFaceProvider from rag module
-            provider = HFProviderRAG(model_name, {})
+            # Download the model using HuggingFace transformers
+            from transformers import AutoTokenizer, AutoModel
             
-            # Attempt to create/load the model (this will download if needed)
-            model = provider.create_model()
+            # This will download if not already cached
+            self.logger.info(f"Downloading HuggingFace LLM model: {model_name}")
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModel.from_pretrained(model_name)
             
             # If we get here, download/load was successful
             return {

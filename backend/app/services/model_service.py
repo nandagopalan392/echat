@@ -16,19 +16,23 @@ from typing import Optional, Dict, Any, List
 import httpx
 import requests
 
-# Import dependencies
-from rag import (
-    get_chatpdf_instance,
-    check_model_compatibility,
-    detect_model_provider,
-    HuggingFaceProvider,
-    create_embedding_model
-)
-from ollama_scraper import get_available_ollama_models
-from chat_db import ChatDB
-from gpu_utils import get_gpu_memory_info, check_model_compatibility_detailed
+# Import new core modules
+from app.core.rag import get_rag_engine, RAGEngine
+from app.core.providers import OllamaProvider, HuggingFaceProvider
+
+# Import database repositories
+from app.db import DatabaseConnection
+from app.db.repositories import ConfigRepository
 
 # Import utility functions
+from app.utils.gpu_utils import get_gpu_memory_info, check_model_compatibility_detailed
+from app.utils.rag_utils import (
+    check_model_compatibility,
+    detect_model_provider,
+    create_embedding_model
+)
+
+# Import model utility functions
 from app.utils.model_utils import (
     format_model_size,
     categorize_model,
@@ -51,9 +55,16 @@ class ModelService:
     
     def __init__(self):
         """Initialize the model service with database and configuration."""
-        self.chat_db = ChatDB()
+        # Initialize database connection and repositories
+        self.db = DatabaseConnection()
+        self.config_repo = ConfigRepository(self.db)
+        
         self.ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize providers
+        self.ollama_provider = OllamaProvider()
+        self.hf_provider = HuggingFaceProvider()
     
     async def get_model_status(self) -> Dict[str, Any]:
         """
@@ -72,10 +83,10 @@ class ModelService:
                     data = response.json()
                     models = data.get('models', [])
                     
-                    # Get current settings
-                    rag = get_chatpdf_instance()
-                    current_llm = rag.llm_model
-                    current_embedding = rag.embedding_model
+                    # Get current settings from RAG engine
+                    rag_engine = get_rag_engine()
+                    current_llm = rag_engine.llm_model
+                    current_embedding = rag_engine.embedding_model
                     
                     # Check if current models are available
                     model_names = [model['name'] for model in models]
@@ -120,9 +131,19 @@ class ModelService:
                 self.logger.warning(f"Could not fetch local models: {e}")
                 local_model_names = set()
             
-            # Get available models from Ollama library
+            # Get available models from Ollama library using provider
             try:
-                available_models = get_available_ollama_models(use_cache=True)
+                ollama_models = await self.ollama_provider.get_available_models()
+                # Convert provider format to expected format
+                available_models = [
+                    {
+                        'name': model.get('name'),
+                        'description': model.get('description', ''),
+                        'tags': model.get('tags', []),
+                        'installed': model.get('installed', False)
+                    }
+                    for model in ollama_models
+                ]
             except Exception as e:
                 self.logger.warning(f"Could not fetch Ollama library models: {e}")
                 available_models = []
@@ -158,7 +179,7 @@ class ModelService:
             Exception: If unable to retrieve current settings
         """
         try:
-            rag = get_chatpdf_instance()
+            rag_engine = get_rag_engine()
             
             # Load parameters from database, fallback to defaults
             parameters = {
@@ -171,7 +192,7 @@ class ModelService:
             provider = "ollama"
             
             try:
-                db_settings = self.chat_db.get_latest_model_settings()
+                db_settings = self.config_repo.get_model_settings()
                 if db_settings:
                     if 'parameters' in db_settings:
                         parameters.update(db_settings['parameters'])
@@ -184,8 +205,8 @@ class ModelService:
             
             return {
                 "success": True,
-                "llm": rag.llm_model,
-                "embedding": rag.embedding_model,
+                "llm": rag_engine.llm_model,
+                "embedding": rag_engine.embedding_model,
                 "provider": provider,
                 "parameters": parameters
             }
@@ -403,9 +424,19 @@ class ModelService:
         except Exception as e:
             self.logger.warning(f"Could not fetch local Ollama models: {e}")
         
-        # Get available models from Ollama library
+        # Get available models from Ollama library using provider
         try:
-            available_models = get_available_ollama_models(use_cache=True)
+            ollama_models = await self.ollama_provider.get_available_models()
+            # Convert provider format to expected format
+            available_models = [
+                {
+                    'name': model.get('name'),
+                    'description': model.get('description', ''),
+                    'tags': model.get('tags', []),
+                    'installed': model.get('installed', False)
+                }
+                for model in ollama_models
+            ]
             self.logger.info(f"Found {len(available_models)} models from Ollama library")
         except Exception as e:
             self.logger.warning(f"Could not fetch Ollama library models: {e}")
@@ -659,10 +690,10 @@ class ModelService:
                 except Exception as e:
                     logger.warning(f"Could not check GPU compatibility: {str(e)}, proceeding anyway")
             
-            # Get current models
-            rag = get_chatpdf_instance()
-            current_llm = rag.llm_model
-            current_embedding = rag.embedding_model
+            # Get current models from RAG engine
+            rag_engine = get_rag_engine()
+            current_llm = rag_engine.llm_model
+            current_embedding = rag_engine.embedding_model
             
             logger.info(f"Current models - LLM: '{current_llm}', Embedding: '{current_embedding}'")
             logger.info(f"Requested models - LLM: '{llm_model}', Embedding: '{embedding_model}'")
@@ -794,17 +825,15 @@ class ModelService:
                 logger.error(f"Error updating models: {str(e)}")
                 raise Exception(f"Failed to update models: {str(e)}")
             
-            # Save settings to database
-            try:
-                self.chat_db.save_model_settings(
-                    llm_model, embedding_model, valid_parameters, provider, embedding_provider_final
-                )
-                logger.info(f"Model settings saved to database")
-            except Exception as e:
-                logger.error(f"Could not save to database: {e}")
-                raise Exception(f"Failed to save model settings: {e}")
-            
-            response_data = {
+                # Save settings to database
+                try:
+                    self.config_repo.save_model_settings(
+                        llm_model, embedding_model, valid_parameters, provider, embedding_provider_final
+                    )
+                    logger.info(f"Model settings saved to database")
+                except Exception as e:
+                    logger.error(f"Could not save to database: {e}")
+                    raise Exception(f"Failed to save model settings: {e}")            response_data = {
                 "success": True,
                 "message": "Models updated successfully",
                 "llm": llm_model,
@@ -866,63 +895,13 @@ class ModelService:
         try:
             logger.info(f"Attempting to download HuggingFace model: {model_name} (type: {model_type})")
             
-            if model_type == 'llm':
-                # Create HuggingFace provider and attempt to load model
-                provider = HuggingFaceProvider(model_name, {})
-                
-                try:
-                    # This will check if model is downloaded and download if needed
-                    model = provider.create_model()
-                    
-                    # If we get here, download was successful
-                    return {
-                        "success": True,
-                        "message": f"Successfully downloaded and validated LLM model: {model_name}",
-                        "model_name": model_name,
-                        "model_type": model_type,
-                        "ready_to_use": True
-                    }
-                    
-                except ValueError as e:
-                    # Check if this is a gated model error
-                    error_str = str(e)
-                    if error_str.startswith("GATED_MODEL_ERROR:"):
-                        # Parse the structured error data
-                        try:
-                            error_data = json.loads(error_str.replace("GATED_MODEL_ERROR:", ""))
-                            return {
-                                "success": False,
-                                "error_type": "gated_model",
-                                "model_name": model_name,
-                                "model_type": model_type,
-                                "message": error_data["message"],
-                                "model_url": error_data["model_url"],
-                                "steps": error_data["steps"],
-                                "alternatives": error_data.get("alternatives", [])
-                            }
-                        except json.JSONDecodeError:
-                            pass
-                    raise Exception(str(e))
-                    
-                except Exception as e:
-                    logger.error(f"Failed to download LLM model {model_name}: {e}")
-                    raise Exception(f"Failed to download model: {str(e)}")
+            # Use the new HuggingFace provider to download the model
+            result = await self.hf_provider.download_model(
+                model_name=model_name,
+                model_type=model_type
+            )
             
-            elif model_type == 'embedding':
-                try:
-                    # Create embedding model and attempt to load
-                    embedding_model = create_embedding_model(model_name, 'huggingface')
-                    
-                    # Test the embedding model
-                    test_embedding = embedding_model.embed_query("test")
-                    
-                    if test_embedding and len(test_embedding) > 0:
-                        return {
-                            "success": True,
-                            "message": f"Successfully downloaded and validated embedding model: {model_name}",
-                            "model_name": model_name,
-                            "model_type": model_type,
-                            "embedding_dimension": len(test_embedding),
+            return result
                             "ready_to_use": True
                         }
                     else:
@@ -1067,7 +1046,7 @@ class ModelService:
                 
                 # Save settings to database
                 try:
-                    self.chat_db.save_model_settings(
+                    self.config_repo.save_model_settings(
                         llm_model, embedding_model, valid_parameters, 
                         detected_provider, detected_embedding_provider
                     )
@@ -1093,15 +1072,18 @@ class ModelService:
             
             # Models changed - need to download and update
             models_to_download = []
-            embedding_changed = rag.embedding_model != embedding_model
+            rag_engine = get_rag_engine()
+            embedding_changed = rag_engine.embedding_model != embedding_model
             
             # Try to initialize models with provider-specific logic
             if detected_provider == 'huggingface':
                 # For HuggingFace, attempt direct initialization
                 logger.info(f"Testing HuggingFace model download: {llm_model}")
-                hf_provider = HuggingFaceProvider(llm_model)
                 
-                download_result = hf_provider._download_model_if_needed(llm_model)
+                download_result = await self.hf_provider.download_model(
+                    model_name=llm_model,
+                    model_type='llm'
+                )
                 
                 if download_result.get('success') == False:
                     logger.error(f"HuggingFace model download failed: {download_result}")
@@ -1188,7 +1170,7 @@ class ModelService:
             
             # Save settings to database
             try:
-                self.chat_db.save_model_settings(
+                self.config_repo.save_model_settings(
                     llm_model, embedding_model, valid_parameters, 
                     detected_provider, detected_embedding_provider
                 )
