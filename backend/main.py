@@ -29,6 +29,10 @@ from app.api.v1.endpoints.admin import router as admin_router
 from app.api.v1.endpoints.documents import router as documents_router
 from app.api.v1.endpoints.vector_store import router as vector_store_router
 from app.api.v1.endpoints.chat import router as chat_router
+from app.api.v1.endpoints.chunking import router as chunking_router
+from app.api.v1.endpoints.retrieval import router as retrieval_router
+from app.api.v1.endpoints.websocket_finetuning import router as websocket_finetuning_router
+from app.api.v1.endpoints.websocket_evaluation import router as websocket_evaluation_router
 from chat_db import ChatDB
 from rag import ChatPDF, get_chatpdf_instance
 from rlhf import RLHF
@@ -541,6 +545,12 @@ app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
 app.include_router(documents_router, prefix="/api", tags=["documents"])
 app.include_router(vector_store_router, tags=["vector-store"])
 app.include_router(chat_router, prefix="/api", tags=["chat"])
+app.include_router(chunking_router, prefix="/api/chunking", tags=["chunking"])
+app.include_router(retrieval_router, prefix="/api/retrieval", tags=["retrieval"])
+
+# WebSocket routers
+app.include_router(websocket_finetuning_router, prefix="/api", tags=["websocket", "finetuning"])
+app.include_router(websocket_evaluation_router, prefix="/api/evaluation", tags=["websocket", "evaluation"])
 
 # Chat endpoints (LEGACY - Being migrated to app/api/v1/endpoints/chat.py)
 @contextmanager
@@ -1041,10 +1051,13 @@ async def get_model_status(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Failed to get model status: {str(e)}")
 
 
-# Chunking configuration endpoints
+# Chunking configuration endpoints (LEGACY - Migrated to app/api/v1/endpoints/chunking.py)
+# TODO: Remove after frontend migration is complete
 @app.get("/api/chunking/methods")
 async def get_chunking_methods(token: str = Depends(oauth2_scheme)):
-    """Get available chunking methods and their supported file formats"""
+    """DEPRECATED: Use app/api/v1/endpoints/chunking.py instead
+    
+    Get available chunking methods and their supported file formats"""
     try:
         from chunking_config import ChunkingMethod, FileFormatSupport
         
@@ -1066,7 +1079,9 @@ async def get_chunking_config(
     method: str, 
     current_user: dict = Depends(get_current_user)
 ):
-    """Get chunking configuration for a specific method"""
+    """DEPRECATED: Use app/api/v1/endpoints/chunking.py instead
+    
+    Get chunking configuration for a specific method"""
     try:
         from chunking_config import ChunkingMethod, get_chunking_config_manager
         
@@ -1094,7 +1109,9 @@ async def update_chunking_config(
     config_data: dict,
     current_user: dict = Depends(get_current_user)
 ):
-    """Update chunking configuration for a specific method"""
+    """DEPRECATED: Use app/api/v1/endpoints/chunking.py instead
+    
+    Update chunking configuration for a specific method"""
     try:
         from chunking_config import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
         
@@ -1127,7 +1144,9 @@ async def update_chunking_config(
 
 @app.get("/api/chunking/optimal/{file_extension}")
 async def get_optimal_chunking_method(file_extension: str, token: str = Depends(oauth2_scheme)):
-    """Get optimal chunking method for a file extension"""
+    """DEPRECATED: Use app/api/v1/endpoints/chunking.py instead
+    
+    Get optimal chunking method for a file extension"""
     try:
         from chunking_config import FileFormatSupport
         
@@ -1146,11 +1165,13 @@ async def get_optimal_chunking_method(file_extension: str, token: str = Depends(
         logger.error(f"Error getting optimal chunking method: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Retrieval Configuration API Endpoints
+# Retrieval Configuration API Endpoints (LEGACY - Migrated to app/api/v1/endpoints/retrieval.py)
 
 @app.get("/api/retrieval/config")
 async def get_retrieval_config(token: str = Depends(oauth2_scheme)):
-    """Get current retrieval configuration"""
+    """DEPRECATED: Use app/api/v1/endpoints/retrieval.py instead
+    
+    Get current retrieval configuration"""
     try:
         current_user = await get_current_user(token)
         user_id = current_user.get('sub') if current_user else None
@@ -1318,7 +1339,9 @@ async def update_retrieval_config(
     background_tasks: BackgroundTasks,
     token: str = Depends(oauth2_scheme)
 ):
-    """Update retrieval configuration with auto-download for reranker models"""
+    """DEPRECATED: Use app/api/v1/endpoints/retrieval.py instead
+    
+    Update retrieval configuration with auto-download for reranker models"""
     try:
         current_user = await get_current_user(token)
         user_id = current_user.get('sub') if current_user else None
@@ -1383,13 +1406,15 @@ async def update_retrieval_config(
 
 @app.get("/api/retrieval/reranker-models")
 async def get_available_reranker_models(provider: Optional[str] = None, token: str = Depends(oauth2_scheme)):
-    """Get list of available reranker models from Ollama and HuggingFace"""
+    """DEPRECATED: Use app/api/v1/endpoints/retrieval.py instead
+    
+    Get list of available reranker models from Ollama and HuggingFace"""
     try:
         # Get models from Ollama API (locally installed) and Ollama scraper (library)
         ollama_url = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
         
         import httpx
-        from ollama_scraper import get_available_ollama_models
+        from app.utils.external.ollama_scraper import get_available_ollama_models
         
         # Get locally installed models
         local_models = []
@@ -1645,7 +1670,9 @@ async def get_available_reranker_models(provider: Optional[str] = None, token: s
 
 @app.get("/api/retrieval/reranker-download-status")
 async def get_reranker_download_status(model_name: str, token: str = Depends(oauth2_scheme)):
-    """Get the download status of a reranker model"""
+    """DEPRECATED: Use app/api/v1/endpoints/retrieval.py instead
+    
+    Get the download status of a reranker model"""
     try:
         if model_name in download_status_cache:
             status = download_status_cache[model_name]
@@ -2092,7 +2119,14 @@ async def validate_dataset_file(
 
 @app.websocket("/api/ws/finetuning/{experiment_id}")
 async def websocket_experiment_progress(websocket: WebSocket, experiment_id: str):
-    """WebSocket endpoint for real-time experiment progress updates"""
+    """
+    DEPRECATED: Use /api/ws/finetuning/{experiment_id} from app.api.v1.endpoints.websocket_finetuning instead
+    
+    WebSocket endpoint for real-time experiment progress updates
+    
+    This endpoint will be removed in a future version.
+    Please migrate to the new endpoint structure.
+    """
     await websocket.accept()
     
     try:

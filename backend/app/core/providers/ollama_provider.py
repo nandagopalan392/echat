@@ -1,7 +1,9 @@
 """
 Ollama Provider - Handles Ollama-specific model operations
 
-This provider manages Ollama models including installation, downloading,
+This provider manages Ollama            try:
+                from app.utils.external.ollama_scraper import get_available_ollama_models
+                library_models = get_available_ollama_models(use_cache=True)dels including installation, downloading,
 and metadata retrieval.
 """
 
@@ -91,10 +93,9 @@ class OllamaProvider(BaseModelProvider):
             List of available model dictionaries
         """
         try:
-            # Try to import ollama scraper from legacy location
-            # TODO: Move ollama_scraper to app/utils/external/
+            # Import ollama scraper from app structure
             try:
-                from ollama_scraper import get_available_ollama_models
+                from app.utils.external.ollama_scraper import get_available_ollama_models
                 available_models = get_available_ollama_models(use_cache=True)
             except ImportError:
                 # Fallback: Return empty list or fetch from Ollama API directly

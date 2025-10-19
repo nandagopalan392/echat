@@ -169,13 +169,17 @@ class FileFormatSupport:
 class ChunkingConfigManager:
     """Manager for chunking configurations"""
     
-    def __init__(self, config_dir: str = "/app/data/chunking_configs"):
+    def __init__(self, config_dir: str = "/app/data/chunking_configs", document_repository=None):
         self.config_dir = Path(config_dir)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.default_configs = self._load_default_configs()
-        # Import here to avoid circular imports
-        from chat_db import ChatDB
-        self.db = ChatDB()
+        # Use injected repository or import from app structure
+        if document_repository:
+            self.db = document_repository
+        else:
+            from app.db.repositories import DocumentRepository
+            from app.db import DatabaseConnection
+            self.db = DocumentRepository(DatabaseConnection())
     
     def _load_default_configs(self) -> Dict[ChunkingMethod, ChunkingConfig]:
         """Load default configurations for each chunking method"""

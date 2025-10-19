@@ -11,6 +11,7 @@ import logging
 from app.config import settings
 from app.db.base import get_db, DatabaseConnection
 from app.db.repositories.user_repository import UserRepository
+from app.db.repositories.document_repository import DocumentRepository
 from app.db.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -137,6 +138,19 @@ def get_user_repository(db: DatabaseConnection = Depends(get_db)) -> UserReposit
         UserRepository instance
     """
     return UserRepository(db)
+
+
+def get_document_repository(db: DatabaseConnection = Depends(get_db)) -> DocumentRepository:
+    """
+    Dependency to get DocumentRepository instance
+    
+    Args:
+        db: Database session
+        
+    Returns:
+        DocumentRepository instance
+    """
+    return DocumentRepository(db)
 
 
 # Optional: Role-based access control

@@ -713,7 +713,12 @@ async def get_websocket_health(task_id: str):
 @router.websocket("/ws/evaluation/{task_id}")
 async def websocket_evaluation_updates(websocket: WebSocket, task_id: str):
     """
+    DEPRECATED: Use /api/evaluation/ws/evaluation/{task_id} from app.api.v1.endpoints.websocket_evaluation instead
+    
     WebSocket endpoint for real-time evaluation progress updates with auto-reconnection support
+    
+    This endpoint will be removed in a future version.
+    Please migrate to the new endpoint structure.
     
     Clients can connect to this endpoint to receive real-time updates about their evaluation tasks.
     Supports reconnection and provides connection health monitoring.
