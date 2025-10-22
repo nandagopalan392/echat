@@ -151,7 +151,26 @@ class MessageResponse(BaseModel):
 
 
 class UploadProgressResponse(BaseModel):
-    """Response for upload progress"""
-    file_id: str
-    progress: int  # 0-100
-    status: str  # pending, processing, completed, failed
+    """Response for upload progress tracking"""
+    file_id: str = Field(..., description="Unique upload identifier")
+    filename: str = Field(..., description="Name of the file being uploaded")
+    total_size: int = Field(..., description="Total file size in bytes")
+    progress: int = Field(..., ge=0, le=100, description="Upload progress percentage (0-100)")
+    status: str = Field(..., description="Upload status: initializing, uploading, processing, completed, failed")
+    message: str = Field(..., description="Status message")
+    created_at: str = Field(..., description="Upload start timestamp (ISO format)")
+    updated_at: str = Field(..., description="Last update timestamp (ISO format)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "file_id": "upload_1729330000.123",
+                "filename": "document.pdf",
+                "total_size": 1024000,
+                "progress": 75,
+                "status": "processing",
+                "message": "Processing document...",
+                "created_at": "2025-10-19T10:00:00.000Z",
+                "updated_at": "2025-10-19T10:00:15.000Z"
+            }
+        }

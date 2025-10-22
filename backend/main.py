@@ -31,6 +31,8 @@ from app.api.v1.endpoints.vector_store import router as vector_store_router
 from app.api.v1.endpoints.chat import router as chat_router
 from app.api.v1.endpoints.chunking import router as chunking_router
 from app.api.v1.endpoints.retrieval import router as retrieval_router
+from app.api.v1.endpoints.evaluation import router as new_evaluation_router
+from app.api.v1.endpoints.finetuning import router as finetuning_router
 from app.api.v1.endpoints.websocket_finetuning import router as websocket_finetuning_router
 from app.api.v1.endpoints.websocket_evaluation import router as websocket_evaluation_router
 from chat_db import ChatDB
@@ -534,10 +536,6 @@ class RLHFFeedback(BaseModel):
     session_id: int
     chosen_index: int  # 0 for first response, 1 for second response
 
-# Include TruLens evaluation routes (after defining get_current_user to avoid circular imports)
-from routes.evaluation import router as evaluation_router
-app.include_router(evaluation_router, prefix="/api/evaluation", tags=["evaluation"])
-
 # Include API routers
 app.include_router(auth_router, prefix="/api/auth", tags=["authentication"])
 app.include_router(users_router, prefix="/api/users", tags=["users"])
@@ -548,9 +546,23 @@ app.include_router(chat_router, prefix="/api", tags=["chat"])
 app.include_router(chunking_router, prefix="/api/chunking", tags=["chunking"])
 app.include_router(retrieval_router, prefix="/api/retrieval", tags=["retrieval"])
 
+# Evaluation endpoints (migrated to clean architecture)
+app.include_router(new_evaluation_router, prefix="/api", tags=["evaluation"])
+
+# Fine-tuning endpoints (migrated to clean architecture)
+app.include_router(finetuning_router, prefix="/api", tags=["finetuning"])
+
 # WebSocket routers
 app.include_router(websocket_finetuning_router, prefix="/api", tags=["websocket", "finetuning"])
 app.include_router(websocket_evaluation_router, prefix="/api/evaluation", tags=["websocket", "evaluation"])
+
+# DEPRECATED: Legacy evaluation routes (use app.api.v1.endpoints.evaluation instead)
+# from routes.evaluation import router as evaluation_router
+# app.include_router(evaluation_router, prefix="/api/evaluation", tags=["evaluation"])
+
+# DEPRECATED: Legacy fine-tuning endpoints below (use app.api.v1.endpoints.finetuning instead)
+# All fine-tuning endpoints from @app.get("/api/finetuning/models") onwards are now deprecated
+# Use the new clean architecture endpoints instead
 
 # Chat endpoints (LEGACY - Being migrated to app/api/v1/endpoints/chat.py)
 @contextmanager
@@ -955,6 +967,7 @@ async def update_message(message_update: MessageUpdate, token: str = Depends(oau
         raise HTTPException(status_code=500, detail=str(e))
 
 # Add upload progress tracking
+# DEPRECATED: Use /api/upload-progress/{file_id} from app.api.v1.endpoints.documents instead
 upload_progress = {}
 
 async def track_progress(file_id: str, total_size: int):
@@ -968,6 +981,13 @@ async def track_progress(file_id: str, total_size: int):
 
 @app.get("/api/upload-progress/{file_id}")
 async def get_upload_progress(file_id: str):
+    """
+    DEPRECATED: Use /api/upload-progress/{file_id} from app.api.v1.endpoints.documents instead
+    
+    This endpoint will be removed in a future version.
+    Please use the new endpoint structure which provides enhanced progress tracking
+    with status messages, timing information, and better error handling.
+    """
     return EventSourceResponse(track_progress(file_id, 100))
 
 @app.post("/api/chat/upload")
@@ -1763,7 +1783,10 @@ async def flexible_oauth2_scheme(
     return auth_token
 
 # ================================
-# FINETUNING API ENDPOINTS
+# DEPRECATED FINETUNING API ENDPOINTS
+# These endpoints have been migrated to app/api/v1/endpoints/finetuning.py
+# This section will be removed in a future version
+# Use the new endpoints from /api/finetuning instead
 # ================================
 
 from experiment_db import experiment_db, ExperimentStatus
@@ -1771,7 +1794,11 @@ from hf_finetuner import hf_finetuner
 
 @app.get("/api/finetuning/models")
 async def get_available_models(token: str = Depends(oauth2_scheme)):
-    """Get list of available models for finetuning"""
+    """
+    DEPRECATED: Use /api/finetuning/models from app.api.v1.endpoints.finetuning instead
+    
+    Get list of available models for finetuning
+    """
     try:
         models = hf_finetuner.get_available_models()
         return {"models": models}

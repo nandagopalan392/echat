@@ -11,7 +11,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import redis
 
 from app.core.websocket import get_evaluation_manager
-from evaluation_tasks import EvaluationTaskStatus
+from app.workers.tasks.evaluation_tasks import EvaluationTaskStatus
 
 logger = logging.getLogger(__name__)
 

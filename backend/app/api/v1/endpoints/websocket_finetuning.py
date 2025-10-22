@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.websocket import get_finetuning_manager
-from experiment_db import get_experiment_db, ExperimentStatus
+from app.db.repositories.experiment_repository import get_experiment_db, ExperimentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ async def websocket_experiment_progress(websocket: WebSocket, experiment_id: str
                 
                 # Get live training metrics if available
                 try:
-                    from training_metrics import get_metrics_collector
+                    from app.core.training.metrics import get_metrics_collector
                     metrics_collector = get_metrics_collector(experiment_id)
                     training_metrics = None
                     if metrics_collector:

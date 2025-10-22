@@ -7,6 +7,7 @@ import mimetypes
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import datetime
+from datetime import timedelta
 
 from app.config.chunking import ChunkingMethod, ChunkingConfig, FileFormatSupport
 from app.db.repositories.file_repository import get_file_repository
@@ -21,7 +22,8 @@ class DocumentService:
     
     def __init__(self):
         """Initialize document service"""
-        self.upload_progress = {}
+        self._progress: Dict[str, Dict[str, any]] = {}
+        self._max_age_minutes = 60  # Clean up entries older than 1 hour
     
     def process_upload(
         self,
@@ -49,7 +51,10 @@ class DocumentService:
             Upload result dictionary
         """
         file_id = f"upload_{datetime.datetime.now().timestamp()}"
-        self.upload_progress[file_id] = 0
+        
+        # Initialize progress tracking
+        self.create_upload_progress(file_id, filename, len(file_contents))
+        self.update_upload_progress(file_id, 10, "uploading", "Reading file...")
         
         failed_files = []
         processed_files = []
@@ -70,7 +75,7 @@ class DocumentService:
             
             # Save file
             temp_path.write_bytes(file_contents)
-            self.upload_progress[file_id] = 30
+            self.update_upload_progress(file_id, 30, "uploading", "File uploaded, preparing for processing...")
             
             # Determine file extension and chunking method
             file_ext = filename.split('.')[-1].lower()
@@ -93,6 +98,9 @@ class DocumentService:
             
             logger.info(f"Processing {filename} with method {selected_method.value}")
             
+            # Update progress before processing
+            self.update_upload_progress(file_id, 50, "processing", "Processing document...")
+            
             # Process file based on type
             success = self._process_file(
                 temp_path, filename, selected_method, config, user_id, file_ext
@@ -103,7 +111,7 @@ class DocumentService:
             else:
                 failed_files.append(filename)
             
-            self.upload_progress[file_id] = 90
+            self.update_upload_progress(file_id, 90, "processing", "Finalizing...")
             
             # Save file info to database
             file_repo = get_file_repository()
@@ -116,7 +124,8 @@ class DocumentService:
                 folder_path=folder_path if is_folder else None
             )
             
-            self.upload_progress[file_id] = 100
+            # Mark upload as completed successfully
+            self.complete_upload_progress(file_id, success=True, message="Upload completed successfully")
             
             return {
                 "message": f"Upload complete. Processed: {len(processed_files)} files, Failed: {len(failed_files)} files",
@@ -129,7 +138,10 @@ class DocumentService:
         except Exception as e:
             logger.error(f"Error processing file {filename}: {str(e)}")
             failed_files.append(filename)
-            self.upload_progress[file_id] = -1
+            
+            # Mark upload as failed
+            self.complete_upload_progress(file_id, success=False, message=f"Upload failed: {str(e)}")
+            
             return {
                 "message": "Upload completed with errors",
                 "file_id": file_id,
@@ -320,9 +332,156 @@ class DocumentService:
             "embedding_model": rag.embedding_model
         }
     
-    def get_upload_progress(self, file_id: str) -> int:
-        """Get upload progress for a file"""
-        return self.upload_progress.get(file_id, 0)
+    # Upload Progress Tracking Methods
+    
+    def create_upload_progress(self, file_id: str, filename: str, total_size: int = 0) -> None:
+        """
+        Initialize upload progress tracking
+        
+        Args:
+            file_id: Unique identifier for the upload
+            filename: Name of the file being uploaded
+            total_size: Total size in bytes (0 if unknown)
+        """
+        self._progress[file_id] = {
+            "filename": filename,
+            "total_size": total_size,
+            "progress": 0,
+            "status": "initializing",
+            "message": "Upload initialized",
+            "created_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow()
+        }
+        logger.info(f"Upload tracking initialized for {file_id}: {filename}")
+    
+    def update_upload_progress(
+        self, 
+        file_id: str, 
+        progress: int, 
+        status: str = "uploading",
+        message: str = ""
+    ) -> None:
+        """
+        Update upload progress
+        
+        Args:
+            file_id: Upload identifier
+            progress: Progress percentage (0-100)
+            status: Current status (uploading, processing, completed, failed)
+            message: Optional status message
+        """
+        if file_id not in self._progress:
+            logger.warning(f"Attempted to update non-existent upload: {file_id}")
+            return
+        
+        self._progress[file_id].update({
+            "progress": max(0, min(100, progress)),  # Clamp to 0-100
+            "status": status,
+            "message": message or f"{status.capitalize()}...",
+            "updated_at": datetime.datetime.utcnow()
+        })
+        logger.debug(f"Upload progress updated for {file_id}: {progress}% - {status}")
+    
+    def get_upload_progress(self, file_id: str) -> Optional[Dict[str, any]]:
+        """
+        Get current upload progress
+        
+        Args:
+            file_id: Upload identifier
+            
+        Returns:
+            Progress data dictionary or None if not found
+        """
+        if file_id not in self._progress:
+            return None
+        
+        progress_data = self._progress[file_id].copy()
+        # Convert datetime objects to ISO format
+        progress_data["created_at"] = progress_data["created_at"].isoformat()
+        progress_data["updated_at"] = progress_data["updated_at"].isoformat()
+        
+        return progress_data
+    
+    def complete_upload_progress(self, file_id: str, success: bool = True, message: str = "") -> None:
+        """
+        Mark upload as completed
+        
+        Args:
+            file_id: Upload identifier
+            success: Whether upload succeeded
+            message: Optional completion message
+        """
+        if file_id not in self._progress:
+            logger.warning(f"Attempted to complete non-existent upload: {file_id}")
+            return
+        
+        status = "completed" if success else "failed"
+        default_message = "Upload completed successfully" if success else "Upload failed"
+        
+        self._progress[file_id].update({
+            "progress": 100 if success else self._progress[file_id]["progress"],
+            "status": status,
+            "message": message or default_message,
+            "updated_at": datetime.datetime.utcnow()
+        })
+        logger.info(f"Upload {status} for {file_id}")
+    
+    def delete_upload_progress(self, file_id: str) -> bool:
+        """
+        Remove upload tracking data
+        
+        Args:
+            file_id: Upload identifier
+            
+        Returns:
+            True if deleted, False if not found
+        """
+        if file_id in self._progress:
+            del self._progress[file_id]
+            logger.info(f"Upload tracking deleted for {file_id}")
+            return True
+        return False
+    
+    def cleanup_stale_uploads(self) -> int:
+        """
+        Remove old upload tracking entries
+        
+        Returns:
+            Number of entries cleaned up
+        """
+        cutoff_time = datetime.datetime.utcnow() - timedelta(minutes=self._max_age_minutes)
+        stale_ids = [
+            file_id for file_id, data in self._progress.items()
+            if data["updated_at"] < cutoff_time
+        ]
+        
+        for file_id in stale_ids:
+            del self._progress[file_id]
+        
+        if stale_ids:
+            logger.info(f"Cleaned up {len(stale_ids)} stale upload entries")
+        
+        return len(stale_ids)
+    
+    def get_all_upload_progress(self) -> Dict[str, Dict[str, any]]:
+        """
+        Get all current upload progress entries
+        
+        Returns:
+            Dictionary of all uploads
+        """
+        result = {}
+        for file_id, data in self._progress.items():
+            progress_data = data.copy()
+            progress_data["created_at"] = progress_data["created_at"].isoformat()
+            progress_data["updated_at"] = progress_data["updated_at"].isoformat()
+            result[file_id] = progress_data
+        
+        return result
+    
+    def get_upload_count(self) -> int:
+        """Get number of tracked uploads"""
+        return len(self._progress)
 
 
 # Singleton instance

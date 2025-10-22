@@ -9,9 +9,9 @@ import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from celery import current_task
-from celery_app import celery_app
-from evaluation_system import RAGEvaluator, RAGTriadResult, EvaluationResult
-from evaluation_config import evaluation_config
+from app.workers.celery_app import celery_app
+from app.core.evaluation.system import RAGEvaluator, RAGTriadResult, EvaluationResult
+from app.core.evaluation.config import evaluation_config
 import redis
 import os
 import requests  # For synchronous HTTP calls to Ollama

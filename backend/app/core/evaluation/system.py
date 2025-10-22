@@ -16,7 +16,7 @@ from enum import Enum
 import requests
 import time
 from abc import ABC, abstractmethod
-from evaluation_config import evaluation_config
+from app.core.evaluation.config import evaluation_config
 
 logger = logging.getLogger(__name__)
 

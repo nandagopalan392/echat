@@ -24,8 +24,8 @@ from transformers import (
     EarlyStoppingCallback, get_linear_schedule_with_warmup, TrainerCallback
 )
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
-from experiment_db import experiment_db, ExperimentStatus
-from training_metrics import create_metrics_collector, cleanup_metrics_collector, get_metrics_collector
+from app.db.repositories.experiment_repository import experiment_db, ExperimentStatus
+from app.core.training.metrics import create_metrics_collector, cleanup_metrics_collector, get_metrics_collector
 
 logger = logging.getLogger(__name__)
 

@@ -11,9 +11,9 @@ import datetime
 from typing import List, Dict, Any
 
 from celery import current_task
-from celery_app import celery_app
-from qca_dataset_generator import QCADatasetGenerator
-from experiment_db import ExperimentDB
+from app.workers.celery_app import celery_app
+from app.core.datasets.qca_dataset_generator import QCADatasetGenerator
+from app.db.repositories.experiment_repository import ExperimentDB
 
 import logging
 logger = logging.getLogger(__name__)

@@ -22,7 +22,8 @@ from app.api.v1.schemas.documents import (
     DocumentCheckDuplicateResponse,
     DocumentChunksResponse,
     DocumentPreviewResponse,
-    MessageResponse
+    MessageResponse,
+    UploadProgressResponse
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,9 @@ async def upload_file(
     
     Supports various document formats including PDF, DOCX, images, etc.
     Files are processed, chunked, and stored in vector database.
+    
+    Returns a file_id that can be used to track upload progress via
+    GET /api/upload-progress/{file_id}
     """
     try:
         # Read file contents
@@ -68,7 +72,7 @@ async def upload_file(
             "extract_images": extract_images
         }
         
-        # Process upload
+        # Process upload (progress tracking handled inside service)
         doc_service = get_document_service()
         result = doc_service.process_upload(
             file_contents=contents,
@@ -655,6 +659,72 @@ async def get_document_raw(
         raise
     except Exception as e:
         logger.error(f"Error serving raw document {document_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@router.get("/upload-progress/{file_id}", response_model=UploadProgressResponse)
+async def get_upload_progress(
+    file_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get real-time upload progress for a specific file
+    
+    Track the progress of an ongoing file upload by its unique file_id.
+    Returns current progress percentage, status, and timing information.
+    
+    Args:
+        file_id: Unique identifier for the upload (returned from upload endpoint)
+        current_user: Authenticated user
+        
+    Returns:
+        UploadProgressResponse with progress details
+        
+    Raises:
+        404: Upload not found or expired
+        
+    Example:
+        GET /api/upload-progress/upload_1729330000.123
+        
+        Response:
+        {
+            "file_id": "upload_1729330000.123",
+            "filename": "document.pdf",
+            "total_size": 1024000,
+            "progress": 75,
+            "status": "processing",
+            "message": "Processing document...",
+            "created_at": "2025-10-19T10:00:00.000Z",
+            "updated_at": "2025-10-19T10:00:15.000Z"
+        }
+    """
+    try:
+        doc_service = get_document_service()
+        
+        # Clean up stale uploads periodically
+        doc_service.cleanup_stale_uploads()
+        
+        # Get progress data
+        progress_data = doc_service.get_upload_progress(file_id)
+        
+        if progress_data is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Upload progress not found for file_id: {file_id}. Upload may have completed or expired."
+            )
+        
+        return UploadProgressResponse(
+            file_id=file_id,
+            **progress_data
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting upload progress for {file_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)

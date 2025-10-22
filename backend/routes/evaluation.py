@@ -1,3 +1,16 @@
+"""
+DEPRECATED: This file has been migrated to app/api/v1/endpoints/evaluation.py
+
+All evaluation endpoints have been moved to the new clean architecture:
+- REST endpoints: app/api/v1/endpoints/evaluation.py
+- WebSocket endpoints: app/api/v1/endpoints/websocket_evaluation.py
+- Service layer: app/services/evaluation_service.py
+- Schemas: app/api/v1/schemas/evaluation.py
+
+This file is kept for reference only and will be removed in a future version.
+Do not modify this file. Make changes in the new location instead.
+"""
+
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional

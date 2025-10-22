@@ -19,7 +19,10 @@ celery_app = Celery(
     "echat_evaluation",
     broker=redis_url,
     backend=os.getenv("CELERY_RESULT_BACKEND", redis_url),
-    include=["evaluation_tasks"]  # Import tasks module
+    include=[
+        "app.workers.tasks.evaluation_tasks",
+        "app.workers.tasks.qca_tasks"
+    ]  # Import tasks modules
 )
 
 # Configure Celery
@@ -56,19 +59,19 @@ celery_app.conf.update(
     task_default_priority=5,  # Medium priority
     worker_direct=True,  # Enable direct task routing
     task_routes={
-        'evaluation_tasks.create_dataset_background': {
+        'app.workers.tasks.evaluation_tasks.create_dataset_background': {
             'priority': 7,  # Lower priority for dataset creation
             'rate_limit': '2/m',  # Max 2 dataset creations per minute
         },
-        'evaluation_tasks.evaluate_dataset_with_rag': {
+        'app.workers.tasks.evaluation_tasks.evaluate_dataset_with_rag': {
             'priority': 3,  # Higher priority for evaluations
             'rate_limit': '5/m',  # Max 5 evaluations per minute
         },
-        'evaluation_tasks.evaluate_rag_response': {
+        'app.workers.tasks.evaluation_tasks.evaluate_rag_response': {
             'priority': 1,  # Highest priority for single evaluations
             'rate_limit': '10/m',  # Max 10 single evaluations per minute
         },
-        'qca_tasks.create_qca_dataset_background': {
+        'app.workers.tasks.qca_tasks.create_qca_dataset_background': {
             'priority': 6,  # Medium-low priority for Q-C-A dataset creation
             'rate_limit': '1/m',  # Max 1 Q-C-A dataset creation per minute
         },
@@ -88,7 +91,7 @@ celery_app.conf.update(
     # Beat schedule (for periodic tasks if needed)
     beat_schedule={
         "cleanup-old-results": {
-            "task": "evaluation_tasks.cleanup_old_evaluation_results",
+            "task": "app.workers.tasks.evaluation_tasks.cleanup_old_evaluation_results",
             "schedule": 3600.0,  # Run every hour
         },
     },
