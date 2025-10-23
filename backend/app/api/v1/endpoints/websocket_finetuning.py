@@ -6,7 +6,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.websocket import get_finetuning_manager
-from app.db.repositories.experiment_repository import get_experiment_db, ExperimentStatus
+from app.db.repositories.experiment_repository import get_experiment_repository, ExperimentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +30,15 @@ async def websocket_experiment_progress(websocket: WebSocket, experiment_id: str
     await manager.connect(websocket, experiment_id)
     
     try:
-        experiment_db = get_experiment_db()
+        experiment_repo = get_experiment_repository()
         
         while True:
             # Check experiment status
-            experiment = experiment_db.get_experiment(experiment_id)
+            experiment = experiment_repo.get_experiment(experiment_id)
             
             if experiment:
                 # Get latest logs
-                logs = experiment_db.get_training_logs(experiment_id)
+                logs = experiment_repo.get_training_logs(experiment_id)
                 latest_logs = logs[-10:] if logs else []  # Last 10 entries
                 
                 # Get live training metrics if available

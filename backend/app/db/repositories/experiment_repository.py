@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from enum import Enum
 
+from app.db.base import DatabaseConnection
+from app.db.models.experiment import Experiment, TrainingLog, Dataset, DatasetSample
+
 logger = logging.getLogger(__name__)
 
 class ExperimentStatus(Enum):
@@ -18,110 +21,25 @@ class ExperimentStatus(Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
-class ExperimentDB:
-    """Database manager for finetuning experiments"""
+class ExperimentRepository:
+    """Repository for managing finetuning experiments and datasets"""
     
-    def __init__(self, db_path: str = "data/experiments.db"):
-        self.db_path = db_path
-        self.init_db()
-        self._create_dataset_samples_table()
-    
-    def init_db(self):
-        """Initialize database tables"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Experiments table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS experiments (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT DEFAULT '',
-                    user_id TEXT NOT NULL,
-                    base_model TEXT NOT NULL,
-                    model_provider TEXT DEFAULT 'huggingface',
-                    status TEXT NOT NULL,
-                    config TEXT NOT NULL,  -- JSON string with training config
-                    dataset_path TEXT,
-                    model_path TEXT,
-                    metrics TEXT,  -- JSON string with training metrics
-                    error_message TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    started_at TIMESTAMP,
-                    completed_at TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Training logs table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS training_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    experiment_id TEXT NOT NULL,
-                    epoch INTEGER,
-                    step INTEGER,
-                    loss REAL,
-                    eval_loss REAL,
-                    learning_rate REAL,
-                    accuracy REAL,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (experiment_id) REFERENCES experiments (id)
-                )
-            ''')
-            
-            # Datasets table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS datasets (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    file_size INTEGER,
-                    num_samples INTEGER,
-                    format TEXT,  -- jsonl, csv, txt
-                    description TEXT,
-                    status TEXT DEFAULT 'Processing',  -- Processing, Completed, Failed
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Add status column if it doesn't exist (for existing databases)
-            try:
-                cursor.execute('ALTER TABLE datasets ADD COLUMN status TEXT DEFAULT "Processing"')
-                logger.info("Added status column to datasets table")
-            except sqlite3.OperationalError:
-                # Column already exists
-                pass
-            
-            conn.commit()
-            
-            # Migration: Add eval_loss column to training_logs if it doesn't exist
-            try:
-                cursor.execute('ALTER TABLE training_logs ADD COLUMN eval_loss REAL')
-                conn.commit()
-                logger.info("Added eval_loss column to training_logs table")
-            except sqlite3.OperationalError:
-                # Column already exists or SQLite limitations; ignore
-                pass
-            
-            # Migration: Add description column if it doesn't exist
-            try:
-                cursor.execute("ALTER TABLE experiments ADD COLUMN description TEXT DEFAULT ''")
-                conn.commit()
-                logger.info("Added description column to experiments table")
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" in str(e) or "already exists" in str(e):
-                    pass  # Column already exists
-                else:
-                    logger.warning(f"Migration warning: {e}")
-            
-            logger.info("Database initialized successfully")
-    
+    def __init__(self, db: Optional[DatabaseConnection] = None):
+        """
+        Initialize ExperimentRepository with DatabaseConnection.
+        
+        Args:
+            db: DatabaseConnection instance. If None, creates a new one.
+        """
+        if db is None:
+            db = DatabaseConnection()
+        self.db = db           
+        
     def create_experiment(self, experiment_data: Dict[str, Any]) -> str:
         """Create a new experiment"""
         experiment_id = str(uuid.uuid4())
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO experiments (
@@ -142,24 +60,38 @@ class ExperimentDB:
         logger.info(f"Created experiment {experiment_id}")
         return experiment_id
     
-    def get_experiment(self, experiment_id: str) -> Optional[Dict[str, Any]]:
-        """Get experiment by ID"""
-        with sqlite3.connect(self.db_path) as conn:
+    def get_experiment(self, experiment_id: str) -> Optional[Experiment]:
+        """
+        Get experiment by ID.
+        
+        Args:
+            experiment_id: Experiment ID
+            
+        Returns:
+            Experiment model instance or None if not found
+        """
+        with self.db.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('SELECT * FROM experiments WHERE id = ?', (experiment_id,))
             row = cursor.fetchone()
             
             if row:
-                experiment = dict(row)
-                experiment['config'] = json.loads(experiment['config']) if experiment['config'] else {}
-                experiment['metrics'] = json.loads(experiment['metrics']) if experiment['metrics'] else {}
-                return experiment
+                return Experiment.from_db_row(row)
         return None
     
-    def get_user_experiments(self, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get experiments for a user"""
-        with sqlite3.connect(self.db_path) as conn:
+    def get_user_experiments(self, user_id: str, limit: int = 50) -> List[Experiment]:
+        """
+        Get experiments for a user.
+        
+        Args:
+            user_id: User ID
+            limit: Maximum number of experiments to return
+            
+        Returns:
+            List of Experiment model instances
+        """
+        with self.db.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
@@ -169,19 +101,13 @@ class ExperimentDB:
                 LIMIT ?
             ''', (user_id, limit))
             
-            experiments = []
-            for row in cursor.fetchall():
-                experiment = dict(row)
-                experiment['config'] = json.loads(experiment['config']) if experiment['config'] else {}
-                experiment['metrics'] = json.loads(experiment['metrics']) if experiment['metrics'] else {}
-                experiments.append(experiment)
-            
+            experiments = [Experiment.from_db_row(row) for row in cursor.fetchall()]
             return experiments
     
     def update_experiment_status(self, experiment_id: str, status: ExperimentStatus, 
                                 error_message: str = None):
         """Update experiment status"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             
             timestamp_field = None
@@ -208,7 +134,7 @@ class ExperimentDB:
     
     def update_experiment_metrics(self, experiment_id: str, metrics: Dict[str, Any]):
         """Update experiment metrics"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE experiments 
@@ -234,7 +160,7 @@ class ExperimentDB:
             set_clauses.append("updated_at = CURRENT_TIMESTAMP")
             values.append(experiment_id)
             
-            with sqlite3.connect(self.db_path) as conn:
+            with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 query = f"UPDATE experiments SET {', '.join(set_clauses)} WHERE id = ?"
                 cursor.execute(query, values)
@@ -243,7 +169,7 @@ class ExperimentDB:
     def log_training_step(self, experiment_id: str, epoch: int, step: int, 
                          loss: float, learning_rate: float, accuracy: float = None, eval_loss: float = None):
         """Log training step metrics"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO training_logs (
@@ -252,9 +178,17 @@ class ExperimentDB:
             ''', (experiment_id, epoch, step, loss, eval_loss, learning_rate, accuracy))
             conn.commit()
     
-    def get_training_logs(self, experiment_id: str) -> List[Dict[str, Any]]:
-        """Get training logs for an experiment"""
-        with sqlite3.connect(self.db_path) as conn:
+    def get_training_logs(self, experiment_id: str) -> List[TrainingLog]:
+        """
+        Get training logs for an experiment.
+        
+        Args:
+            experiment_id: Experiment ID
+            
+        Returns:
+            List of TrainingLog model instances
+        """
+        with self.db.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
@@ -263,13 +197,13 @@ class ExperimentDB:
                 ORDER BY epoch, step
             ''', (experiment_id,))
             
-            return [dict(row) for row in cursor.fetchall()]
+            return [TrainingLog.from_db_row(row) for row in cursor.fetchall()]
     
     def create_dataset(self, dataset_data: Dict[str, Any]) -> str:
         """Create a new dataset record"""
         dataset_id = str(uuid.uuid4())
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO datasets (
@@ -289,9 +223,17 @@ class ExperimentDB:
         
         return dataset_id
     
-    def get_user_datasets(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get datasets for a user"""
-        with sqlite3.connect(self.db_path) as conn:
+    def get_user_datasets(self, user_id: str) -> List[Dataset]:
+        """
+        Get datasets for a user.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            List of Dataset model instances
+        """
+        with self.db.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
@@ -300,11 +242,11 @@ class ExperimentDB:
                 ORDER BY created_at DESC
             ''', (user_id,))
             
-            return [dict(row) for row in cursor.fetchall()]
+            return [Dataset.from_db_row(row) for row in cursor.fetchall()]
     
     def delete_experiment(self, experiment_id: str, user_id: str) -> bool:
         """Delete an experiment (only if owned by user)"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             # First check if experiment exists and belongs to user
             cursor.execute(
@@ -325,7 +267,7 @@ class ExperimentDB:
         """Create a dataset from samples"""
         dataset_id = str(uuid.uuid4())
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO datasets (
@@ -354,9 +296,17 @@ class ExperimentDB:
         
         return dataset_id
     
-    def get_dataset(self, dataset_id: str) -> Dict[str, Any]:
-        """Get dataset by ID"""
-        with sqlite3.connect(self.db_path) as conn:
+    def get_dataset(self, dataset_id: str) -> Optional[Dataset]:
+        """
+        Get dataset by ID.
+        
+        Args:
+            dataset_id: Dataset ID
+            
+        Returns:
+            Dataset model instance or None if not found
+        """
+        with self.db.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
@@ -364,38 +314,47 @@ class ExperimentDB:
             ''', (dataset_id,))
             
             row = cursor.fetchone()
-            return dict(row) if row else None
+            return Dataset.from_db_row(row) if row else None
     
-    def get_dataset_samples(self, dataset_id: str, limit: int = None) -> List[Dict]:
-        """Get samples for a dataset"""
-        with sqlite3.connect(self.db_path) as conn:
+    def get_dataset_samples(self, dataset_id: str, limit: int = None) -> List[DatasetSample]:
+        """
+        Get samples for a dataset.
+        
+        Args:
+            dataset_id: Dataset ID
+            limit: Optional limit on number of samples to return
+            
+        Returns:
+            List of DatasetSample model instances
+        """
+        with self.db.get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
-            # Try to get from dataset_samples table first (for converted datasets)
+            # Get from dataset_samples table
             if limit:
                 cursor.execute('''
-                    SELECT content FROM dataset_samples 
+                    SELECT * FROM dataset_samples 
                     WHERE dataset_id = ? 
                     ORDER BY sample_index 
                     LIMIT ?
                 ''', (dataset_id, limit))
             else:
                 cursor.execute('''
-                    SELECT content FROM dataset_samples 
+                    SELECT * FROM dataset_samples 
                     WHERE dataset_id = ? 
                     ORDER BY sample_index
                 ''', (dataset_id,))
             
             rows = cursor.fetchall()
             if rows:
-                return [json.loads(row['content']) for row in rows]
+                return [DatasetSample.from_db_row(row) for row in rows]
             
             # Fallback: try to read from file if it's a file-based dataset
             dataset = self.get_dataset(dataset_id)
-            if dataset and dataset.get('file_path'):
+            if dataset and dataset.file_path:
                 try:
-                    file_path = dataset['file_path']
+                    file_path = dataset.file_path
                     if os.path.exists(file_path):
                         samples = []
                         with open(file_path, 'r', encoding='utf-8') as f:
@@ -403,7 +362,16 @@ class ExperimentDB:
                                 if limit and i >= limit:
                                     break
                                 try:
-                                    samples.append(json.loads(line.strip()))
+                                    data = json.loads(line.strip())
+                                    # Convert file data to DatasetSample
+                                    sample = DatasetSample(
+                                        dataset_id=dataset_id,
+                                        sample_index=i,
+                                        input_text=data.get('input', data.get('text', '')),
+                                        output_text=data.get('output', data.get('label', '')),
+                                        metadata=data.get('metadata')
+                                    )
+                                    samples.append(sample)
                                 except json.JSONDecodeError:
                                     continue
                         return samples
@@ -414,7 +382,7 @@ class ExperimentDB:
     
     def delete_dataset(self, dataset_id: str) -> bool:
         """Delete a dataset and its samples"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             
             # Check if dataset exists
@@ -430,9 +398,9 @@ class ExperimentDB:
             conn.commit()
             return True
 
-    def _create_dataset_samples_table(self):
+    def _deprecated_create_dataset_samples_table(self):
         """Create dataset samples table for storing converted dataset content"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS dataset_samples (
@@ -455,7 +423,7 @@ class ExperimentDB:
 
     def update_dataset_samples(self, dataset_id: str, samples: List[Dict]) -> None:
         """Update dataset samples after generation"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             
             # Clear existing samples
@@ -479,7 +447,7 @@ class ExperimentDB:
 
     def update_dataset_status(self, dataset_id: str, status: str) -> None:
         """Update dataset status"""
-        with sqlite3.connect(self.db_path) as conn:
+        with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE datasets 
@@ -489,4 +457,14 @@ class ExperimentDB:
             conn.commit()
 
 # Global instance
-experiment_db = ExperimentDB()
+experiment_repository = ExperimentRepository()
+
+
+def get_experiment_repository() -> ExperimentRepository:
+    """
+    Get the global ExperimentRepository instance (singleton pattern).
+    
+    Returns:
+        ExperimentRepository: The global experiment repository instance
+    """
+    return experiment_repository

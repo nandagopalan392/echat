@@ -19,7 +19,7 @@ class DatabaseConnection:
         if db_path is None:
             db_dir = Path(settings.SQLITE_DB_PATH)
             db_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = str(db_dir / 'chat.db')
+            self.db_path = str(db_dir / 'main.db')  # Main application database
         else:
             self.db_path = db_path
         

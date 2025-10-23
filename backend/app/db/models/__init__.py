@@ -11,6 +11,17 @@ from app.db.models.evaluation import (
     EvaluationResult,
     EvaluationTask
 )
+from app.db.models.experiment import (
+    Experiment,
+    TrainingLog,
+    Dataset,
+    DatasetSample
+)
+from app.db.models.rlhf import (
+    RLHFFeedback,
+    RLHFResponseOption,
+    RLHFTrainingData
+)
 
 __all__ = [
     # User models
@@ -31,4 +42,13 @@ __all__ = [
     'EvaluationDatasetDocument',
     'EvaluationResult',
     'EvaluationTask',
+    # Experiment models
+    'Experiment',
+    'TrainingLog',
+    'Dataset',
+    'DatasetSample',
+    # RLHF models
+    'RLHFFeedback',
+    'RLHFResponseOption',
+    'RLHFTrainingData',
 ]

@@ -27,15 +27,29 @@ class EvaluationService:
     def __init__(self):
         """Initialize evaluation service"""
         self.evaluation_manager = get_evaluation_manager()
+        self._db = None
+        self._eval_repo = None
+        self._chat_repo = None
     
-    def get_chat_db(self):
-        """Get ChatDB instance"""
-        try:
-            from chat_db import ChatDB
-            return ChatDB()
-        except ImportError:
-            logger.error("ChatDB not available")
-            return None
+    def get_evaluation_repository(self):
+        """Get EvaluationRepository instance"""
+        if self._eval_repo is None:
+            from app.db import DatabaseConnection
+            from app.db.repositories import EvaluationRepository
+            if self._db is None:
+                self._db = DatabaseConnection()
+            self._eval_repo = EvaluationRepository(self._db)
+        return self._eval_repo
+    
+    def get_chat_repository(self):
+        """Get ChatRepository instance"""
+        if self._chat_repo is None:
+            from app.db import DatabaseConnection
+            from app.db.repositories import ChatRepository
+            if self._db is None:
+                self._db = DatabaseConnection()
+            self._chat_repo = ChatRepository(self._db)
+        return self._chat_repo
     
     # Legacy evaluation functions for backwards compatibility
     def calculate_groundedness(self, response: str, context: str) -> float:

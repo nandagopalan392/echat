@@ -364,11 +364,13 @@ def evaluate_rag_response(
     try:
         # Update database to mark task as started
         try:
-            from chat_db import get_chat_db
-            chat_db = get_chat_db()
-            if chat_db:
-                chat_db.update_evaluation_task_status(task_id, "STARTED")
-                logger.info(f"🚀 DATABASE: Updated task {task_id} status to STARTED")
+            from app.db import DatabaseConnection
+            from app.db.repositories import EvaluationRepository
+            
+            db = DatabaseConnection()
+            eval_repo = EvaluationRepository(db)
+            eval_repo.update_task_progress(task_id, 0, "STARTED")
+            logger.info(f"🚀 DATABASE: Updated task {task_id} status to STARTED")
         except Exception as db_error:
             logger.error(f"🚀 DATABASE ERROR: Failed to update task start status: {db_error}")
         
@@ -455,18 +457,21 @@ def evaluate_rag_response(
         
         # Update database record
         try:
-            from chat_db import get_chat_db
-            chat_db = get_chat_db()
-            if chat_db:
-                chat_db.update_evaluation_task_status(
-                    task_id=task_id,
-                    status="SUCCESS",
-                    groundedness_score=result.groundedness.score,
-                    answer_relevance_score=result.answer_relevance.score,
-                    context_relevance_score=result.context_relevance.score,
-                    overall_score=result.overall_score,
-                    evaluation_time=time.time() - start_time
-                )
+            from app.db import DatabaseConnection
+            from app.db.repositories import EvaluationRepository
+            
+            db = DatabaseConnection()
+            eval_repo = EvaluationRepository(db)
+            
+            # Store evaluation metrics
+            metadata = {
+                "groundedness_score": result.groundedness.score,
+                "answer_relevance_score": result.answer_relevance.score,
+                "context_relevance_score": result.context_relevance.score,
+                "overall_score": result.overall_score,
+                "evaluation_time": time.time() - start_time
+            }
+            eval_repo.complete_task(task_id, status="completed", metadata=metadata)
         except Exception as db_error:
             logger.error(f"Failed to update database for task {task_id}: {db_error}")
         
@@ -496,15 +501,17 @@ def evaluate_rag_response(
         
         # Update database record with error
         try:
-            from chat_db import get_chat_db
-            chat_db = get_chat_db()
-            if chat_db:
-                chat_db.update_evaluation_task_status(
-                    task_id=task_id,
-                    status="FAILURE",
-                    error_message=str(e),
-                    evaluation_time=time.time() - start_time
-                )
+            from app.db import DatabaseConnection
+            from app.db.repositories import EvaluationRepository
+            
+            db = DatabaseConnection()
+            eval_repo = EvaluationRepository(db)
+            
+            metadata = {
+                "error_message": str(e),
+                "evaluation_time": time.time() - start_time
+            }
+            eval_repo.complete_task(task_id, status="failed", metadata=metadata)
         except Exception as db_error:
             logger.error(f"Failed to update database for failed task {task_id}: {db_error}")
         
@@ -733,18 +740,18 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
     
     try:
         # Get database connection
-        from chat_db import get_chat_db
-        chat_db = get_chat_db()
+        from app.db import DatabaseConnection
+        from app.db.repositories import EvaluationRepository
         
-        if not chat_db:
-            raise ValueError("Database connection failed")
+        db = DatabaseConnection()
+        eval_repo = EvaluationRepository(db)
         
         # Get dataset from database first to get the name
-        dataset = chat_db.get_evaluation_dataset(dataset_id)
+        dataset = eval_repo.get_dataset(dataset_id)
         if not dataset:
             raise ValueError(f"Dataset {dataset_id} not found")
         
-        dataset_name = dataset.get('name', f'Dataset {dataset_id}')
+        dataset_name = dataset.name
         
         # Update database to mark task as started
         try:
@@ -1142,11 +1149,11 @@ def create_dataset_background(
         })
         
         # Get database connection
-        from chat_db import get_chat_db
-        chat_db = get_chat_db()
+        from app.db import DatabaseConnection
+        from app.db.repositories import EvaluationRepository
         
-        if not chat_db:
-            raise ValueError("Database connection failed")
+        db = DatabaseConnection()
+        eval_repo = EvaluationRepository(db)
         
         # Fetch documents (I/O bound - benefits from async)
         publish_evaluation_update(task_id, EvaluationTaskStatus.PROGRESS, {

@@ -145,4 +145,4 @@ export ACCELERATE_USE_FSDP=false
 export CUDA_LAUNCH_BLOCKING=1
 
 # Start with proper settings for metrics collection
-exec uvicorn main:app --host $HOST --port $PORT --reload --log-level info
+exec uvicorn app.main:app --host $HOST --port $PORT --reload --log-level info

@@ -50,24 +50,26 @@ async def websocket_evaluation_updates(websocket: WebSocket, task_id: str):
         
         # Get current task status for initial sync
         try:
-            from chat_db import get_chat_db
-            chat_db = get_chat_db()
+            from app.db import DatabaseConnection
+            from app.db.repositories import EvaluationRepository
             
-            # Check for existing task status
-            with sqlite3.connect(chat_db.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT status, metadata, completed_at
-                    FROM evaluation_tasks 
-                    WHERE task_id = ?
-                    UNION
-                    SELECT status, '{}' as metadata, updated_at as completed_at
-                    FROM datasets 
-                    WHERE name = ? OR id = ?
-                """, (task_id, task_id, task_id))
-                
-                task_status = cursor.fetchone()
-                cursor.close()
+            db = DatabaseConnection()
+            eval_repo = EvaluationRepository(db)
+            task = eval_repo.get_task(task_id)
+            
+            if task:
+                task_status = (task.status, task.metadata or '{}', task.completed_at)
+            else:
+                # Check if it's a dataset ID
+                try:
+                    dataset_id = int(task_id)
+                    dataset = eval_repo.get_dataset(dataset_id)
+                    if dataset:
+                        task_status = (dataset.status, '{}', dataset.updated_at)
+                    else:
+                        task_status = None
+                except ValueError:
+                    task_status = None
         
         except Exception as db_error:
             logger.debug(f"Could not fetch initial task status: {db_error}")

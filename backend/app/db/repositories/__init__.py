@@ -6,6 +6,8 @@ from app.db.repositories.chat_repository import ChatRepository
 from app.db.repositories.document_repository import DocumentRepository
 from app.db.repositories.config_repository import ConfigRepository
 from app.db.repositories.evaluation_repository import EvaluationRepository
+from app.db.repositories.experiment_repository import ExperimentRepository
+from app.db.repositories.rlhf_repository import RLHFRepository
 
 __all__ = [
     'UserRepository',
@@ -14,4 +16,6 @@ __all__ = [
     'DocumentRepository',
     'ConfigRepository',
     'EvaluationRepository',
+    'ExperimentRepository',
+    'RLHFRepository',
 ]

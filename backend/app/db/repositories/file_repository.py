@@ -2,11 +2,10 @@
 File Repository
 Database operations for file metadata
 """
-import sqlite3
 import logging
 from typing import List, Dict, Optional
-from pathlib import Path
-import os
+
+from app.db.base import DatabaseConnection
 
 logger = logging.getLogger(__name__)
 
@@ -14,54 +13,15 @@ logger = logging.getLogger(__name__)
 class FileRepository:
     """Repository for file metadata operations"""
     
-    def __init__(self, db_path: str = None):
+    def __init__(self, db: DatabaseConnection):
         """
         Initialize file repository
         
         Args:
-            db_path: Path to SQLite database file
+            db: DatabaseConnection instance
         """
-        if db_path is None:
-            db_dir = os.getenv('SQLITE_DB_PATH', '/app/data/db')
-            db_dir = Path(db_dir).parent
-            db_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = os.path.join(db_dir, 'chat.db')
-        else:
-            self.db_path = db_path
-        
-        # Ensure directory exists
-        db_dir = Path(self.db_path).parent
-        db_dir.mkdir(parents=True, exist_ok=True)
-        db_dir.chmod(0o777)
-        
-        logger.info(f"Using database path for files: {self.db_path}")
-        self._init_tables()
-    
-    def _init_tables(self):
-        """Initialize file-related tables"""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Create files table if it doesn't exist
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS files (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        filename TEXT NOT NULL,
-                        format TEXT NOT NULL,
-                        size INTEGER NOT NULL,
-                        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        uploaded_by TEXT NOT NULL,
-                        is_folder BOOLEAN DEFAULT FALSE,
-                        folder_path TEXT
-                    )
-                ''')
-                
-                conn.commit()
-                logger.info("File tables initialized")
-        except Exception as e:
-            logger.error(f"Error initializing file tables: {e}")
-            raise
+        self.db = db
+        # Table creation handled by init_db.py
     
     def save_file_info(
         self,
@@ -87,13 +47,12 @@ class FileRepository:
             File ID
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO files (filename, format, size, uploaded_by, is_folder, folder_path)
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (filename, format, size, uploaded_by, is_folder, folder_path))
-                conn.commit()
                 return cursor.lastrowid
         except Exception as e:
             logger.error(f"Error saving file info: {e}")
@@ -110,8 +69,7 @@ class FileRepository:
             File metadata dict or None
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
+            with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     SELECT * FROM files WHERE id = ?
@@ -133,8 +91,7 @@ class FileRepository:
             List of file metadata dicts
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
+            with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     SELECT * FROM files WHERE uploaded_by = ?
@@ -153,8 +110,7 @@ class FileRepository:
             List of file metadata dicts
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
+            with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     SELECT * FROM files ORDER BY upload_date DESC
@@ -175,10 +131,9 @@ class FileRepository:
             True if deleted, False otherwise
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('DELETE FROM files WHERE id = ?', (file_id,))
-                conn.commit()
                 return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Error deleting file {file_id}: {e}")
@@ -195,10 +150,9 @@ class FileRepository:
             Number of files deleted
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('DELETE FROM files WHERE uploaded_by = ?', (username,))
-                conn.commit()
                 return cursor.rowcount
         except Exception as e:
             logger.error(f"Error deleting files for user {username}: {e}")
@@ -209,9 +163,12 @@ class FileRepository:
 _file_repository = None
 
 
-def get_file_repository() -> FileRepository:
+def get_file_repository(db: DatabaseConnection = None) -> FileRepository:
     """Get file repository singleton"""
     global _file_repository
     if _file_repository is None:
-        _file_repository = FileRepository()
+        if db is None:
+            from app.db.base import DatabaseConnection
+            db = DatabaseConnection()
+        _file_repository = FileRepository(db)
     return _file_repository

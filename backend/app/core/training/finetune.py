@@ -439,7 +439,7 @@ class FineTuner:
             error: Error message if failed
         """
         try:
-            with sqlite3.connect(os.path.join(os.getenv('SQLITE_DB_PATH', '/app/data/db'), 'chat.db')) as conn:
+            with sqlite3.connect(os.path.join(os.getenv('SQLITE_DB_PATH', '/app/data/db'), 'main.db')) as conn:
                 cursor = conn.cursor()
                 
                 # Create table if not exists
@@ -478,7 +478,7 @@ class FineTuner:
             List of fine-tuning jobs
         """
         try:
-            with sqlite3.connect(os.path.join(os.getenv('SQLITE_DB_PATH', '/app/data/db'), 'chat.db')) as conn:
+            with sqlite3.connect(os.path.join(os.getenv('SQLITE_DB_PATH', '/app/data/db'), 'main.db')) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 

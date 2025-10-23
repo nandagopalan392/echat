@@ -2850,11 +2850,11 @@ def check_model_compatibility(model_name, model_size=None):
     Returns: (is_compatible, message, details)
     """
     try:
-        # Import the detailed compatibility check from main
-        from main import check_model_compatibility_detailed
+        # Import the detailed compatibility check from gpu_utils
+        from gpu_utils import check_model_compatibility_detailed
         return check_model_compatibility_detailed(model_name, model_size)
     except ImportError:
-        # Fallback implementation if main functions are not available
+        # Fallback implementation if gpu_utils is not available
         logger.warning("Could not import detailed GPU compatibility check, using fallback")
         
         if not model_name:

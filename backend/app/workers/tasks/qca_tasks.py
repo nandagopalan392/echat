@@ -13,7 +13,7 @@ from typing import List, Dict, Any
 from celery import current_task
 from app.workers.celery_app import celery_app
 from app.core.datasets.qca_dataset_generator import QCADatasetGenerator
-from app.db.repositories.experiment_repository import ExperimentDB
+from app.db.repositories.experiment_repository import get_experiment_repository
 
 import logging
 logger = logging.getLogger(__name__)
@@ -79,11 +79,11 @@ def create_qca_dataset_background(
             "progress": 0.0
         })
         
-        # Get database connection
-        experiment_db = ExperimentDB()
+        # Get experiment repository instance
+        experiment_repo = get_experiment_repository()
         
         # Create dataset record in database
-        dataset_id = experiment_db.create_dataset(
+        dataset_id = experiment_repo.create_dataset(
             name=name,
             description=description,
             samples=[],  # Empty initially, will be populated after generation
@@ -181,8 +181,8 @@ def create_qca_dataset_background(
         } for item in dataset.items]
         
         # Update the dataset in the database
-        experiment_db.update_dataset_samples(dataset_id, samples)
-        experiment_db.update_dataset_status(dataset_id, "Completed")
+        experiment_repo.update_dataset_samples(dataset_id, samples)
+        experiment_repo.update_dataset_status(dataset_id, "Completed")
         
         logger.info(f"Updated dataset {dataset_id} status to Completed")
         
@@ -217,8 +217,8 @@ def create_qca_dataset_background(
         # Update dataset status to failed if dataset was created
         try:
             if 'dataset_id' in locals():
-                experiment_db = ExperimentDB()
-                experiment_db.update_dataset_status(dataset_id, "Failed")
+                experiment_repo = get_experiment_repository()
+                experiment_repo.update_dataset_status(dataset_id, "Failed")
                 logger.info(f"Updated dataset {dataset_id} status to Failed")
         except Exception as db_error:
             logger.error(f"Failed to update dataset status: {db_error}")

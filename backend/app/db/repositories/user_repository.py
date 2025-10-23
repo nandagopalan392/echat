@@ -19,39 +19,7 @@ class UserRepository:
     
     def __init__(self, db: DatabaseConnection):
         self.db = db
-        self._init_table()
-    
-    def _init_table(self):
-        """Initialize users table if it doesn't exist"""
-        create_table_query = '''
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                password_hash TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_admin BOOLEAN DEFAULT FALSE,
-                is_active BOOLEAN DEFAULT TRUE,
-                role TEXT DEFAULT 'Engineer',
-                email TEXT,
-                last_login TIMESTAMP
-            )
-        '''
-        
-        with self.db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(create_table_query)
-            
-            # Check if admin user exists
-            cursor.execute("SELECT username FROM users WHERE username = 'admin'")
-            if not cursor.fetchone():
-                # Create default admin user
-                admin_password = 'admin123'
-                hashed_password = hash_password(admin_password)
-                cursor.execute(
-                    '''INSERT INTO users (username, password_hash, is_admin, role) 
-                       VALUES (?, ?, ?, ?)''',
-                    ('admin', hashed_password, True, 'Admin')
-                )
-                logger.info("Created default admin user")
+        # Table creation handled by init_db.py
     
     def create_user(self, username: str, password: str, role: str = 'Engineer', 
                    email: str = None, is_admin: bool = False) -> bool:
