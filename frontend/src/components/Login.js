@@ -15,7 +15,7 @@ import {
     ThemeProvider
 } from '@mui/material';
 import { Visibility, VisibilityOff, Person, Lock } from '@mui/icons-material';
-import { api } from '../services/api';
+import { authService } from '../services/authService';
 import { theme } from '../theme';
 import echatLogo from '../assets/echat_logo.svg';
 
@@ -33,12 +33,12 @@ const Login = () => {
         setLoading(true);
         
         try {
-            const response = await api.login(username, password);
-            localStorage.setItem('token', response.access_token);
+            await authService.login(username, password);
+            console.log('✅ Login successful, tokens stored securely');
             navigate('/chat');
         } catch (error) {
-            setError('Invalid username or password');
-            console.error('Login error:', error);
+            setError(error.message || 'Invalid username or password');
+            console.error('❌ Login error:', error);
         } finally {
             setLoading(false);
         }

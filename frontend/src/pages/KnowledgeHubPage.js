@@ -696,16 +696,18 @@ const KnowledgeHubPage = () => {
     // WebSocket connection management for download progress
     const connectToDownloadWebSocket = () => {
         try {
+            // ✅ UPDATED: No longer using localStorage token
+            // Authentication now uses httpOnly cookies automatically
+            
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            // Use the same host but point to the WebSocket endpoint
-            // Follow the same pattern as evaluations: /api/ws/...
             const host = window.location.host;
             const wsUrl = `${protocol}//${host}/api/ws/download-progress`;
             
+            console.log('🔌 Connecting to download progress WebSocket (cookie-based auth)');
             downloadWebSocketRef.current = new WebSocket(wsUrl);
             
             downloadWebSocketRef.current.onopen = () => {
-                console.log('Connected to download progress WebSocket');
+                console.log('✅ Connected to download progress WebSocket');
             };
             
             downloadWebSocketRef.current.onmessage = (event) => {
@@ -739,14 +741,29 @@ const KnowledgeHubPage = () => {
                 }
             };
             
-            downloadWebSocketRef.current.onclose = () => {
-                console.log('Download progress WebSocket disconnected');
+            downloadWebSocketRef.current.onclose = (event) => {
+                // Handle authentication failures (code 1008)
+                if (event.code === 1008) {
+                    console.error('❌ Download WebSocket authentication failed:', event.reason);
+                    setDownloadingRerankerModel(false);
+                    setDownloadProgress('');
+                    setRetrievalConfigMessage({ 
+                        type: 'error', 
+                        text: 'Authentication failed. Please log in again.' 
+                    });
+                } else {
+                    console.log('Download progress WebSocket disconnected:', event.code, event.reason);
+                }
             };
             
             downloadWebSocketRef.current.onerror = (error) => {
                 console.error('Download progress WebSocket error:', error);
                 setDownloadingRerankerModel(false);
                 setDownloadProgress('');
+                setRetrievalConfigMessage({ 
+                    type: 'error', 
+                    text: 'WebSocket connection error. Please try again.' 
+                });
             };
         } catch (error) {
             console.error('Error connecting to download WebSocket:', error);

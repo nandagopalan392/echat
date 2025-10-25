@@ -3,10 +3,13 @@ WebSocket endpoints for fine-tuning real-time updates
 """
 import asyncio
 import logging
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from typing import Optional
 
 from app.core.websocket import get_finetuning_manager
 from app.db.repositories.experiment_repository import get_experiment_repository, ExperimentStatus
+from app.dependencies import authenticate_websocket_token, authenticate_websocket_cookie
+from app.db.base import DatabaseConnection
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +17,17 @@ router = APIRouter()
 
 
 @router.websocket("/ws/finetuning/{experiment_id}")
-async def websocket_experiment_progress(websocket: WebSocket, experiment_id: str):
+async def websocket_experiment_progress(
+    websocket: WebSocket,
+    experiment_id: str,
+    token: Optional[str] = Query(None)
+):
     """
     WebSocket endpoint for real-time fine-tuning experiment progress updates
+    
+    **Authentication:** Supports both cookie-based (preferred) and query parameter authentication
+    - Cookie: access_token cookie (automatic, secure)
+    - Query param: ?token=your_jwt_token (backward compatibility)
     
     Provides real-time updates including:
     - Experiment status changes
@@ -26,6 +37,22 @@ async def websocket_experiment_progress(websocket: WebSocket, experiment_id: str
     
     Connection automatically closes when experiment reaches terminal state (completed/failed/cancelled)
     """
+    db = DatabaseConnection()
+    
+    # Try cookie authentication first (preferred)
+    user = await authenticate_websocket_cookie(websocket, db)
+    
+    # Fallback to query parameter authentication
+    if not user and token:
+        user = await authenticate_websocket_token(token, db)
+    
+    # Authentication required
+    if not user:
+        await websocket.close(code=1008, reason="Authentication required: provide access_token cookie or token parameter")
+        return
+    
+    logger.info(f"WebSocket authenticated for user: {user.username}, experiment: {experiment_id}")
+    
     manager = get_finetuning_manager()
     await manager.connect(websocket, experiment_id)
     

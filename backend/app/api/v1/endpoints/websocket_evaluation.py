@@ -7,11 +7,14 @@ import logging
 import sqlite3
 import os
 from datetime import datetime
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from typing import Optional
 import redis
 
 from app.core.websocket import get_evaluation_manager
 from app.workers.tasks.evaluation_tasks import EvaluationTaskStatus
+from app.dependencies import authenticate_websocket_token, authenticate_websocket_cookie
+from app.db.base import DatabaseConnection
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +25,17 @@ redis_client = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:63
 
 
 @router.websocket("/ws/evaluation/{task_id}")
-async def websocket_evaluation_updates(websocket: WebSocket, task_id: str):
+async def websocket_evaluation_updates(
+    websocket: WebSocket,
+    task_id: str,
+    token: Optional[str] = Query(None)
+):
     """
     WebSocket endpoint for real-time evaluation progress updates with auto-reconnection support
+    
+    **Authentication:** Supports both cookie-based (preferred) and query parameter authentication
+    - Cookie: access_token cookie (automatic, secure)
+    - Query param: ?token=your_jwt_token (backward compatibility)
     
     Provides real-time updates including:
     - Evaluation progress (percentage complete)
@@ -40,6 +51,22 @@ async def websocket_evaluation_updates(websocket: WebSocket, task_id: str):
     
     Connection automatically closes when evaluation reaches terminal state (success/failure)
     """
+    db = DatabaseConnection()
+    
+    # Try cookie authentication first (preferred)
+    user = await authenticate_websocket_cookie(websocket, db)
+    
+    # Fallback to query parameter authentication
+    if not user and token:
+        user = await authenticate_websocket_token(token, db)
+    
+    # Authentication required
+    if not user:
+        await websocket.close(code=1008, reason="Authentication required: provide access_token cookie or token parameter")
+        return
+    
+    logger.info(f"WebSocket authenticated for user: {user.username}, task: {task_id}")
+    
     manager = get_evaluation_manager()
     await manager.connect(websocket, task_id)
     

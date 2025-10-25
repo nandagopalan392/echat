@@ -95,11 +95,11 @@ async def upload_file(
 
 
 @router.get("/documents", response_model=DocumentListResponse)
-async def list_documents():
+async def list_documents(current_user: User = Depends(get_current_user)):
     """
     List all documents with their ingestion status
     
-    Returns all documents stored in the system, regardless of authentication.
+    Requires authentication to view documents.
     """
     try:
         doc_service = get_document_service()

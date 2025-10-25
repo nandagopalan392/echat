@@ -180,6 +180,9 @@ class WebSocketService {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
         
+        // ✅ UPDATED: No longer using localStorage token
+        // Authentication now uses httpOnly cookies automatically
+        
         // Generate WebSocket URL based on endpoint type
         let wsUrl;
         if (endpointType === 'qca-dataset') {
@@ -189,7 +192,7 @@ class WebSocketService {
             wsUrl = `${protocol}//${host}/api/evaluation/ws/evaluation/${taskId}`;
         }
 
-        console.log(`🔌 Creating WebSocket connection for task ${taskId}`);
+        console.log(`🔌 Creating WebSocket connection for task ${taskId} (cookie-based auth)`);
         console.log(`🔗 WebSocket URL: ${wsUrl}`);
         this._updateConnectionStatus(connection, 'connecting');
 
@@ -237,6 +240,15 @@ class WebSocketService {
             connection.ws.onclose = (event) => {
                 console.log(`🔒 WebSocket closed for task ${taskId}:`, event.code, event.reason);
                 this._stopPing(connection);
+                
+                // Handle authentication failures (code 1008)
+                if (event.code === 1008) {
+                    console.error('❌ WebSocket authentication failed:', event.reason);
+                    this._updateConnectionStatus(connection, 'auth_failed');
+                    connection.callbacks.onError(new Error(`Authentication failed: ${event.reason}`));
+                    // Don't attempt to reconnect on auth failures
+                    connection.isManualClose = true;
+                }
                 
                 if (!connection.isManualClose) {
                     this._updateConnectionStatus(connection, 'disconnected');

@@ -1647,14 +1647,18 @@ export const api = {
     createFineTuningWebSocket: (experimentId, onMessage, onError, onClose) => {
         // Build ws/wss URL and correct backend path: /api/ws/finetuning/{experiment_id}
         try {
+            // ✅ UPDATED: No longer using localStorage token
+            // Authentication now uses httpOnly cookies automatically
+            
             const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
             const host = window.location.host; // includes hostname:port
             const wsUrl = `${protocol}://${host}/api/ws/finetuning/${experimentId}`;
+            
+            console.log('🔌 Creating Fine-tuning WebSocket (cookie-based auth)');
             const ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
-                // Optional: can log or send a ping if needed
-                // console.debug('WebSocket connected to', wsUrl);
+                console.log('✅ Fine-tuning WebSocket connected');
             };
         
             ws.onmessage = (event) => {
@@ -1672,8 +1676,14 @@ export const api = {
                 onError(error);
             };
             
-            ws.onclose = () => {
-                console.log('WebSocket connection closed');
+            ws.onclose = (event) => {
+                // Handle authentication failures (code 1008)
+                if (event.code === 1008) {
+                    console.error('❌ WebSocket authentication failed:', event.reason);
+                    onError(new Error(`Authentication failed: ${event.reason}`));
+                } else {
+                    console.log('WebSocket connection closed:', event.code, event.reason);
+                }
                 onClose();
             };
             
@@ -1943,7 +1953,11 @@ export const evaluationApi = {
 
     // Create WebSocket connection for real-time updates (Legacy - use WebSocketService instead)
     createWebSocketConnection: (taskId, onMessage, onError, onClose) => {
+        // ✅ UPDATED: No longer using localStorage token
+        // Authentication now uses httpOnly cookies automatically
+        
         const wsUrl = `${API_BASE_URL.replace('http', 'ws')}/api/evaluation/ws/evaluation/${taskId}`;
+        console.log('🔌 Creating legacy WebSocket (cookie-based auth)');
         const ws = new WebSocket(wsUrl);
         
         ws.onmessage = (event) => {
@@ -1961,8 +1975,14 @@ export const evaluationApi = {
             onError(error);
         };
         
-        ws.onclose = () => {
-            console.log('WebSocket connection closed');
+        ws.onclose = (event) => {
+            // Handle authentication failures (code 1008)
+            if (event.code === 1008) {
+                console.error('❌ WebSocket authentication failed:', event.reason);
+                onError(new Error(`Authentication failed: ${event.reason}`));
+            } else {
+                console.log('WebSocket connection closed:', event.code, event.reason);
+            }
             onClose();
         };
         

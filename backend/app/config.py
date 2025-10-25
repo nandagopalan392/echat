@@ -16,7 +16,14 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: str = "your-secret-key-change-in-production"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60  # 1 hour (reduced for better security)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7  # 7 days
+    
+    # Cookie Settings
+    COOKIE_SECURE: bool = False  # Set to True in production with HTTPS
+    COOKIE_HTTPONLY: bool = True
+    COOKIE_SAMESITE: str = "lax"  # "strict", "lax", or "none"
+    COOKIE_DOMAIN: str = None  # Set to your domain in production
     
     # CORS Settings
     BACKEND_CORS_ORIGINS: List[str] = [

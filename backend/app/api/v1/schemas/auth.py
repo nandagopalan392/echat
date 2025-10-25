@@ -20,21 +20,28 @@ class LoginRequest(BaseModel):
 
 
 class LoginResponse(BaseModel):
-    """Login response schema"""
-    access_token: str
+    """
+    Login response schema
+    
+    Note: access_token is deprecated and only provided for backward compatibility.
+    Authentication should use httpOnly cookies instead.
+    """
+    access_token: Optional[str] = Field(None, description="Deprecated: Use httpOnly cookies instead")
     token_type: str = "bearer"
     username: str
     is_admin: bool = False
     role: str = "Engineer"
+    expires_in: int = Field(..., description="Token expiration time in seconds")
     
     class Config:
         json_schema_extra = {
             "example": {
-                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "access_token": "Deprecated - tokens are in httpOnly cookies",
                 "token_type": "bearer",
                 "username": "admin",
                 "is_admin": True,
-                "role": "Admin"
+                "role": "Admin",
+                "expires_in": 3600
             }
         }
 
@@ -71,3 +78,20 @@ class RegisterResponse(BaseModel):
                 "role": "Engineer"
             }
         }
+
+
+class TokenRefreshResponse(BaseModel):
+    """Token refresh response schema"""
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = Field(..., description="Token expiration time in seconds")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+                "token_type": "bearer",
+                "expires_in": 3600
+            }
+        }
+
