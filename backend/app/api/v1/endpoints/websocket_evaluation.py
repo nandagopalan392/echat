@@ -13,7 +13,7 @@ import redis
 
 from app.core.websocket import get_evaluation_manager
 from app.workers.tasks.evaluation_tasks import EvaluationTaskStatus
-from app.dependencies import authenticate_websocket_token, authenticate_websocket_cookie
+from app.dependencies import authenticate_websocket_token, authenticate_websocket_cookie, authenticate_websocket_admin_token, authenticate_websocket_admin_cookie
 from app.db.base import DatabaseConnection
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ async def websocket_evaluation_updates(
     """
     WebSocket endpoint for real-time evaluation progress updates with auto-reconnection support
     
-    **Authentication:** Supports both cookie-based (preferred) and query parameter authentication
+    **Authentication:** Admin only - Supports both cookie-based (preferred) and query parameter authentication
     - Cookie: access_token cookie (automatic, secure)
     - Query param: ?token=your_jwt_token (backward compatibility)
     
@@ -53,19 +53,19 @@ async def websocket_evaluation_updates(
     """
     db = DatabaseConnection()
     
-    # Try cookie authentication first (preferred)
-    user = await authenticate_websocket_cookie(websocket, db)
+    # Try cookie authentication first (preferred) - ADMIN ONLY
+    admin_user = await authenticate_websocket_admin_cookie(websocket, db)
     
-    # Fallback to query parameter authentication
-    if not user and token:
-        user = await authenticate_websocket_token(token, db)
+    # Fallback to query parameter authentication - ADMIN ONLY
+    if not admin_user and token:
+        admin_user = await authenticate_websocket_admin_token(token, db)
     
-    # Authentication required
-    if not user:
-        await websocket.close(code=1008, reason="Authentication required: provide access_token cookie or token parameter")
+    # Admin authentication required
+    if not admin_user:
+        await websocket.close(code=1008, reason="Admin authentication required: provide access_token cookie or token parameter")
         return
     
-    logger.info(f"WebSocket authenticated for user: {user.username}, task: {task_id}")
+    logger.info(f"WebSocket authenticated for admin user: {admin_user.username}, task: {task_id}")
     
     manager = get_evaluation_manager()
     await manager.connect(websocket, task_id)

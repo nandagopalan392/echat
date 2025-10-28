@@ -1,6 +1,6 @@
 """
-TruLens-inspired evaluation system for RAG applications.
-This module provides comprehensive evaluation metrics for chat responses including
+Comprehensive evaluation system for RAG applications.
+This module provides evaluation metrics for chat responses including
 groundedness, context relevance, and answer relevance using LLM-based evaluation.
 """
 
@@ -96,7 +96,7 @@ class OllamaProvider(LLMProvider):
             raise
 
 class EvaluationPrompts:
-    """Prompts for different evaluation metrics based on TruLens patterns"""
+    """Prompts for different evaluation metrics"""
     
     GROUNDEDNESS_SYSTEM = """You are a GROUNDEDNESS grader; providing the extent to which an ANSWER is grounded in the provided CONTEXT. Respond only as a number from 0 to 10 where 0 is the lowest and 10 is the highest based on the Criteria below.
 
@@ -163,8 +163,8 @@ Supporting Evidence: [Provide specific evidence from the text that supports your
 
 Score: [Provide your score from 0 to 10]"""
 
-class TruLensEvaluator:
-    """Main evaluator class implementing TruLens-style evaluation metrics"""
+class RAGMetricsEvaluator:
+    """Main evaluator class implementing RAG evaluation metrics"""
     
     def __init__(self, llm_provider: LLMProvider):
         self.llm_provider = llm_provider
@@ -364,21 +364,21 @@ class TruLensEvaluator:
         Returns:
             RAGTriadResult containing all three evaluations
         """
-        print(f"🚀 TruLensEvaluator: Starting rag_triad for question: {question[:50]}...")
-        logger.info(f"🚀 TruLensEvaluator: Starting rag_triad for question: {question[:50]}...")
+        print(f"🚀 RAGMetricsEvaluator: Starting rag_triad for question: {question[:50]}...")
+        logger.info(f"🚀 RAGMetricsEvaluator: Starting rag_triad for question: {question[:50]}...")
         start_time = time.time()
         
         try:
             # Evaluate groundedness
-            print(f"🚀 TruLensEvaluator: Starting groundedness evaluation")
-            logger.info(f"🚀 TruLensEvaluator: Starting groundedness evaluation")
+            print(f"🚀 RAGMetricsEvaluator: Starting groundedness evaluation")
+            logger.info(f"🚀 RAGMetricsEvaluator: Starting groundedness evaluation")
             groundedness_score, groundedness_reasons = self.groundedness_measure_with_cot_reasons(
                 source=context,
                 statement=answer,
                 temperature=temperature
             )
-            print(f"🚀 TruLensEvaluator: Groundedness score: {groundedness_score}")
-            logger.info(f"🚀 TruLensEvaluator: Groundedness score: {groundedness_score}")
+            print(f"🚀 RAGMetricsEvaluator: Groundedness score: {groundedness_score}")
+            logger.info(f"🚀 RAGMetricsEvaluator: Groundedness score: {groundedness_score}")
             
             groundedness_result = EvaluationResult(
                 metric=EvaluationMetric.GROUNDEDNESS,
@@ -461,7 +461,7 @@ class TruLensEvaluator:
 class EvaluationManager:
     """Manager class for handling evaluation workflows and storage"""
     
-    def __init__(self, evaluator: TruLensEvaluator):
+    def __init__(self, evaluator: RAGMetricsEvaluator):
         self.evaluator = evaluator
         self.evaluation_history: List[RAGTriadResult] = []
         self.max_history = evaluation_config.MAX_EVALUATION_HISTORY
@@ -596,7 +596,7 @@ def get_evaluation_manager() -> EvaluationManager:
     if _evaluation_manager is None:
         # Initialize with Ollama provider (can be configured)
         ollama_provider = OllamaProvider()
-        evaluator = TruLensEvaluator(ollama_provider)
+        evaluator = RAGMetricsEvaluator(ollama_provider)
         _evaluation_manager = EvaluationManager(evaluator)
     
     return _evaluation_manager
@@ -650,7 +650,7 @@ class RAGEvaluator:
     Simplified RAG evaluator class for use in background tasks.
     
     This class provides a simplified interface that's compatible with
-    the Celery task system while reusing the core TruLensEvaluator logic.
+    the Celery task system while reusing the core RAGMetricsEvaluator logic.
     """
     
     def __init__(self, llm_provider: Optional[LLMProvider] = None):
@@ -660,9 +660,9 @@ class RAGEvaluator:
             print("🚀 RAGEvaluator: Creating OllamaProvider")
             logger.info("🚀 RAGEvaluator: Creating OllamaProvider")
             llm_provider = OllamaProvider()
-        print("🚀 RAGEvaluator: Creating TruLensEvaluator")
-        logger.info("🚀 RAGEvaluator: Creating TruLensEvaluator")
-        self.evaluator = TruLensEvaluator(llm_provider)
+        print("🚀 RAGEvaluator: Creating RAGMetricsEvaluator")
+        logger.info("🚀 RAGEvaluator: Creating RAGMetricsEvaluator")
+        self.evaluator = RAGMetricsEvaluator(llm_provider)
         print("🚀 RAGEvaluator: RAGEvaluator initialization complete")
         logger.info("🚀 RAGEvaluator: RAGEvaluator initialization complete")
     

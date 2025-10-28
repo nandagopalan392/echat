@@ -26,7 +26,7 @@ router = APIRouter()
 
 @router.get("/profile", response_model=Dict[str, UserProfileResponse])
 async def get_user_profile(
-    current_user: User = Depends(get_current_user),
+    current_admin: User = Depends(get_current_admin_user),
     user_repo: UserRepository = Depends(get_user_repository)
 ):
     """
@@ -67,7 +67,7 @@ async def get_user_profile(
 
 @router.get("/activities", response_model=Dict[str, List[ActivityResponse]])
 async def get_user_activities(
-    current_user: User = Depends(get_current_user),
+    current_admin: User = Depends(get_current_admin_user),
     db: DatabaseConnection = Depends(get_db)
 ):
     """
@@ -151,7 +151,7 @@ async def get_user_activities(
 
 @router.get("/stats", response_model=Dict[str, UserStatsResponse])
 async def get_user_stats_general(
-    current_user: User = Depends(get_current_user),
+    current_admin: User = Depends(get_current_admin_user),
     db: DatabaseConnection = Depends(get_db)
 ):
     """

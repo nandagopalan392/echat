@@ -29,7 +29,7 @@ model_service = ModelService()
 
 
 @router.get("/status")
-async def get_model_status(current_user: dict = Depends(get_current_user)):
+async def get_model_status(current_admin: dict = Depends(get_current_admin_user)):
     """
     Get status of models in Ollama.
     
@@ -44,7 +44,7 @@ async def get_model_status(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/available")
-async def get_available_models(current_user: dict = Depends(get_current_user)):
+async def get_available_models(current_admin: dict = Depends(get_current_admin_user)):
     """
     Get list of available models from both local Ollama and Ollama library.
     
@@ -59,7 +59,7 @@ async def get_available_models(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/current")
-async def get_current_models(current_user: dict = Depends(get_current_user)):
+async def get_current_models(current_admin: dict = Depends(get_current_admin_user)):
     """
     Get currently configured models and their parameters.
     
@@ -76,7 +76,7 @@ async def get_current_models(current_user: dict = Depends(get_current_user)):
 @router.get("/providers")
 async def get_model_providers(
     provider: str = "all",
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Get available models from different providers (Ollama, HuggingFace).
@@ -97,7 +97,7 @@ async def get_model_providers(
 @router.post("/check-gpu")
 async def check_gpu_compatibility(
     request: dict,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Check GPU compatibility for specified models.
@@ -130,7 +130,7 @@ async def check_gpu_compatibility(
 @router.post("/settings")
 async def update_models_settings(
     request: dict,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Update model settings with full validation and GPU compatibility checks.
@@ -200,7 +200,7 @@ async def update_models_settings(
 @router.post("/download-huggingface")
 async def download_huggingface_model(
     request: dict,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Download and validate HuggingFace model before adding to settings.
@@ -241,7 +241,7 @@ async def download_huggingface_model(
 @router.post("/simple-settings")
 async def update_simple_models_settings(
     request: dict,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Update model settings with simplified validation - for basic UI.

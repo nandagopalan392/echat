@@ -544,6 +544,24 @@ def batch_evaluate_conversations(
     total_conversations = len(conversation_ids)
     
     try:
+        # Initialize database connection
+        from app.db import DatabaseConnection
+        from app.db.repositories import EvaluationRepository
+        
+        db = DatabaseConnection()
+        eval_repo = EvaluationRepository(db)
+        
+        # Create task record
+        try:
+            eval_repo.create_task(
+                task_id=task_id,
+                dataset_id=None,
+                total_queries=total_conversations
+            )
+            eval_repo.update_task_progress(task_id, 0, "STARTED")
+        except Exception as db_error:
+            logger.error(f"Failed to create task record: {db_error}")
+        
         publish_evaluation_update(task_id, EvaluationTaskStatus.STARTED, {
             "message": f"Starting batch evaluation of {total_conversations} conversations",
             "total_conversations": total_conversations
@@ -602,12 +620,19 @@ def batch_evaluate_conversations(
             "failures": failed_evaluations
         }
         
-        # Store batch result
+        # Store batch result in Redis for quick access
         redis_client.setex(
             f"batch_evaluation_result:{task_id}",
             3600,
             json.dumps(batch_result)
         )
+        
+        # Save task completion to database
+        try:
+            eval_repo.complete_task(task_id, status='completed')
+            logger.info(f"Batch evaluation task {task_id} completed and saved to database")
+        except Exception as db_error:
+            logger.error(f"Failed to save batch evaluation completion: {db_error}")
         
         publish_evaluation_update(task_id, EvaluationTaskStatus.SUCCESS, {
             "message": "Batch evaluation completed",
@@ -620,6 +645,12 @@ def batch_evaluate_conversations(
         
     except Exception as e:
         logger.error(f"Batch evaluation task {task_id} failed: {e}")
+        
+        # Save task failure to database
+        try:
+            eval_repo.complete_task(task_id, status='failed', error_message=str(e))
+        except Exception as db_error:
+            logger.error(f"Failed to save batch evaluation failure: {db_error}")
         
         publish_evaluation_update(task_id, EvaluationTaskStatus.FAILURE, {
             "message": f"Batch evaluation failed: {str(e)}",
@@ -755,28 +786,14 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
         
         # Update database to mark task as started
         try:
-            # Create evaluation task record
-            metadata = {
-                "dataset_id": dataset_id,
-                "dataset_name": dataset_name,
-                "model_id": model_id,
-                "model_name": model_id,  # For now, use model_id as model_name
-                "retrieval_config": retrieval_config,
-                "test_type": "dataset_evaluation"
-            }
-            
-            chat_db.create_evaluation_task(
+            # Create evaluation task record in database
+            eval_repo.create_task(
                 task_id=task_id,
-                task_type="dataset_evaluation",  # Changed from "dataset" to be more specific
-                query="Dataset evaluation",
-                response="",
-                context_chunks=0,
-                conversation_id=f"dataset_eval_{dataset_id}_{int(time.time()*1000)}",
-                user_id=user_id,
-                metadata=metadata
+                dataset_id=dataset_id,
+                total_queries=0  # Will be updated later
             )
             
-            chat_db.update_evaluation_task_status(task_id, "STARTED")
+            eval_repo.update_task_progress(task_id, 0, "STARTED")
             logger.info(f"🚀 DATABASE: Created and started task {task_id}")
         except Exception as db_error:
             logger.error(f"🚀 DATABASE ERROR: Failed to create task: {db_error}")
@@ -853,16 +870,16 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
         
         logger.info(f"🚀 RAG: Initializing RAG system with model {model_id}")
         
-        # Import RAG components
-        from rag import get_chatpdf_instance
+        # Import RAG service (new structure)
+        from app.services.rag_service import get_rag_service
         
-        # Get RAG instance
-        rag_instance = get_chatpdf_instance()
+        # Get RAG service instance
+        rag_service = get_rag_service()
         
         # Update retrieval configuration if needed
         if retrieval_config:
             logger.info(f"🚀 RAG: Applying retrieval config: {retrieval_config}")
-            # The ChatPDF instance uses default retrieval configuration
+            # The RAG service uses default retrieval configuration
             # You can add specific config application here if needed
         
         # Initialize evaluation system
@@ -895,14 +912,14 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
                 # Use RAG system to generate real answer and context
                 logger.info(f"🚀 RAG: Generating answer for question {i+1}")
                 
-                # Get answer from RAG system
-                response = rag_instance.query(
+                # Get answer and context from RAG service
+                # The query method returns (answer, docs)
+                response, context_docs = rag_service.query(
                     question=query,
-                    style="standard"
+                    k=4  # Number of context chunks to retrieve
                 )
                 
-                # Get context from the last query
-                context_docs = getattr(rag_instance, 'last_context_docs', [])
+                # Extract context from retrieved documents
                 context_chunks = []
                 context = ""
                 
@@ -1008,31 +1025,26 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
         
         # Update database with results
         try:
-            if chat_db:
-                # Update metadata with total questions
-                updated_metadata = {
-                    "dataset_id": dataset_id,
-                    "dataset_name": dataset_name,
-                    "model_id": model_id,
-                    "model_name": model_id,
-                    "retrieval_config": retrieval_config,
-                    "test_type": "dataset_evaluation",
-                    "total_questions": total_questions
-                }
-                chat_db.update_evaluation_task_metadata(task_id, updated_metadata)
-                
-                chat_db.update_evaluation_task_status(
-                    task_id=task_id,
-                    status="SUCCESS",
-                    groundedness_score=avg_groundedness,
-                    answer_relevance_score=avg_answer_relevance,
-                    context_relevance_score=avg_context_relevance,
-                    overall_score=avg_overall,
-                    evaluation_time=time.time() - start_time
+            # Save each individual evaluation result to database
+            for result_data in valid_results:
+                eval_repo.save_evaluation_result(
+                    dataset_id=dataset_id,
+                    query=result_data['question'],
+                    expected_answer="",  # Not available in this context
+                    actual_answer=result_data['response'],
+                    context=str(result_data.get('context_chunks', 0)),
+                    groundedness_score=result_data['evaluation']['groundedness']['score'],
+                    relevance_score=result_data['evaluation']['answer_relevance']['score'],
+                    quality_score=result_data['evaluation']['overall_score'],
+                    latency_ms=int(result_data['evaluation']['evaluation_time_seconds'] * 1000),
+                    model_used=model_id
                 )
-                logger.info(f"🚀 DATABASE: Updated task {task_id} with results")
+            
+            # Complete the task with success status
+            eval_repo.complete_task(task_id, status='completed')
+            logger.info(f"🚀 DATABASE: Saved {len(valid_results)} evaluation results and completed task {task_id}")
         except Exception as db_error:
-            logger.error(f"🚀 DATABASE ERROR: Failed to update results: {db_error}")
+            logger.error(f"🚀 DATABASE ERROR: Failed to save results: {db_error}")
         
         # Final progress update
         publish_evaluation_update(task_id, EvaluationTaskStatus.SUCCESS, {
@@ -1058,10 +1070,10 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
         
         # Update database with error
         try:
-            if chat_db:
-                chat_db.update_evaluation_task_status(task_id, "FAILURE", error_message=error_msg)
-        except:
-            pass
+            eval_repo.complete_task(task_id, status='failed', error_message=error_msg)
+            logger.info(f"🚀 DATABASE: Marked task {task_id} as failed")
+        except Exception as db_error:
+            logger.error(f"🚀 DATABASE ERROR: Failed to update task status: {db_error}")
         
         # Publish error update
         publish_evaluation_update(task_id, EvaluationTaskStatus.FAILURE, {
@@ -1189,17 +1201,16 @@ def create_dataset_background(
             logger.info(f"Using existing dataset record with ID: {db_dataset_id}")
         else:
             try:
-                db_dataset_id = chat_db.create_evaluation_dataset(
+                # Create new dataset in database
+                db_dataset_id = eval_repo.create_dataset(
                     name=name,
                     description=description,
-                    document_count=len(documents),
                     created_by=user_id
                 )
                 logger.info(f"Created new dataset record in database with ID: {db_dataset_id}")
-            except ValueError as e:
-                raise ValueError(f"Dataset creation failed: {str(e)}")
             except Exception as e:
-                raise ValueError(f"Database error: {str(e)}")
+                logger.error(f"Failed to create dataset in database: {e}")
+                raise ValueError(f"Dataset creation failed: {str(e)}")
         
         # Initialize synchronous dataset generation (following Sentry pattern)
         publish_evaluation_update(task_id, EvaluationTaskStatus.PROGRESS, {
@@ -1361,12 +1372,13 @@ def create_dataset_background(
         
         # Update database record with file path and final stats
         try:
-            chat_db.update_evaluation_dataset_status(
+            eval_repo.update_dataset(
                 dataset_id=db_dataset_id,
-                status='Ready',
                 file_path=file_path,
-                question_count=question_count
+                question_count=question_count,
+                status='completed'
             )
+            logger.info(f"📋 DATABASE: Updated dataset {db_dataset_id} with {question_count} questions")
         except Exception as e:
             logger.error(f"Failed to update dataset record: {e}")
         
@@ -1415,10 +1427,11 @@ def create_dataset_background(
         # Update dataset status to error if we have the dataset_id
         if 'db_dataset_id' in locals():
             try:
-                chat_db.update_evaluation_dataset_status(
+                eval_repo.update_dataset(
                     dataset_id=db_dataset_id,
-                    status='Error'
+                    status='failed'
                 )
+                logger.info(f"📋 DATABASE: Marked dataset {db_dataset_id} as failed")
             except Exception as update_error:
                 logger.error(f"Failed to update dataset status to Error: {update_error}")
         

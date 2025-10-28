@@ -1,5 +1,5 @@
 """
-Dataset Generator for TruLens Evaluation
+Dataset Generator for RAG Evaluation
 Generates evaluation datasets from documents using Ollama LLMs
 """
 

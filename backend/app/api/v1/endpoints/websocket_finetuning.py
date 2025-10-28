@@ -8,7 +8,7 @@ from typing import Optional
 
 from app.core.websocket import get_finetuning_manager
 from app.db.repositories.experiment_repository import get_experiment_repository, ExperimentStatus
-from app.dependencies import authenticate_websocket_token, authenticate_websocket_cookie
+from app.dependencies import authenticate_websocket_token, authenticate_websocket_cookie, authenticate_websocket_admin_token, authenticate_websocket_admin_cookie
 from app.db.base import DatabaseConnection
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ async def websocket_experiment_progress(
     """
     WebSocket endpoint for real-time fine-tuning experiment progress updates
     
-    **Authentication:** Supports both cookie-based (preferred) and query parameter authentication
+    **Authentication:** Admin only - Supports both cookie-based (preferred) and query parameter authentication
     - Cookie: access_token cookie (automatic, secure)
     - Query param: ?token=your_jwt_token (backward compatibility)
     
@@ -39,19 +39,19 @@ async def websocket_experiment_progress(
     """
     db = DatabaseConnection()
     
-    # Try cookie authentication first (preferred)
-    user = await authenticate_websocket_cookie(websocket, db)
+    # Try cookie authentication first (preferred) - ADMIN ONLY
+    admin_user = await authenticate_websocket_admin_cookie(websocket, db)
     
-    # Fallback to query parameter authentication
-    if not user and token:
-        user = await authenticate_websocket_token(token, db)
+    # Fallback to query parameter authentication - ADMIN ONLY
+    if not admin_user and token:
+        admin_user = await authenticate_websocket_admin_token(token, db)
     
-    # Authentication required
-    if not user:
-        await websocket.close(code=1008, reason="Authentication required: provide access_token cookie or token parameter")
+    # Admin authentication required
+    if not admin_user:
+        await websocket.close(code=1008, reason="Admin authentication required: provide access_token cookie or token parameter")
         return
     
-    logger.info(f"WebSocket authenticated for user: {user.username}, experiment: {experiment_id}")
+    logger.info(f"WebSocket authenticated for admin user: {admin_user.username}, experiment: {experiment_id}")
     
     manager = get_finetuning_manager()
     await manager.connect(websocket, experiment_id)

@@ -1,5 +1,5 @@
 """
-Configuration for the TruLens-based evaluation system
+Configuration for the RAG evaluation system
 """
 
 import os

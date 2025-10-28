@@ -34,7 +34,7 @@ def get_chunking_service(
 
 @router.get("/methods", response_model=ChunkingMethodsResponse)
 async def get_chunking_methods(
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: ChunkingConfigService = Depends(get_chunking_service)
 ):
     """
@@ -67,7 +67,7 @@ async def get_chunking_methods(
 @router.get("/config/{method}", response_model=ChunkingConfigResponse)
 async def get_chunking_config(
     method: str,
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: ChunkingConfigService = Depends(get_chunking_service)
 ):
     """
@@ -102,7 +102,7 @@ async def get_chunking_config(
 async def update_chunking_config(
     method: str,
     config_data: Dict[str, Any],
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: ChunkingConfigService = Depends(get_chunking_service)
 ):
     """
@@ -143,7 +143,7 @@ async def update_chunking_config(
 @router.get("/optimal/{file_extension}", response_model=OptimalChunkingMethodResponse)
 async def get_optimal_chunking_method(
     file_extension: str,
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: ChunkingConfigService = Depends(get_chunking_service)
 ):
     """

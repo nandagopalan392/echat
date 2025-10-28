@@ -40,7 +40,7 @@ finetuning_service = FinetuningService()
 # ==================== Model Endpoints ====================
 
 @router.get("/models", response_model=ModelListResponse)
-async def get_available_models(current_user: Dict = Depends(get_current_user)):
+async def get_available_models(current_admin: dict = Depends(get_current_admin_user)):
     """
     Get list of available models for fine-tuning
     """
@@ -82,7 +82,7 @@ async def create_experiment(
     greater_is_better: bool = Form(False),
     evaluation_strategy: str = Form("steps"),
     save_strategy: str = Form("steps"),
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Create a new fine-tuning experiment
@@ -159,7 +159,7 @@ async def create_experiment(
 @router.get("/experiments", response_model=ExperimentListResponse)
 async def get_user_experiments(
     limit: int = 50,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Get experiments for the current user
@@ -177,7 +177,7 @@ async def get_user_experiments(
 @router.get("/experiments/{experiment_id}")
 async def get_experiment_details(
     experiment_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Get detailed information about an experiment
@@ -199,7 +199,7 @@ async def get_experiment_details(
 @router.post("/experiments/{experiment_id}/start", response_model=StartTrainingResponse)
 async def start_experiment(
     experiment_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Start training for an experiment
@@ -229,7 +229,7 @@ async def start_experiment(
 @router.post("/experiments/{experiment_id}/stop")
 async def stop_experiment(
     experiment_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Stop training for an experiment
@@ -256,7 +256,7 @@ async def stop_experiment(
 @router.get("/experiments/{experiment_id}/logs", response_model=TrainingLogsResponse)
 async def get_experiment_logs(
     experiment_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Get training logs for an experiment
@@ -278,7 +278,7 @@ async def get_experiment_logs(
 @router.get("/experiments/{experiment_id}/metrics", response_model=TrainingMetricsResponse)
 async def get_experiment_metrics(
     experiment_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Get live training metrics for an experiment
@@ -300,7 +300,7 @@ async def get_experiment_metrics(
 @router.put("/experiments/{experiment_id}")
 async def update_experiment(
     experiment_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Update experiment details
@@ -324,7 +324,7 @@ async def update_experiment(
 @router.delete("/experiments/{experiment_id}", response_model=DeleteResponse)
 async def delete_experiment(
     experiment_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Delete an experiment
@@ -348,7 +348,7 @@ async def delete_experiment(
 # ==================== Dataset Endpoints ====================
 
 @router.get("/datasets", response_model=DatasetListResponse)
-async def get_user_datasets(current_user: dict = Depends(get_current_user)):
+async def get_user_datasets(current_admin: dict = Depends(get_current_admin_user)):
     """
     Get datasets for the current user
     """
@@ -365,7 +365,7 @@ async def get_user_datasets(current_user: dict = Depends(get_current_user)):
 @router.post("/validate-dataset")
 async def validate_dataset_file(
     dataset: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Validate a dataset file without creating an experiment
@@ -410,7 +410,7 @@ async def upload_dataset(
     dataset: UploadFile = File(...),
     name: str = Form(...),
     description: str = Form(""),
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Upload a dataset file for fine-tuning
@@ -434,7 +434,7 @@ async def upload_dataset(
 @router.post("/datasets/create", response_model=DatasetCreateResponse)
 async def create_finetuning_dataset(
     request: DatasetCreateRequest,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Create a new fine-tuning dataset from documents using Q-C-A format
@@ -468,7 +468,7 @@ async def create_finetuning_dataset(
 
 @router.post("/datasets/convert")
 async def convert_dataset(
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Convert dataset between formats
@@ -488,7 +488,7 @@ async def convert_dataset(
 @router.get("/datasets/create/{dataset_id}/progress")
 async def get_dataset_creation_progress(
     dataset_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Get progress of dataset creation
@@ -510,7 +510,7 @@ async def get_dataset_creation_progress(
 @router.get("/datasets/{dataset_id}", response_model=DatasetDetailsResponse)
 async def get_dataset_details(
     dataset_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Get detailed information about a fine-tuning dataset
@@ -529,7 +529,7 @@ async def get_dataset_details(
 @router.get("/datasets/{dataset_id}/download")
 async def download_dataset(
     dataset_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Download a fine-tuning dataset in JSONL format
@@ -556,7 +556,7 @@ async def download_dataset(
 @router.delete("/datasets/{dataset_id}")
 async def delete_dataset(
     dataset_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_admin: dict = Depends(get_current_admin_user)
 ):
     """
     Delete a fine-tuning dataset

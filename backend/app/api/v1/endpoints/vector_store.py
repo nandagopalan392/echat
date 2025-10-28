@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api", tags=["vector-store"])
 
 @router.get("/vector-store/stats")
 async def get_vector_store_stats(
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     vector_store_service: VectorStoreService = Depends(get_vector_store_service)
 ) -> Dict[str, Any]:
     """
@@ -109,7 +109,7 @@ async def clear_vector_store(
 
 @router.get("/debug/collection-info")
 async def get_collection_debug_info(
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     vector_store_service: VectorStoreService = Depends(get_vector_store_service)
 ) -> Dict[str, Any]:
     """
@@ -160,7 +160,7 @@ async def get_collection_debug_info(
 
 @router.get("/vector-store/collections")
 async def get_collection_metadata(
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     vector_store_service: VectorStoreService = Depends(get_vector_store_service)
 ) -> Dict[str, Any]:
     """

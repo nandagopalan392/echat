@@ -1761,29 +1761,6 @@ export const evaluationApi = {
     // ========================================
     // BACKGROUND EVALUATION API ENDPOINTS
     // ========================================
-    
-    // Start async evaluation
-    startAsyncEvaluation: async (evaluationData) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/async`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                },
-                body: JSON.stringify(evaluationData)
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to start async evaluation: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error starting async evaluation:', error);
-            throw error;
-        }
-    },
 
     // Start dataset evaluation (new method)
     startDatasetEvaluation: async (datasetEvaluationData) => {
@@ -1804,95 +1781,6 @@ export const evaluationApi = {
             return await response.json();
         } catch (error) {
             console.error('Error starting dataset evaluation:', error);
-            throw error;
-        }
-    },
-
-    // Start batch evaluation
-    startBatchEvaluation: async (batchData) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/batch`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                },
-                body: JSON.stringify(batchData)
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to start batch evaluation: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error starting batch evaluation:', error);
-            throw error;
-        }
-    },
-
-    // Get task status
-    getTaskStatus: async (taskId) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/status/${taskId}`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to get task status: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error getting task status:', error);
-            throw error;
-        }
-    },
-
-    // Cancel evaluation task
-    cancelTask: async (taskId) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/task/${taskId}`, {
-                method: 'DELETE',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to cancel task: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error canceling task:', error);
-            throw error;
-        }
-    },
-
-    // Get queue status
-    getQueueStatus: async () => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/evaluate/queue/status`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to get queue status: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error getting queue status:', error);
             throw error;
         }
     },
@@ -1990,96 +1878,8 @@ export const evaluationApi = {
     },
 
     // ========================================
-    // LEGACY EVALUATION API ENDPOINTS
+    // DATASET MANAGEMENT API ENDPOINTS
     // ========================================
-
-    // Get current evaluation metrics
-    getMetrics: async (timeframe = '7d') => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/metrics?timeframe=${timeframe}`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to get evaluation metrics: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error getting evaluation metrics:', error);
-            throw error;
-        }
-    },
-
-    // Get historical evaluation data
-    getHistoricalMetrics: async (days = 30) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/historical?days=${days}`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to get historical metrics: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error getting historical metrics:', error);
-            throw error;
-        }
-    },
-
-    // Get latency distribution
-    getLatencyDistribution: async (timeframe = '7d') => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/latency-distribution?timeframe=${timeframe}`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to get latency distribution: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error getting latency distribution:', error);
-            throw error;
-        }
-    },
-
-    // Get quality breakdown
-    getQualityBreakdown: async (metric = 'answer_quality') => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/quality-breakdown?metric=${metric}`, {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to get quality breakdown: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error getting quality breakdown:', error);
-            throw error;
-        }
-    },
 
     // Get evaluation datasets
     getDatasets: async () => {
@@ -2248,32 +2048,6 @@ export const evaluationApi = {
             return await response.json();
         } catch (error) {
             console.error('Error getting dataset details:', error);
-            throw error;
-        }
-    },
-
-    // Run evaluation test case
-    runTestCase: async (datasetId, models) => {
-        try {
-            const response = await fetch(`${API_BASE_URL}/api/evaluation/test-cases/run`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...getAuthHeader()
-                },
-                body: JSON.stringify({
-                    dataset_id: datasetId,
-                    models: models
-                })
-            });
-
-            if (!response.ok) {
-                throw new Error(`Failed to run test case: ${response.status}`);
-            }
-
-            return await response.json();
-        } catch (error) {
-            console.error('Error running test case:', error);
             throw error;
         }
     },

@@ -33,7 +33,7 @@ def get_retrieval_service(
 
 @router.get("/config", response_model=RetrievalConfigResponse)
 async def get_retrieval_config(
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """
@@ -60,7 +60,7 @@ async def get_retrieval_config(
 async def update_retrieval_config(
     config_data: Dict[str, Any],
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """
@@ -108,7 +108,7 @@ async def update_retrieval_config(
 @router.get("/reranker-models", response_model=RerankerModelsResponse)
 async def get_available_reranker_models(
     provider: Optional[str] = None,
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """
@@ -152,7 +152,7 @@ async def get_available_reranker_models(
 @router.get("/reranker-download-status", response_model=RerankerDownloadStatus)
 async def get_reranker_download_status(
     model_name: str,
-    current_user: dict = Depends(get_current_user),
+    current_admin: dict = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """

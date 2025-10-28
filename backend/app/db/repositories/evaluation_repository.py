@@ -177,6 +177,42 @@ class EvaluationRepository:
             logger.error(f"Error updating dataset status: {e}")
             return False
     
+    def update_dataset(self, dataset_id: int, file_path: Optional[str] = None,
+                      question_count: Optional[int] = None, status: Optional[str] = None) -> bool:
+        """Update dataset with file path, question count, and/or status"""
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                now = datetime.now().isoformat()
+                
+                # Build dynamic update query based on provided parameters
+                updates = []
+                params = []
+                
+                if file_path is not None:
+                    updates.append("file_path = ?")
+                    params.append(file_path)
+                
+                if question_count is not None:
+                    updates.append("question_count = ?")
+                    params.append(question_count)
+                
+                if status is not None:
+                    updates.append("status = ?")
+                    params.append(status)
+                
+                updates.append("updated_at = ?")
+                params.append(now)
+                params.append(dataset_id)
+                
+                query = f"UPDATE evaluation_datasets SET {', '.join(updates)} WHERE id = ?"
+                cursor.execute(query, params)
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error updating dataset: {e}")
+            return False
+    
     def delete_dataset(self, dataset_id: int) -> bool:
         """Delete evaluation dataset"""
         try:

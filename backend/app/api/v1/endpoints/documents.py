@@ -95,7 +95,7 @@ async def upload_file(
 
 
 @router.get("/documents", response_model=DocumentListResponse)
-async def list_documents(current_user: User = Depends(get_current_user)):
+async def list_documents(current_admin: User = Depends(get_current_admin_user)):
     """
     List all documents with their ingestion status
     
@@ -114,7 +114,7 @@ async def list_documents(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/documents/ingested")
-async def list_ingested_documents(current_user: User = Depends(get_current_user)):
+async def list_ingested_documents(current_admin: User = Depends(get_current_admin_user)):
     """
     List documents ingested for current embedding model
     
@@ -368,7 +368,7 @@ async def cleanup_orphaned_documents(
 @router.post("/files/check-duplicate", response_model=DocumentCheckDuplicateResponse)
 async def check_file_duplicate(
     request: DocumentCheckDuplicateRequest,
-    current_user: User = Depends(get_current_user)
+    current_admin: User = Depends(get_current_admin_user)
 ):
     """
     Check if a file with the same filename and hash already exists
@@ -421,7 +421,7 @@ async def delete_file_by_filename(
 @router.get("/files/{filename}/chunks", response_model=DocumentChunksResponse)
 async def get_document_chunks(
     filename: str,
-    current_user: User = Depends(get_current_user)
+    current_admin: User = Depends(get_current_admin_user)
 ):
     """
     Get all chunks for a document by filename
@@ -449,7 +449,7 @@ async def get_document_chunks(
 async def get_document_image(
     document_id: int,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user)
+    current_admin: User = Depends(get_current_admin_user)
 ):
     """
     Serve document image if it's an image file
@@ -515,7 +515,7 @@ async def get_document_image(
 async def get_document_preview(
     document_id: int,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user)
+    current_admin: User = Depends(get_current_admin_user)
 ):
     """
     Get document preview content for side-by-side viewing
@@ -623,7 +623,7 @@ async def get_document_preview(
 async def get_document_raw(
     document_id: int,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user)
+    current_admin: User = Depends(get_current_admin_user)
 ):
     """
     Get raw document file for download or viewing
@@ -668,7 +668,7 @@ async def get_document_raw(
 @router.get("/upload-progress/{file_id}", response_model=UploadProgressResponse)
 async def get_upload_progress(
     file_id: str,
-    current_user: User = Depends(get_current_user)
+    current_admin: User = Depends(get_current_admin_user)
 ):
     """
     Get real-time upload progress for a specific file

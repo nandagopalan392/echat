@@ -245,3 +245,63 @@ async def authenticate_websocket_cookie(websocket, db: DatabaseConnection) -> Op
     except Exception as e:
         logger.error(f"WebSocket cookie authentication error: {e}")
         return None
+
+
+async def authenticate_websocket_admin_token(token: str, db: DatabaseConnection) -> Optional[User]:
+    """
+    Authenticate a WebSocket connection using a JWT token (admin only)
+    
+    Args:
+        token: JWT token from query parameter or header
+        db: Database session
+        
+    Returns:
+        Admin User object if authentication succeeds, None otherwise
+    """
+    try:
+        # First authenticate as regular user
+        user = await authenticate_websocket_token(token, db)
+        
+        if user is None:
+            return None
+        
+        # Check if user is admin
+        if not user.is_admin:
+            logger.warning(f"WebSocket admin authentication failed: User {user.username} is not an admin")
+            return None
+        
+        return user
+        
+    except Exception as e:
+        logger.error(f"WebSocket admin authentication error: {e}")
+        return None
+
+
+async def authenticate_websocket_admin_cookie(websocket, db: DatabaseConnection) -> Optional[User]:
+    """
+    Authenticate a WebSocket connection using access_token from cookie (admin only)
+    
+    Args:
+        websocket: WebSocket connection object
+        db: Database session
+        
+    Returns:
+        Admin User object if authentication succeeds, None otherwise
+    """
+    try:
+        # Extract cookies from WebSocket headers
+        cookies = websocket.cookies
+        token = cookies.get("access_token")
+        
+        if not token:
+            # Fallback to query parameter for backward compatibility
+            logger.debug("No access_token cookie found, checking query parameters")
+            return None
+        
+        # Use existing admin token authentication logic
+        return await authenticate_websocket_admin_token(token, db)
+        
+    except Exception as e:
+        logger.error(f"WebSocket admin cookie authentication error: {e}")
+        return None
+
