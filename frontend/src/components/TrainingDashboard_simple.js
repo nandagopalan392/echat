@@ -49,7 +49,7 @@ const TrainingDashboard = ({ experimentId, onClose }) => {
     // Fetch metrics function
     const fetchMetrics = async () => {
         try {
-            const response = await api.getFineTuningMetrics(experimentId);
+            const response = await api.getTrainingMetrics(experimentId);
             setMetrics(response);
         } catch (error) {
             console.error('Failed to fetch training metrics:', error);
@@ -120,10 +120,10 @@ const TrainingDashboard = ({ experimentId, onClose }) => {
         );
     }
 
-    const progressData = metrics?.progress || {};
-    const chartData = metrics?.metrics || {};
+    const progressData = metrics?.progress;
+    const chartData = metrics?.metrics;
     const logsData = metrics?.training_logs || [];
-    const systemData = metrics?.system || {};
+    const systemData = metrics?.system;
 
     return (
         <Box sx={{ width: '100%', height: '100%' }}>
@@ -244,35 +244,23 @@ const TrainingDashboard = ({ experimentId, onClose }) => {
             </Box>
 
             {/* Tab content */}
-            <Box sx={{ minHeight: 400 }}>
+            <Box>
                 {tabValue === 0 && (
-                    <Box sx={{ height: 400 }}>
+                    <Box>
                         <Typography variant="h6" gutterBottom>Training Loss Over Time</Typography>
-                        {chartData && Object.keys(chartData).length > 0 ? (
-                            <LossChart data={chartData} theme={theme} />
-                        ) : (
-                            <Typography variant="body2" color="text.secondary">No training loss data available</Typography>
-                        )}
+                        {chartData && <LossChart data={chartData} theme={theme} />}
                     </Box>
                 )}
                 {tabValue === 1 && (
-                    <Box sx={{ height: 400 }}>
+                    <Box>
                         <Typography variant="h6" gutterBottom>Learning Rate Schedule</Typography>
-                        {chartData && Object.keys(chartData).length > 0 ? (
-                            <LearningRateChart data={chartData} theme={theme} />
-                        ) : (
-                            <Typography variant="body2" color="text.secondary">No learning rate data available</Typography>
-                        )}
+                        {chartData && <LearningRateChart data={chartData} theme={theme} />}
                     </Box>
                 )}
                 {tabValue === 2 && (
                     <Box>
                         <Typography variant="h6" gutterBottom>System Metrics</Typography>
-                        {systemData && typeof systemData === 'object' && Object.keys(systemData).length > 0 ? (
-                            <SystemChart data={systemData} theme={theme} />
-                        ) : (
-                            <Typography variant="body2" color="text.secondary">No system metrics data available</Typography>
-                        )}
+                        {systemData && <SystemChart data={systemData} theme={theme} />}
                     </Box>
                 )}
                 {tabValue === 3 && (
