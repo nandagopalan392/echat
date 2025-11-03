@@ -3,6 +3,7 @@ Celery application configuration for background evaluation tasks
 """
 
 import os
+import redis
 from celery import Celery
 from celery.signals import worker_ready, worker_shutting_down
 import logging
@@ -13,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 # Celery configuration
 redis_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+
+# Redis client for task progress caching (same instance as Celery broker)
+redis_client = redis.Redis.from_url(redis_url)
 
 # Create Celery instance
 celery_app = Celery(
@@ -67,10 +71,6 @@ celery_app.conf.update(
             'priority': 3,  # Higher priority for evaluations
             'rate_limit': '5/m',  # Max 5 evaluations per minute
         },
-        'app.workers.tasks.evaluation_tasks.evaluate_rag_response': {
-            'priority': 1,  # Highest priority for single evaluations
-            'rate_limit': '10/m',  # Max 10 single evaluations per minute
-        },
         'app.workers.tasks.qca_tasks.create_qca_dataset_background': {
             'priority': 6,  # Medium-low priority for Q-C-A dataset creation
             'rate_limit': '1/m',  # Max 1 Q-C-A dataset creation per minute
@@ -80,13 +80,6 @@ celery_app.conf.update(
     # Monitoring
     worker_send_task_events=True,
     task_send_sent_event=True,
-    
-    # Task routing - use default queue for simplicity
-    # task_routes={
-    #     "evaluation_tasks.evaluate_rag_response": {"queue": "evaluation"},
-    #     "evaluation_tasks.batch_evaluate_conversations": {"queue": "evaluation"},
-    #     "evaluation_tasks.get_evaluation_status": {"queue": "evaluation"},
-    # },
     
     # Beat schedule (for periodic tasks if needed)
     beat_schedule={
@@ -104,6 +97,9 @@ def worker_ready_handler(sender=None, **kwargs):
 @worker_shutting_down.connect  
 def worker_shutting_down_handler(sender=None, **kwargs):
     logger.info("Celery worker shutting down")
+
+# Export commonly used objects for convenience
+__all__ = ['celery_app', 'redis_client']
 
 if __name__ == "__main__":
     celery_app.start()

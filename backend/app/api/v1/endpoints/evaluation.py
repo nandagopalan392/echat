@@ -118,17 +118,6 @@ async def get_evaluation_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/status/{task_id}")
-async def get_task_status_legacy(
-    task_id: str,
-    current_admin: Dict = Depends(get_current_admin_user)
-):
-    """
-    Legacy endpoint for task status (for backwards compatibility)
-    """
-    return await get_evaluation_status(task_id, current_admin)
-
-
 # ==================== Results Endpoints ====================
 
 @router.get("/evaluate/results/recent")
