@@ -2,11 +2,14 @@
 Document Management API Endpoints
 Handles document upload, ingestion, deletion, and retrieval
 """
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks, Response
 from fastapi.responses import FileResponse
 from typing import List, Dict, Any, Optional
 import logging
 import os
+import traceback
+import hashlib
+import json
 
 from app.dependencies import get_current_user, get_current_admin_user
 from app.db.models.user import User
@@ -95,18 +98,42 @@ async def upload_file(
 
 
 @router.get("/documents", response_model=DocumentListResponse)
-async def list_documents(current_admin: User = Depends(get_current_admin_user)):
+async def list_documents(
+    response: Response,
+    current_admin: User = Depends(get_current_admin_user)
+):
     """
     List all documents with their ingestion status
     
     Requires authentication to view documents.
     """
     try:
+        # Prevent caching to ensure fresh data
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        
         doc_service = get_document_service()
         documents = doc_service.get_all_documents()
-        return DocumentListResponse(documents=documents)
+        
+        # Generate ETag based on document data to help frontend detect changes
+        etag_data = json.dumps([{
+            'id': d.get('document_id'),
+            'status': d.get('status'),
+            'last_modified': str(d.get('last_modified', d.get('upload_date')))
+        } for d in documents], sort_keys=True)
+        etag = hashlib.md5(etag_data.encode()).hexdigest()
+        response.headers["ETag"] = f'"{etag}"'
+        
+        logger.info(f"📤 Returning {len(documents)} documents to frontend")
+        if documents:
+            logger.info(f"📤 Sample document data: {documents[0]}")
+        response_data = DocumentListResponse(documents=documents)
+        logger.info(f"📤 Pydantic response created successfully with {len(response_data.documents)} documents")
+        return response_data
     except Exception as e:
         logger.error(f"Error listing documents: {str(e)}")
+        logger.error(f"Error traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -255,18 +282,20 @@ async def delete_document(
     Delete a document by ID (admin only)
     
     Removes the document from storage and vector database.
+    This endpoint is idempotent - returns success even if document is already deleted.
     """
     try:
         doc_service = get_document_service()
         success = doc_service.delete_document(document_id)
         
+        # Return success regardless of whether document existed
+        # This makes the endpoint idempotent and prevents retry loops
         if success:
             return MessageResponse(message=f"Document {document_id} deleted successfully")
         else:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Document not found"
-            )
+            # Document already deleted or doesn't exist - still return 200
+            logger.info(f"Delete request for document {document_id} - already deleted or not found")
+            return MessageResponse(message=f"Document {document_id} already deleted")
     except HTTPException:
         raise
     except Exception as e:

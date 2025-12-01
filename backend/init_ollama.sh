@@ -125,12 +125,13 @@ else
     echo "Monitoring disabled by environment variable"
 fi
 
-# Test chatbot initialization before starting the server
-echo "Testing chatbot initialization..."
-python -c "from rag import get_chatpdf_instance; instance = get_chatpdf_instance(); print('ChatPDF instance created successfully')"
-if [ $? -ne 0 ]; then
-    echo "WARNING: Chatbot initialization test failed, but continuing anyway..."
-fi
+# DISABLED: Old ChatPDF initialization (replaced by new RAGEngine in app/core/rag/rag_engine.py)
+# Test chatbot initialization is now handled by main.py during FastAPI startup
+# echo "Testing chatbot initialization..."
+# python -c "from rag import get_chatpdf_instance; instance = get_chatpdf_instance(); print('ChatPDF instance created successfully')"
+# if [ $? -ne 0 ]; then
+#     echo "WARNING: Chatbot initialization test failed, but continuing anyway..."
+# fi
 
 # Start the server
 export HOST=${HOST:-0.0.0.0}

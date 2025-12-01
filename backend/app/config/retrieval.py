@@ -122,21 +122,21 @@ class RetrievalConfig:
 class RetrievalConfigManager:
     """Manager for retrieval configurations"""
     
-    def __init__(self, config_dir: str = "/app/data/retrieval_configs", document_repository=None):
+    def __init__(self, config_dir: str = "/app/data/retrieval_configs", config_repository=None):
         self.config_dir = Path(config_dir)
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.default_config = self._load_default_config()
         
         # Use injected repository or import from app structure
-        if document_repository:
-            self.db = document_repository
+        if config_repository:
+            self.db = config_repository
         else:
             try:
-                from app.db.repositories import DocumentRepository
+                from app.db.repositories import ConfigRepository
                 from app.db import DatabaseConnection
-                self.db = DocumentRepository(DatabaseConnection())
+                self.db = ConfigRepository(DatabaseConnection())
             except ImportError:
-                logger.warning("DocumentRepository not available, using file-based config only")
+                logger.warning("ConfigRepository not available, using file-based config only")
                 self.db = None
     
     def _load_default_config(self) -> RetrievalConfig:
@@ -158,7 +158,7 @@ class RetrievalConfigManager:
         # Try to load user-specific config from database first
         if user_id and self.db:
             try:
-                user_config_data = self.db.get_user_retrieval_config(user_id)
+                user_config_data = self.db.get_retrieval_config(user_id)  # Fixed method name
                 if user_config_data:
                     return RetrievalConfig.from_dict(user_config_data)
             except Exception as e:
@@ -180,10 +180,10 @@ class RetrievalConfigManager:
         """Save retrieval configuration"""
         try:
             # Save to database if available
-            if user_id and self.db:
+            if self.db:
                 try:
-                    self.db.save_user_retrieval_config(user_id, config.to_dict())
-                    logger.info(f"Saved retrieval config to database for user {user_id}")
+                    self.db.save_retrieval_config(config.to_dict(), user_id)  # Fixed method name and argument order
+                    logger.info(f"Saved retrieval config to database for user {user_id or 'default'}")
                 except Exception as e:
                     logger.warning(f"Could not save to database: {e}")
             

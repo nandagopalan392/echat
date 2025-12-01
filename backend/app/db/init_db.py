@@ -4,6 +4,7 @@ Database Initialization Module
 Handles database schema creation and initial data seeding.
 Migrated from chat_db.py init_db() method to clean architecture.
 """
+import os
 import sqlite3
 import hashlib
 import logging
@@ -26,15 +27,27 @@ class DatabaseInitializer:
             db_path: Optional path to database file. If None, uses settings.
         """
         if db_path is None:
-            db_dir = Path(settings.SQLITE_DB_PATH).parent
-            db_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = str(db_dir / 'main.db')  # Main application database
+            self.db_path = settings.SQLITE_DB_PATH
         else:
             self.db_path = db_path
         
         # Ensure directory exists with proper permissions
-        db_dir = Path(self.db_path).parent
-        db_dir.mkdir(parents=True, exist_ok=True)
+        db_file = Path(self.db_path)
+        db_dir = db_file.parent
+        
+        logger.info(f"Database file path: {db_file}")
+        logger.info(f"Database directory path: {db_dir}")
+        logger.info(f"Database directory absolute: {db_dir.absolute()}")
+        
+        try:
+            db_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Database directory created successfully: {db_dir}")
+            logger.info(f"Database directory exists: {db_dir.exists()}")
+            logger.info(f"Database directory is writable: {os.access(db_dir, os.W_OK)}")
+        except Exception as e:
+            logger.error(f"Failed to create database directory: {e}", exc_info=True)
+            raise
+        
         try:
             db_dir.chmod(0o777)
         except Exception as e:
@@ -271,9 +284,13 @@ class DatabaseInitializer:
         # Evaluation tasks (for background processing)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS evaluation_tasks (
-                id TEXT PRIMARY KEY,
-                task_type TEXT NOT NULL,
-                status TEXT NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT UNIQUE NOT NULL,
+                dataset_id INTEGER,
+                task_type TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                progress INTEGER DEFAULT 0,
+                total_queries INTEGER DEFAULT 0,
                 query TEXT,
                 response TEXT,
                 context_chunks INTEGER,
@@ -288,7 +305,8 @@ class DatabaseInitializer:
                 error_message TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                completed_at TIMESTAMP
+                completed_at TIMESTAMP,
+                FOREIGN KEY (dataset_id) REFERENCES evaluation_datasets(id)
             )
         ''')
         logger.debug("Evaluation tables ready")
@@ -439,6 +457,7 @@ class DatabaseInitializer:
                 else:
                     logger.warning(f"Could not add column '{column}' to '{table}': {e}")
     
+
     def verify_schema(self) -> bool:
         """
         Verify that all required tables exist.

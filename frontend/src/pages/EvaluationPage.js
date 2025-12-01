@@ -270,8 +270,13 @@ const EvaluationPage = () => {
 
     // Load datasets
     const loadDatasets = async () => {
+        console.log('📊 [DEBUG] loadDatasets() - START - Function called');
         try {
+            console.log('📊 [DEBUG] loadDatasets() - Fetching datasets from API...');
             const response = await evaluationApi.getDatasets();
+            console.log('📊 [DEBUG] loadDatasets() - API response:', response);
+            console.log('📊 [DEBUG] loadDatasets() - Raw datasets count:', (response.datasets || []).length);
+            
             // Transform the data to match frontend expectations and format dates
             const transformedDatasets = (response.datasets || []).map(dataset => ({
                 ...dataset,
@@ -284,9 +289,16 @@ const EvaluationPage = () => {
                     minute: '2-digit'
                 }) : 'Unknown'
             }));
+            
+            console.log('📊 [DEBUG] loadDatasets() - Transformed datasets count:', transformedDatasets.length);
+            console.log('📊 [DEBUG] loadDatasets() - Datasets with status:', transformedDatasets.map(d => ({id: d.id, name: d.name, status: d.status})));
+            const completedCount = transformedDatasets.filter(d => d.status === 'completed').length;
+            console.log(`✅ [DEBUG] loadDatasets() - Completed datasets: ${completedCount}/${transformedDatasets.length}`);
+            
             setDatasets(transformedDatasets);
+            console.log('✅ [DEBUG] loadDatasets() - State updated successfully');
         } catch (error) {
-            console.error('Error loading datasets:', error);
+            console.error('❌ [DEBUG] Error loading datasets:', error);
             // Show empty array on error instead of mock data for datasets tab
             setDatasets([]);
         }
@@ -997,6 +1009,22 @@ const EvaluationPage = () => {
                 source: message.source || 'websocket'
             })));
 
+            // Update dataset generation progress dialog if this is a dataset task
+            if (isDatasetTask) {
+                setShowProgressDialog(true);
+                setDatasetGenerationProgress({
+                    status: message.status === 'SUCCESS' ? 'completed' : 
+                           message.status === 'FAILURE' ? 'error' :
+                           message.data?.message?.includes('Initializing') ? 'starting' : 'processing',
+                    progress: Math.round((message.data?.progress || 0) * 100),
+                    current_document: message.data?.current_document || '',
+                    total_documents: message.data?.total_documents || 0,
+                    completed_documents: message.data?.completed_documents || 0,
+                    question_count: message.data?.question_count || 0,
+                    error: message.status === 'FAILURE' ? (message.data?.error || 'Unknown error') : null
+                });
+            }
+
             // Handle task completion
             if (message.status === 'SUCCESS') {
                 if (isDatasetTask) {
@@ -1056,10 +1084,25 @@ const EvaluationPage = () => {
         // Show success message
         setError(''); // Clear any previous errors
 
+        // Close progress dialog after showing success for 2 seconds
+        setTimeout(() => {
+            setShowProgressDialog(false);
+            // Reset progress state
+            setDatasetGenerationProgress({
+                status: 'starting',
+                progress: 0,
+                current_document: '',
+                total_documents: 0,
+                completed_documents: 0,
+                question_count: 0,
+                error: null
+            });
+        }, 2000);
+
         // Disconnect WebSocket after short delay
         setTimeout(() => {
             webSocketService.disconnect(taskId);
-        }, 2000);
+        }, 2500);
     };
 
     // Handle evaluation success
@@ -1142,10 +1185,25 @@ const EvaluationPage = () => {
             )
         );
 
+        // Close progress dialog after showing error for 3 seconds
+        setTimeout(() => {
+            setShowProgressDialog(false);
+            // Reset progress state
+            setDatasetGenerationProgress({
+                status: 'starting',
+                progress: 0,
+                current_document: '',
+                total_documents: 0,
+                completed_documents: 0,
+                question_count: 0,
+                error: null
+            });
+        }, 3000);
+
         // Disconnect WebSocket after short delay
         setTimeout(() => {
             webSocketService.disconnect(taskId);
-        }, 2000);
+        }, 3500);
     };
 
     // Calculate progress from status data
@@ -3339,10 +3397,20 @@ const EvaluationPage = () => {
                                     <InputLabel>Select Dataset</InputLabel>
                                     <Select
                                         value={selectedDatasetId}
-                                        onChange={(e) => setSelectedDatasetId(e.target.value)}
+                                        onChange={(e) => {
+                                            console.log('Dataset selected:', e.target.value);
+                                            setSelectedDatasetId(e.target.value);
+                                        }}
                                         input={<OutlinedInput label="Select Dataset" />}
                                     >
-                                        {datasets.filter(d => d?.status === "Ready").map((dataset) => (
+                                        {(() => {
+                                            console.log('🔍 Create Test Case - Total datasets:', datasets.length);
+                                            console.log('🔍 Datasets array:', datasets);
+                                            const completedDatasets = datasets.filter(d => d?.status === "completed");
+                                            console.log('✅ Completed datasets:', completedDatasets.length);
+                                            console.log('✅ Completed datasets array:', completedDatasets);
+                                            return completedDatasets;
+                                        })().map((dataset) => (
                                             <MenuItem key={dataset?.id} value={dataset?.id}>
                                                 <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
                                                     <Typography variant="body1">

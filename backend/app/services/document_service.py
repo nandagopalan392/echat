@@ -23,7 +23,7 @@ class DocumentService:
     def __init__(self):
         """Initialize document service"""
         self._progress: Dict[str, Dict[str, any]] = {}
-        self._max_age_minutes = 60  # Clean up entries older than 1 hour
+        self._max_age_minutes = 5  # Clean up completed entries after 5 minutes
     
     def process_upload(
         self,
@@ -294,7 +294,7 @@ class DocumentService:
         rag = get_rag_service()
         storage = get_storage_service()
         
-        if not rag or not rag.vector_store:
+        if not rag or not rag.rag_engine.vector_store:
             raise ValueError("Vector store not available")
         
         # Get document info
@@ -305,16 +305,26 @@ class DocumentService:
                 doc_info = doc
                 break
         
-        # Get chunks from ChromaDB
-        chroma_client = rag.vector_store._client
-        collection_name = rag._get_collection_name()
+        # Get chunks from ChromaDB via RAG engine
+        chroma_client = rag.rag_engine.vector_store._client
+        collection_name = rag.rag_engine._get_collection_name()
         collection = chroma_client.get_collection(name=collection_name)
         
         # Get all chunks for this document
+        # Note: Chunks are stored with 'source_file' metadata key (new format)
+        # Try source_file first, then fallback to source for backward compatibility
         results = collection.get(
-            where={"source": filename},
+            where={"source_file": filename},
             include=["embeddings", "documents", "metadatas"]
         )
+        
+        # If no results with source_file, try with 'source' (old format)
+        if not results['ids']:
+            logger.info(f"No chunks found with 'source_file', trying 'source' for backward compatibility")
+            results = collection.get(
+                where={"source": filename},
+                include=["embeddings", "documents", "metadatas"]
+            )
         
         chunks = []
         if results['ids']:
@@ -445,15 +455,23 @@ class DocumentService:
     def cleanup_stale_uploads(self) -> int:
         """
         Remove old upload tracking entries
+        Completed/failed uploads are cleaned up after 30 seconds
+        Active uploads are kept for up to 60 minutes
         
         Returns:
             Number of entries cleaned up
         """
-        cutoff_time = datetime.datetime.utcnow() - timedelta(minutes=self._max_age_minutes)
-        stale_ids = [
-            file_id for file_id, data in self._progress.items()
-            if data["updated_at"] < cutoff_time
-        ]
+        current_time = datetime.datetime.utcnow()
+        stale_ids = []
+        
+        for file_id, data in self._progress.items():
+            # Clean up completed/failed uploads after 30 seconds
+            if data["status"] in ["completed", "failed"]:
+                if data["updated_at"] < current_time - timedelta(seconds=30):
+                    stale_ids.append(file_id)
+            # Clean up stale active uploads after 60 minutes
+            elif data["updated_at"] < current_time - timedelta(minutes=60):
+                stale_ids.append(file_id)
         
         for file_id in stale_ids:
             del self._progress[file_id]
@@ -480,8 +498,9 @@ class DocumentService:
         return result
     
     def get_upload_count(self) -> int:
-        """Get number of tracked uploads"""
-        return len(self._progress)
+        """Get number of actively processing uploads (excludes completed/failed)"""
+        return sum(1 for data in self._progress.values() 
+                  if data["status"] not in ["completed", "failed"])
 
 
 # Singleton instance

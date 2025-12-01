@@ -2,8 +2,7 @@
 Application Dependencies
 Shared dependencies for FastAPI dependency injection
 """
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends, HTTPException, status, Request
 from typing import Optional
 import jwt
 import logging
@@ -16,19 +15,19 @@ from app.db.models.user import User
 
 logger = logging.getLogger(__name__)
 
-# OAuth2 scheme for token authentication
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/login")
-
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    request: Request,
     db: DatabaseConnection = Depends(get_db)
 ) -> User:
     """
-    Dependency to get the current authenticated user from JWT token
+    Dependency to get the current authenticated user from JWT token in httpOnly cookie
+    
+    SECURITY: Uses ONLY cookie-based authentication for production-grade security.
+    No fallback to Authorization headers to prevent security vulnerabilities.
     
     Args:
-        token: JWT token from Authorization header
+        request: FastAPI request object to access cookies
         db: Database session
         
     Returns:
@@ -43,6 +42,13 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     
+    # Get token from httpOnly cookie ONLY (production-grade security)
+    token = request.cookies.get("access_token")
+    
+    if not token:
+        logger.debug("No access_token cookie found - user not authenticated")
+        raise credentials_exception
+    
     try:
         # Decode JWT token
         payload = jwt.decode(
@@ -53,6 +59,7 @@ async def get_current_user(
         username: str = payload.get("sub")
         
         if username is None:
+            logger.warning("JWT token missing 'sub' claim")
             raise credentials_exception
             
     except jwt.ExpiredSignatureError:
@@ -61,7 +68,7 @@ async def get_current_user(
             detail="Token has expired",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except jwt.JWTError as e:
+    except jwt.InvalidTokenError as e:
         logger.error(f"JWT decode error: {str(e)}")
         raise credentials_exception
     

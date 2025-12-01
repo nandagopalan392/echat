@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Optional
 import logging
 import jwt
+import time
 
 from app.config import settings
 from app.dependencies import get_user_repository, get_current_user
@@ -113,10 +114,14 @@ async def login(
             domain=settings.COOKIE_DOMAIN
         )
         
+        # Calculate token expiry timestamp (current time + token lifetime in milliseconds)
+        current_time_ms = int(time.time() * 1000)
+        expires_at_ms = current_time_ms + (settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60 * 1000)
+        
         # Also store token expiry in a readable cookie for frontend
         response.set_cookie(
             key="token_expires_at",
-            value=str(settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60 * 1000 + int(request.state._start_time * 1000)),
+            value=str(expires_at_ms),
             httponly=False,  # Readable by JavaScript for refresh logic
             secure=settings.COOKIE_SECURE,
             samesite=settings.COOKIE_SAMESITE,

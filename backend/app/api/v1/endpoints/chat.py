@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from typing import Dict, Any
 
 from app.dependencies import get_current_user
+from app.db.models.user import User
 from app.api.v1.schemas.chat import (
     Message,
     MessageUpdate,
@@ -36,7 +37,7 @@ def get_chat_service() -> ChatService:
 @router.post("/chat/send", response_model=ChatResponse)
 async def send_message(
     message: Message,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> Dict[str, Any]:
     """
@@ -47,14 +48,14 @@ async def send_message(
     
     Args:
         message: Message content and optional session_id
-        current_user: Authenticated user information
+        current_user: Authenticated user object
         chat_service: Chat service instance
         
     Returns:
         Dictionary with response options and session information
     """
     try:
-        username = current_user["sub"]
+        username = current_user.username
         logger.info(f"Processing chat message from user '{username}'")
         
         result = await chat_service.send_message(
@@ -75,21 +76,21 @@ async def send_message(
 
 @router.get("/chat/sessions", response_model=SessionsResponse)
 async def get_sessions(
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> Dict[str, Any]:
     """
     Get all chat sessions for the current user.
     
     Args:
-        current_user: Authenticated user information
+        current_user: Authenticated user object
         chat_service: Chat service instance
         
     Returns:
         Dictionary containing list of user's chat sessions
     """
     try:
-        username = current_user["sub"]
+        username = current_user.username
         sessions = chat_service.get_user_sessions(username)
         
         return {"sessions": sessions}
@@ -105,7 +106,7 @@ async def get_sessions(
 @router.get("/chat/sessions/{session_id}/messages", response_model=SessionMessagesResponse)
 async def get_session_messages(
     session_id: int,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> Dict[str, Any]:
     """
@@ -113,14 +114,14 @@ async def get_session_messages(
     
     Args:
         session_id: ID of the session to retrieve messages for
-        current_user: Authenticated user information
+        current_user: Authenticated user object
         chat_service: Chat service instance
         
     Returns:
         Dictionary with messages and session_id
     """
     try:
-        username = current_user["sub"]
+        username = current_user.username
         result = chat_service.get_session_messages(session_id, username)
         
         return result
@@ -136,7 +137,7 @@ async def get_session_messages(
 @router.post("/chat/rlhf-feedback", response_model=FeedbackResponse)
 async def submit_rlhf_feedback(
     feedback: RLHFFeedback,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> Dict[str, str]:
     """
@@ -148,14 +149,14 @@ async def submit_rlhf_feedback(
     
     Args:
         feedback: Feedback data including session_id and chosen_index
-        current_user: Authenticated user information
+        current_user: Authenticated user object
         chat_service: Chat service instance
         
     Returns:
         Success status message
     """
     try:
-        username = current_user["sub"]
+        username = current_user.username
         
         result = await chat_service.process_rlhf_feedback(
             session_id=feedback.session_id,
@@ -176,7 +177,7 @@ async def submit_rlhf_feedback(
 @router.put("/chat/message/update")
 async def update_message(
     message_update: MessageUpdate,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> Dict[str, Any]:
     """
@@ -186,14 +187,14 @@ async def update_message(
     
     Args:
         message_update: Update data including session_id and new content
-        current_user: Authenticated user information
+        current_user: Authenticated user object
         chat_service: Chat service instance
         
     Returns:
         Success status with message_id
     """
     try:
-        username = current_user["sub"]
+        username = current_user.username
         
         result = chat_service.update_message(
             session_id=message_update.session_id,
@@ -220,7 +221,7 @@ async def update_message(
 @router.post("/chat/upload", response_model=UploadResponse)
 async def upload_file(
     file: UploadFile = File(...),
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     chat_service: ChatService = Depends(get_chat_service)
 ) -> Dict[str, str]:
     """
@@ -231,14 +232,14 @@ async def upload_file(
     
     Args:
         file: Uploaded file
-        current_user: Authenticated user information
+        current_user: Authenticated user object
         chat_service: Chat service instance
         
     Returns:
         Success message with file_id
     """
     try:
-        username = current_user["sub"]
+        username = current_user.username
         
         # Read file content
         contents = await file.read()

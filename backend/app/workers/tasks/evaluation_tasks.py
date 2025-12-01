@@ -825,13 +825,13 @@ def create_dataset_background(
             "progress": 0.2
         })
         
-        # Use the provided dataset_id if available, otherwise create a new one
+        # Use the provided dataset_id (created by API endpoint before task was queued)
         if dataset_id:
             db_dataset_id = dataset_id
-            logger.info(f"Using existing dataset record with ID: {db_dataset_id}")
+            logger.info(f"Using pre-created dataset record with ID: {db_dataset_id}")
         else:
+            # Fallback: create dataset if not provided (backward compatibility)
             try:
-                # Create new dataset in database
                 db_dataset_id = eval_repo.create_dataset(
                     name=name,
                     description=description,
@@ -1006,9 +1006,10 @@ def create_dataset_background(
                 dataset_id=db_dataset_id,
                 file_path=file_path,
                 question_count=question_count,
+                document_count=len(documents),
                 status='completed'
             )
-            logger.info(f"📋 DATABASE: Updated dataset {db_dataset_id} with {question_count} questions")
+            logger.info(f"📋 DATABASE: Updated dataset {db_dataset_id} with {question_count} questions from {len(documents)} documents")
         except Exception as e:
             logger.error(f"Failed to update dataset record: {e}")
         

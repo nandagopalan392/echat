@@ -16,10 +16,10 @@ class FinetuningService:
     
     def __init__(self):
         """Initialize fine-tuning service"""
-        from app.db.repositories.experiment_repository import experiment_db, ExperimentStatus
+        from app.db.repositories.experiment_repository import experiment_repository, ExperimentStatus
         from app.core.training.hf_finetuner import hf_finetuner
         
-        self.experiment_db = experiment_db
+        self.experiment_db = experiment_repository
         self.ExperimentStatus = ExperimentStatus
         self.hf_finetuner = hf_finetuner
     

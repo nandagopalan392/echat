@@ -613,12 +613,22 @@ _reranker_instance = None
 _current_reranker_model = "BAAI/bge-reranker-large"
 _current_reranker_provider = "ollama"
 
-def get_reranker():
+def get_reranker(model_name: str = None, provider: str = None):
     """Get or create a singleton reranker instance"""
     global _reranker_instance, _current_reranker_model, _current_reranker_provider
-    if (_reranker_instance is None):
-        logger.info(f"Creating reranker instance with model: {_current_reranker_model} (provider: {_current_reranker_provider})")
-        base_reranker = CrossEncoderReranker(model_name=_current_reranker_model, provider=_current_reranker_provider)
+    
+    # Use provided parameters or fall back to globals
+    effective_model = model_name or _current_reranker_model
+    effective_provider = provider or _current_reranker_provider
+    
+    # Recreate instance if model/provider changed
+    if (_reranker_instance is None or 
+        effective_model != _current_reranker_model or 
+        effective_provider != _current_reranker_provider):
+        logger.info(f"Creating reranker instance with model: {effective_model} (provider: {effective_provider})")
+        _current_reranker_model = effective_model
+        _current_reranker_provider = effective_provider
+        base_reranker = CrossEncoderReranker(model_name=effective_model, provider=effective_provider)
         _reranker_instance = HybridReranker(base_reranker=base_reranker)
     return _reranker_instance
 

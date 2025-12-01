@@ -66,7 +66,8 @@ async def add_user(
         success = user_repo.create_user(
             username=user_data.username,
             password=user_data.password,
-            role=user_data.role
+            role=user_data.role,
+            email=user_data.email
         )
         
         if not success:
@@ -85,6 +86,63 @@ async def add_user(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error adding user: {str(e)}"
+        )
+
+
+@router.delete("/delete-user/{username}", response_model=MessageResponse)
+async def delete_user(
+    username: str,
+    admin: User = Depends(get_current_admin_user),
+    user_repo: UserRepository = Depends(get_user_repository)
+):
+    """
+    Delete a user (admin only)
+    
+    Args:
+        username: Username to delete
+        admin: Current admin user (from dependency)
+        user_repo: User repository for database operations
+        
+    Returns:
+        Success message
+        
+    Raises:
+        HTTPException: If trying to delete self or user doesn't exist
+    """
+    try:
+        # Prevent admin from deleting themselves
+        if username == admin.username:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot delete your own account"
+            )
+        
+        # Check if user exists
+        user = user_repo.get_user_by_username(username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User '{username}' not found"
+            )
+        
+        # Delete user
+        success = user_repo.delete_user(username)
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete user"
+            )
+        
+        logger.info(f"Admin {admin.username} deleted user: {username}")
+        return MessageResponse(message=f"User '{username}' deleted successfully")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting user {username}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error deleting user: {str(e)}"
         )
 
 
@@ -112,6 +170,7 @@ async def get_users(
             UserListItem(
                 user_id=None,  # Can add user_id to User model if needed
                 username=user.username,
+                email=user.email,
                 role=user.role,
                 created_at=user.created_at.isoformat() if user.created_at else None,
                 last_login=user.last_login.isoformat() if user.last_login else None,

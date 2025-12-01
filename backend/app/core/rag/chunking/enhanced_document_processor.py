@@ -133,6 +133,10 @@ class DoclingDocumentProcessor:
                 device_type = "GPU" if use_gpu else "CPU"
                 logger.info(f"Docling DocumentConverter initialized with {device_type} in {total_time:.2f} seconds")
                 
+                # PRODUCTION-GRADE: Pre-load models during initialization (eager loading)
+                logger.info("🚀 WARMUP: Pre-loading Docling models (downloading if needed)...")
+                self._warmup_models()
+                
             except Exception as e:
                 logger.warning(f"Failed to initialize Docling converter: {e}")
                 logger.warning(f"🚀 DEBUG: Full traceback: {traceback.format_exc()}")
@@ -141,6 +145,65 @@ class DoclingDocumentProcessor:
         else:
             self.converter = None
             self.docling_formats = set()
+    
+    def _warmup_models(self):
+        """
+        Warm up Docling models by processing a minimal dummy document.
+        This triggers model downloads during initialization instead of first request.
+        PRODUCTION-GRADE PATTERN: Eager loading for predictable performance.
+        """
+        if not self.converter:
+            return
+            
+        try:
+            warmup_start = time.time()
+            
+            # Create a minimal PDF in memory to trigger model loading
+            import io
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.pagesizes import letter
+            
+            # Generate minimal PDF
+            pdf_buffer = io.BytesIO()
+            c = canvas.Canvas(pdf_buffer, pagesize=letter)
+            c.drawString(100, 750, "Warmup")
+            c.save()
+            pdf_buffer.seek(0)
+            
+            # Save to temp file for processing
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_pdf:
+                temp_pdf.write(pdf_buffer.getvalue())
+                temp_path = temp_pdf.name
+            
+            try:
+                # Process dummy document - this triggers model download
+                logger.info("🚀 WARMUP: Processing warmup document to download models...")
+                from docling.datamodel.base_models import InputFormat
+                from docling.document_converter import DocumentConverter, PdfFormatOption
+                from docling.datamodel.pipeline_options import PdfPipelineOptions
+                
+                # Convert the warmup PDF
+                result = self.converter.convert(temp_path)
+                
+                warmup_time = time.time() - warmup_start
+                logger.info(f"✅ WARMUP COMPLETE: Docling models pre-loaded in {warmup_time:.2f} seconds")
+                logger.info("✅ All subsequent document processing will be fast (models already loaded)")
+                
+            finally:
+                # Clean up temp file
+                import os
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
+                    
+        except ImportError as ie:
+            logger.warning(f"⚠️ WARMUP: reportlab not available, skipping model warmup: {ie}")
+            logger.warning("⚠️ Models will download on first document processing (7+ minute delay)")
+        except Exception as e:
+            logger.warning(f"⚠️ WARMUP: Failed to warm up models: {e}")
+            logger.warning("⚠️ Models will download on first document processing (7+ minute delay)")
     
     def can_process(self, file_path: str) -> bool:
         """Check if Docling can process this file format"""

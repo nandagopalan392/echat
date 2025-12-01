@@ -764,9 +764,9 @@ export const api = {
         }
     },
 
-    deleteUser: async (userId) => {
+    deleteUser: async (username) => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/admin/users/${userId}`, {
+            const response = await fetch(`${API_BASE_URL}/api/admin/delete-user/${username}`, {
                 method: 'DELETE',
                 headers: {
                     ...getAuthHeader()
@@ -774,7 +774,8 @@ export const api = {
             });
             
             if (!response.ok) {
-                throw new Error('Failed to delete user');
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to delete user');
             }
             
             return await response.json();
@@ -980,9 +981,9 @@ export const api = {
         }
     },
 
-    deleteUser: async (userId) => {
+    deleteUser: async (username) => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/users/${userId}`, {
+            const response = await fetch(`${API_BASE_URL}/api/admin/delete-user/${username}`, {
                 method: 'DELETE',
                 headers: {
                     ...getAuthHeader(),
@@ -991,7 +992,8 @@ export const api = {
             });
             
             if (!response.ok) {
-                throw new Error('Failed to delete user');
+                const error = await response.json();
+                throw new Error(error.detail || 'Failed to delete user');
             }
             
             return await response.json();
@@ -1883,7 +1885,9 @@ export const evaluationApi = {
 
     // Get evaluation datasets
     getDatasets: async () => {
+        console.log('🌐 [DEBUG] evaluationApi.getDatasets() - START');
         try {
+            console.log('🌐 [DEBUG] Making fetch request to:', `${API_BASE_URL}/api/evaluation/datasets`);
             const response = await fetch(`${API_BASE_URL}/api/evaluation/datasets`, {
                 method: 'GET',
                 headers: {
@@ -1892,13 +1896,16 @@ export const evaluationApi = {
                 }
             });
 
+            console.log('🌐 [DEBUG] Response status:', response.status, response.ok);
             if (!response.ok) {
                 throw new Error(`Failed to get datasets: ${response.status}`);
             }
 
-            return await response.json();
+            const data = await response.json();
+            console.log('✅ [DEBUG] evaluationApi.getDatasets() successful, data:', data);
+            return data;
         } catch (error) {
-            console.error('Error getting datasets:', error);
+            console.error('❌ [DEBUG] Error getting datasets:', error);
             throw error;
         }
     },

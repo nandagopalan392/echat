@@ -15,7 +15,7 @@ from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
 
 # Import dependencies
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin_user
 from app.services import ModelService
 
 # Initialize logger
@@ -88,7 +88,8 @@ async def get_model_providers(
         Dict with models grouped by provider
     """
     try:
-        return await model_service.get_model_providers(provider)
+        # Note: provider parameter not currently used by service method
+        return await model_service.get_model_providers()
     except Exception as e:
         logger.error(f"Error getting model providers: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get model providers: {str(e)}")

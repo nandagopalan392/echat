@@ -11,7 +11,7 @@ services:
       - "127.0.0.1:8001:8001"  # Metrics endpoint
     volumes:
       - ./backend:/app
-      - sqlite_data:/app/data/db:rw        # Persistent SQLite database
+      - sqlite_data:/app/data:rw           # Persistent data directory (contains db/)
       - chroma_data:/app/data/chroma_db:rw # Persistent chroma database
       - hf_cache:/root/.cache/huggingface:rw  # Persistent HuggingFace model cache
       - easyocr_cache:/root/.EasyOCR:rw       # Persistent EasyOCR model cache
@@ -21,7 +21,7 @@ services:
       - PIP_DEFAULT_TIMEOUT=100
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_DB_PATH=/app/data/chroma_db
-      - SQLITE_DB_PATH=/app/data/db/chat.db
+      - SQLITE_DB_PATH=/app/data/db/main.db
       - DOCUMENT_DB_PATH=/app/data/db/documents.db
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minio_user
@@ -151,7 +151,7 @@ services:
     working_dir: /app
     volumes:
       - ./backend:/app
-      - sqlite_data:/app/data/db:rw
+      - sqlite_data:/app/data:rw           # Persistent data directory (contains db/)
       - chroma_data:/app/data/chroma_db:rw
       - hf_cache:/root/.cache/huggingface:rw
       - easyocr_cache:/root/.EasyOCR:rw
@@ -164,7 +164,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_DB_PATH=/app/data/chroma_db
-      - SQLITE_DB_PATH=/app/data/db/chat.db
+      - SQLITE_DB_PATH=/app/data/db/main.db
       - DOCUMENT_DB_PATH=/app/data/db/documents.db
       - MINIO_ENDPOINT=minio:9000
       - MINIO_ACCESS_KEY=minio_user
@@ -181,9 +181,9 @@ services:
       - ollama
       - minio
     restart: unless-stopped
-    command: python -m celery -A celery_app worker --loglevel=info --pool=gevent --concurrency=4 --queues=celery,evaluation
+    command: python -m celery -A app.workers.celery_app worker --loglevel=info --pool=gevent --concurrency=4 --queues=celery,evaluation
     healthcheck:
-      test: ["CMD", "python", "-m", "celery", "-A", "celery_app", "inspect", "ping"]
+      test: ["CMD", "python", "-m", "celery", "-A", "app.workers.celery_app", "inspect", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3

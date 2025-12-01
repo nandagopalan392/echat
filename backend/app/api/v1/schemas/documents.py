@@ -9,9 +9,11 @@ from datetime import datetime
 class DocumentInfo(BaseModel):
     """Single document information"""
     document_id: int
+    id: Optional[int] = None  # Frontend compatibility field
     filename: str
     content_type: str
     file_size: int
+    size: Optional[int] = None  # Frontend compatibility field  
     upload_date: str
     user_id: Optional[str] = None
     status: str = "completed"

@@ -10,7 +10,7 @@ import json
 import redis
 import os
 
-from app.core.config import settings
+from app.config import settings
 from app.core.evaluation.system import (
     get_evaluation_manager,
     evaluate_chat_response,
@@ -206,7 +206,9 @@ class EvaluationService:
     def get_recent_results(self, limit: int = 10, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get recent evaluation results"""
         try:
-            return get_recent_evaluation_stats(limit=limit, user_id=user_id)
+            # get_recent_evaluation_stats uses 'last_n' parameter, not 'limit'
+            stats = get_recent_evaluation_stats(last_n=limit)
+            return stats.get("recent_evaluations", [])
         except Exception as e:
             logger.error(f"Error getting recent results: {e}")
             return []
@@ -266,3 +268,124 @@ class EvaluationService:
         except Exception as e:
             logger.error(f"Error getting evaluation results: {e}")
             return {"results": [], "total_count": 0, "page": page, "page_size": page_size}
+    
+    def get_datasets(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all evaluation datasets"""
+        try:
+            eval_repo = self.get_evaluation_repository()
+            
+            with eval_repo.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                query = """
+                    SELECT 
+                        id, name, description, created_at, updated_at,
+                        document_count, file_path, status, created_by
+                    FROM evaluation_datasets
+                    ORDER BY created_at DESC
+                """
+                
+                cursor.execute(query)
+                
+                datasets = []
+                for row in cursor.fetchall():
+                    datasets.append({
+                        "id": row[0],
+                        "name": row[1],
+                        "description": row[2],
+                        "created_at": row[3],
+                        "updated_at": row[4],
+                        "document_count": row[5] or 0,
+                        "file_path": row[6],
+                        "status": row[7] or "Processing",
+                        "created_by": row[8]
+                    })
+                
+                return datasets
+            
+        except Exception as e:
+            logger.error(f"Error getting datasets: {e}")
+            return []
+    
+    def get_overview(self, time_range: str = "7d") -> Dict[str, Any]:
+        """
+        Get evaluation overview with statistics
+        
+        Args:
+            time_range: Time range for stats (7d, 30d, 90d, all)
+        """
+        try:
+            eval_repo = self.get_evaluation_repository()
+            
+            # Parse time range
+            if time_range == "all":
+                date_filter = ""
+            else:
+                days = int(time_range.rstrip('d'))
+                cutoff_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
+                date_filter = f"WHERE evaluated_at >= '{cutoff_date}'"
+            
+            with eval_repo.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get total evaluations
+                cursor.execute(f"SELECT COUNT(*) FROM evaluation_metrics {date_filter}")
+                total_evaluations = cursor.fetchone()[0] or 0
+                
+                # Get average scores
+                cursor.execute(f"""
+                    SELECT 
+                        AVG(groundedness_score) as avg_groundedness,
+                        AVG(context_relevance_score) as avg_context_relevance,
+                        AVG(answer_quality_score) as avg_answer_quality,
+                        AVG(latency_ms) as avg_latency
+                    FROM evaluation_metrics 
+                    {date_filter}
+                """)
+                scores = cursor.fetchone()
+                
+                # Get dataset count
+                cursor.execute("SELECT COUNT(*) FROM evaluation_datasets")
+                dataset_count = cursor.fetchone()[0] or 0
+                
+                # Get recent evaluations
+                cursor.execute(f"""
+                    SELECT 
+                        DATE(evaluated_at) as date,
+                        COUNT(*) as count
+                    FROM evaluation_metrics 
+                    {date_filter}
+                    GROUP BY DATE(evaluated_at)
+                    ORDER BY date DESC
+                    LIMIT 30
+                """)
+                daily_stats = [{"date": row[0], "count": row[1]} for row in cursor.fetchall()]
+                
+                # Structure response to match frontend expectations
+                return {
+                    "overall": {
+                        "groundedness": round(scores[0], 3) if scores[0] else 0,
+                        "contextRelevance": round(scores[1], 3) if scores[1] else 0,
+                        "answerQuality": round(scores[2], 3) if scores[2] else 0,
+                        "averageLatency": round(scores[3], 2) if scores[3] else 0,
+                        "totalEvaluations": total_evaluations
+                    },
+                    "historical": [],  # Empty for now, can be populated from daily_stats if needed
+                    "latencyDistribution": [],  # Empty for now, can be added later
+                    "detailed": []  # Empty for now, detailed results are fetched separately
+                }
+            
+        except Exception as e:
+            logger.error(f"Error getting evaluation overview: {e}", exc_info=True)
+            return {
+                "overall": {
+                    "groundedness": 0,
+                    "contextRelevance": 0,
+                    "answerQuality": 0,
+                    "averageLatency": 0,
+                    "totalEvaluations": 0
+                },
+                "historical": [],
+                "latencyDistribution": [],
+                "detailed": []
+            }

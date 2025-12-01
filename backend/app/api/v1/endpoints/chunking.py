@@ -8,7 +8,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any
 
-from app.dependencies import get_current_user, get_document_repository
+from app.dependencies import get_current_user, get_current_admin_user, get_document_repository
+from app.db.models.user import User
 from app.api.v1.schemas.chunking import (
     ChunkingMethodsResponse,
     ChunkingMethodInfo,
@@ -67,7 +68,7 @@ async def get_chunking_methods(
 @router.get("/config/{method}", response_model=ChunkingConfigResponse)
 async def get_chunking_config(
     method: str,
-    current_admin: dict = Depends(get_current_admin_user),
+    current_admin: User = Depends(get_current_admin_user),
     service: ChunkingConfigService = Depends(get_chunking_service)
 ):
     """
@@ -78,9 +79,10 @@ async def get_chunking_config(
     
     Args:
         method: Chunking method name (e.g., 'general', 'qa', 'table')
+        current_admin: Current authenticated admin user
     """
     try:
-        user_id = current_user.get('sub')
+        user_id = current_admin.username
         config = service.get_config(method, user_id)
         
         return ChunkingConfigResponse(config=config)
@@ -102,7 +104,7 @@ async def get_chunking_config(
 async def update_chunking_config(
     method: str,
     config_data: Dict[str, Any],
-    current_admin: dict = Depends(get_current_admin_user),
+    current_admin: User = Depends(get_current_admin_user),
     service: ChunkingConfigService = Depends(get_chunking_service)
 ):
     """
@@ -114,9 +116,10 @@ async def update_chunking_config(
     Args:
         method: Chunking method name (e.g., 'general', 'qa', 'table')
         config_data: New configuration data
+        current_admin: Current authenticated admin user
     """
     try:
-        user_id = current_user.get('sub')
+        user_id = current_admin.username
         
         # Update configuration
         updated_config, warnings = service.update_config(method, config_data, user_id)

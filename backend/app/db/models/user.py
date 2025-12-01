@@ -40,15 +40,36 @@ class User:
     @classmethod
     def from_db_row(cls, row) -> 'User':
         """Create User instance from database row"""
+        # Handle both dict and sqlite3.Row objects
+        def safe_get(key, default=None):
+            try:
+                return row[key] if row[key] is not None else default
+            except (KeyError, IndexError):
+                return default
+        
+        # Parse datetime fields from SQLite string format
+        def parse_datetime(value):
+            if value is None:
+                return None
+            if isinstance(value, datetime):
+                return value
+            if isinstance(value, str):
+                try:
+                    # SQLite datetime format: 'YYYY-MM-DD HH:MM:SS'
+                    return datetime.fromisoformat(value.replace(' ', 'T'))
+                except (ValueError, AttributeError):
+                    return value
+            return value
+        
         return cls(
             username=row['username'],
             password_hash=row['password_hash'],
-            created_at=row['created_at'],
-            is_admin=bool(row.get('is_admin', False)),
-            is_active=bool(row.get('is_active', True)),
-            role=row.get('role', 'Engineer'),
-            email=row.get('email'),
-            last_login=row.get('last_login')
+            created_at=parse_datetime(row['created_at']),
+            is_admin=bool(safe_get('is_admin', False)),
+            is_active=bool(safe_get('is_active', True)),
+            role=safe_get('role', 'Engineer'),
+            email=safe_get('email'),
+            last_login=parse_datetime(safe_get('last_login'))
         )
 
 

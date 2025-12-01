@@ -151,7 +151,9 @@ class QCADatasetGenerator:
 
         except Exception as e:
             logger.error(f"Error extracting content from document: {e}")
-            return ""    def _chunk_content(self, content: str, target_chunk_size: int = 200) -> List[str]:
+            return ""
+    
+    def _chunk_content(self, content: str, target_chunk_size: int = 200) -> List[str]:
         """
         Chunk content into 100-300 word pieces
         

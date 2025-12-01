@@ -54,17 +54,15 @@ class ModelService:
     """
     
     def __init__(self):
-        """Initialize the model service with database and configuration."""
-        # Initialize database connection and repositories
+        """Initialize model service"""
+        self.logger = logging.getLogger(__name__)
         self.db = DatabaseConnection()
         self.config_repo = ConfigRepository(self.db)
-        
         self.ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
-        self.logger = logging.getLogger(__name__)
-        
-        # Initialize providers
         self.ollama_provider = OllamaProvider()
-        self.hf_provider = HuggingFaceProvider()
+        
+        # Validate models on startup
+        self._validate_models_on_startup()
     
     async def get_model_status(self) -> Dict[str, Any]:
         """
@@ -379,12 +377,12 @@ class ModelService:
                     model_size = model.get('size', 0)
                     model_modified = model.get('modified_at', '')
                     
-                    category = self._categorize_model(model_name)
+                    category = categorize_model(model_name)
                     
                     local_models.append({
                         'name': model_name,
                         'category': category,
-                        'size': self._format_model_size(model_size),
+                        'size': format_model_size(model_size),
                         'modified_at': model_modified,
                         'source': 'local',
                         'description': f"Locally installed {category} model"
@@ -407,13 +405,13 @@ class ModelService:
                         model_size = model.get('size', 0)
                         model_modified = model.get('modified_at', '')
                         
-                        model_type = self._categorize_model(model_name)
+                        model_type = categorize_model(model_name)
                         
                         local_models.append({
                             'name': model_name,
                             'type': model_type,
                             'category': model_type,
-                            'size': self._format_model_size(model_size),
+                            'size': format_model_size(model_size),
                             'modified_at': model_modified,
                             'source': 'local',
                             'provider': 'ollama',
@@ -453,14 +451,14 @@ class ModelService:
         for model in available_models:
             model_name = model['name']
             if model_name not in all_ollama_models:
-                model_type = self._categorize_model(model_name)
+                model_type = categorize_model(model_name)
                 
                 all_ollama_models[model_name] = {
                     'name': model_name,
                     'type': model_type,
                     'category': model_type,
                     'description': model.get('description', ''),
-                    'size': self._format_model_size(model.get('size', 'Unknown')),
+                    'size': format_model_size(model.get('size', 'Unknown')),
                     'source': 'library',
                     'provider': 'ollama',
                     'tags': model.get('tags', [])
@@ -473,6 +471,62 @@ class ModelService:
                 })
         
         return list(all_ollama_models.values())
+    
+    def _validate_models_on_startup(self):
+        """Validate that configured models exist in Ollama"""
+        try:
+            import httpx
+            from app.core.rag import get_rag_engine
+            
+            rag_engine = get_rag_engine()
+            llm_model = rag_engine.llm_model
+            embedding_model = rag_engine.embedding_model
+            
+            self.logger.info(f"Validating configured models - LLM: {llm_model}, Embedding: {embedding_model}")
+            
+            # Get installed Ollama models
+            ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+            try:
+                with httpx.Client(timeout=10.0) as client:
+                    response = client.get(f"{ollama_host}/api/tags")
+                    if response.status_code == 200:
+                        data = response.json()
+                        installed_models = {model.get('name', '') for model in data.get('models', [])}
+                        
+                        # Check LLM model
+                        llm_variants = [llm_model, f"{llm_model}:latest", llm_model.replace(":latest", "")]
+                        llm_found = any(variant in installed_models for variant in llm_variants)
+                        
+                        # Check embedding model
+                        embedding_normalized = normalize_model_name(embedding_model)
+                        embedding_variants = [
+                            embedding_normalized,
+                            f"{embedding_normalized}:latest",
+                            embedding_normalized.replace(":latest", "")
+                        ]
+                        embedding_found = any(variant in installed_models for variant in embedding_variants)
+                        
+                        if not llm_found:
+                            self.logger.warning(
+                                f"⚠️  Configured LLM model '{llm_model}' not found in Ollama. "
+                                f"It will be downloaded when needed. Available models: {', '.join(sorted(installed_models))}"
+                            )
+                        else:
+                            self.logger.info(f"✅ LLM model '{llm_model}' is available")
+                        
+                        if not embedding_found:
+                            self.logger.warning(
+                                f"⚠️  Configured embedding model '{embedding_model}' not found in Ollama. "
+                                f"It will be downloaded when needed."
+                            )
+                        else:
+                            self.logger.info(f"✅ Embedding model '{embedding_model}' is available")
+                    else:
+                        self.logger.warning(f"Could not validate models: Ollama API returned {response.status_code}")
+            except Exception as e:
+                self.logger.warning(f"Could not validate models on startup: {e}")
+        except Exception as e:
+            self.logger.warning(f"Error during model validation: {e}")
     
     async def _fetch_huggingface_models(self) -> List[Dict]:
         """Fetch available HuggingFace models."""
@@ -705,14 +759,14 @@ class ModelService:
                 logger.info("Models unchanged, only updating parameters - skipping model downloads")
                 
                 try:
-                    rag.update_models(llm_model, embedding_model, provider=provider)
+                    rag.reload_models(llm_model, embedding_model)
                 except Exception as e:
                     logger.error(f"Error updating parameters: {str(e)}")
                     raise Exception(f"Failed to update parameters: {str(e)}")
                 
                 # Save settings to database
                 try:
-                    self.chat_db.save_model_settings(
+                    self.config_repo.save_model_settings(
                         llm_model, embedding_model, valid_parameters, provider, embedding_provider
                     )
                     logger.info(f"Model settings saved to database")
@@ -732,6 +786,12 @@ class ModelService:
             
             # Models changed - download if needed
             models_to_download = []
+            
+            # Detect which models actually changed
+            llm_changed = (current_llm != llm_model)
+            embedding_changed = (current_embedding != embedding_model)
+            
+            logger.info(f"Model changes - LLM changed: {llm_changed}, Embedding changed: {embedding_changed}")
             
             # Detect providers from model names
             llm_provider = provider if provider != 'ollama' else detect_model_provider(llm_model)
@@ -759,16 +819,16 @@ class ModelService:
                     logger.warning(f"Could not fetch installed models: {e}")
                     installed_models = set()
                 
-                # Check and download LLM model (if Ollama)
-                if llm_provider.lower() == 'ollama':
+                # Check and download LLM model ONLY if it changed (if Ollama)
+                if llm_changed and llm_provider.lower() == 'ollama':
                     if llm_model not in installed_models:
                         llm_variants = [llm_model, f"{llm_model}:latest", llm_model.replace(":latest", "")]
                         if not any(variant in installed_models for variant in llm_variants):
                             models_to_download.append(llm_model)
                             logger.info(f"Ollama LLM model {llm_model} needs to be downloaded")
                 
-                # Check and download embedding model (if Ollama)
-                if embedding_provider_final.lower() == 'ollama':
+                # Check and download embedding model ONLY if it changed (if Ollama)
+                if embedding_changed and embedding_provider_final.lower() == 'ollama':
                     embedding_model_normalized = normalize_model_name(embedding_model)
                     if embedding_model_normalized not in installed_models:
                         embedding_variants = [
@@ -816,11 +876,10 @@ class ModelService:
                         logger.error(f"Error downloading model {model_name}: {e}")
                         raise Exception(f"Failed to download model {model_name}: {str(e)}")
             
-            # Update models in RAG system
-            embedding_changed = rag.embedding_model != embedding_model
+            # Update models in RAG system (embedding_changed already calculated above)
             
             try:
-                rag.update_models(llm_model, embedding_model, provider=provider, embedding_provider=embedding_provider_final)
+                rag.reload_models(llm_model, embedding_model)
             except Exception as e:
                 logger.error(f"Error updating models: {str(e)}")
                 raise Exception(f"Failed to update models: {str(e)}")
@@ -833,7 +892,9 @@ class ModelService:
                     logger.info(f"Model settings saved to database")
                 except Exception as e:
                     logger.error(f"Could not save to database: {e}")
-                    raise Exception(f"Failed to save model settings: {e}")            response_data = {
+                    raise Exception(f"Failed to save model settings: {e}")
+            
+            response_data = {
                 "success": True,
                 "message": "Models updated successfully",
                 "llm": llm_model,
@@ -902,41 +963,30 @@ class ModelService:
             )
             
             return result
-                            "ready_to_use": True
-                        }
-                    else:
-                        raise Exception("Model downloaded but failed validation test")
-                        
-                except Exception as e:
-                    logger.error(f"Failed to download embedding model {model_name}: {e}")
-                    
-                    # Check for gated model error
-                    if "gated" in str(e).lower() or "access" in str(e).lower():
-                        model_url = f"https://huggingface.co/{model_name}"
-                        return {
-                            "success": False,
-                            "error_type": "gated_model",
-                            "model_name": model_name,
-                            "model_type": model_type,
-                            "message": f"Model '{model_name}' requires special access",
-                            "model_url": model_url,
-                            "steps": [
-                                f"Visit the model page: {model_url}",
-                                "Click 'Request access' button",
-                                "Wait for approval",
-                                "Ensure you have a valid HuggingFace token in your .env file",
-                                "Try again after approval is granted"
-                            ]
-                        }
-                    
-                    raise Exception(f"Failed to download embedding model: {str(e)}")
             
-            else:
-                raise ValueError("model_type must be 'llm' or 'embedding'")
-                
         except Exception as e:
-            logger.error(f"Error in download_huggingface_model: {str(e)}")
-            raise Exception(f"Failed to download HuggingFace model: {str(e)}")
+            logger.error(f"Failed to download model {model_name}: {e}")
+            
+            # Check for gated model error
+            if "gated" in str(e).lower() or "access" in str(e).lower():
+                model_url = f"https://huggingface.co/{model_name}"
+                return {
+                    "success": False,
+                    "error_type": "gated_model",
+                    "model_name": model_name,
+                    "model_type": model_type,
+                    "message": f"Model '{model_name}' requires special access",
+                    "model_url": model_url,
+                    "steps": [
+                        f"Visit the model page: {model_url}",
+                        "Click 'Request access' button",
+                        "Wait for approval",
+                        "Ensure you have a valid HuggingFace token in your .env file",
+                        "Try again after approval is granted"
+                    ]
+                }
+            
+            raise Exception(f"Failed to download model: {str(e)}")
     
     async def update_simple_settings(
         self, 
@@ -1025,7 +1075,7 @@ class ModelService:
                 compatibility_warnings = [f"Could not verify GPU compatibility: {str(e)}"]
             
             # Get current models
-            rag = get_chatpdf_instance()
+            rag = get_rag_engine()
             current_llm = rag.llm_model
             current_embedding = rag.embedding_model
             
@@ -1036,10 +1086,7 @@ class ModelService:
                 logger.info("Models unchanged, only updating parameters - skipping model downloads")
                 
                 try:
-                    rag.update_models(
-                        llm_model, embedding_model, 
-                        provider=detected_provider, embedding_provider=detected_embedding_provider
-                    )
+                    rag.reload_models(llm_model, embedding_model)
                 except Exception as e:
                     logger.error(f"Error updating parameters: {str(e)}")
                     raise Exception(f"Failed to update parameters: {str(e)}")
@@ -1163,10 +1210,7 @@ class ModelService:
                             raise Exception(f"Failed to download model {model_name}: {str(e)}")
             
             # Update the models with provider-specific logic
-            rag.update_models(
-                llm_model, embedding_model, 
-                provider=detected_provider, embedding_provider=detected_embedding_provider
-            )
+            rag.reload_models(llm_model, embedding_model)
             
             # Save settings to database
             try:

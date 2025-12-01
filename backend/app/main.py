@@ -29,6 +29,7 @@ from app.api.v1.endpoints.evaluation import router as evaluation_router
 from app.api.v1.endpoints.finetuning import router as finetuning_router
 from app.api.v1.endpoints.websocket_finetuning import router as websocket_finetuning_router
 from app.api.v1.endpoints.websocket_evaluation import router as websocket_evaluation_router
+from app.api.v1.endpoints.models import router as models_router
 
 # Import database and core services from clean architecture
 from app.db import DatabaseConnection, initialize_database
@@ -126,7 +127,7 @@ async def startup_event():
             
             # Initialize table extractor
             table_start = time.time()
-            from table_extraction import get_table_extractor
+            from app.core.rag.chunking.table_extraction import get_table_extractor
             table_extractor = get_table_extractor()
             table_init_time = time.time() - table_start
             logger.info(f"🚀 Docling table extractor initialized in {table_init_time:.2f} seconds")
@@ -147,9 +148,12 @@ async def shutdown_event():
     """Cleanup on application shutdown"""
     logger.info("Shutting down the application...")
     try:
+        # Clean up GPU memory if available
         rag_service = get_rag_service_instance()
-        if rag_service.rag_engine.vector_store:
-            rag_service.rag_engine.clear()
+        if rag_service and rag_service.rag_engine:
+            rag_service.rag_engine.clear_gpu_memory()
+        
+        # Note: Vector store is persisted to disk, no need to clear it
         logger.info("Cleanup completed successfully")
     except Exception as e:
         logger.error(f"Shutdown error: {str(e)}")
@@ -165,6 +169,7 @@ app.include_router(chunking_router, prefix="/api/chunking", tags=["chunking"])
 app.include_router(retrieval_router, prefix="/api/retrieval", tags=["retrieval"])
 app.include_router(evaluation_router, prefix="/api", tags=["evaluation"])
 app.include_router(finetuning_router, prefix="/api", tags=["finetuning"])
+app.include_router(models_router, tags=["models"])
 app.include_router(websocket_finetuning_router, prefix="/api", tags=["websocket", "finetuning"])
 app.include_router(websocket_evaluation_router, prefix="/api/evaluation", tags=["websocket", "evaluation"])
 

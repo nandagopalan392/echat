@@ -9,7 +9,7 @@ import datetime
 import sqlite3
 
 from app.config import settings
-from app.dependencies import get_current_user, get_user_repository
+from app.dependencies import get_current_user, get_current_admin_user, get_user_repository
 from app.db.models.user import User
 from app.db.repositories.user_repository import UserRepository
 from app.db.base import get_db, DatabaseConnection
@@ -37,7 +37,7 @@ async def get_user_profile(
     """
     try:
         # Get user data from repository
-        user = user_repo.get_user_by_username(current_user.username)
+        user = user_repo.get_user_by_username(current_admin.username)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -77,7 +77,7 @@ async def get_user_activities(
         List of recent user activities including chats, document uploads, etc.
     """
     try:
-        username = current_user.username
+        username = current_admin.username
         
         # Get recent user activities from chat history and other sources
         activities = []

@@ -35,6 +35,7 @@ pdfplumber>=0.9.0  # For advanced PDF table extraction
 tabula-py>=2.8.0  # For PDF table extraction
 camelot-py[cv]>=0.11.0  # For advanced PDF table extraction
 docling==2.43.0  # For advanced document parsing and table extraction
+reportlab>=4.0.0  # For PDF generation (used in model warmup)
 
 # OCR and Image Processing
 Pillow>=9.0.0

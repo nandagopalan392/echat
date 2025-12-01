@@ -408,7 +408,9 @@ class StorageService:
                 from app.services.rag_service import get_rag_service
                 current_rag = get_rag_service()
                 current_embedding_model = current_rag.embedding_model if current_rag else None
-            except (ImportError, Exception):
+                logger.debug(f"Current embedding model for document list: {current_embedding_model}")
+            except (ImportError, Exception) as e:
+                logger.warning(f"Could not get current embedding model: {e}")
                 current_embedding_model = None
             
             cursor.execute('''
@@ -427,10 +429,16 @@ class StorageService:
             ''', (current_embedding_model,))
             
             rows = cursor.fetchall()
+            logger.info(f"📊 Found {len(rows)} documents in database")
+            if current_embedding_model:
+                logger.info(f"📊 Current embedding model: {current_embedding_model}")
             conn.close()
             
             documents = []
             for row in rows:
+                logger.info(f"📊 Document row - ID:{row[0]}, filename:{row[1]}, size:{row[3]}, "
+                           f"current_status:{row[8]}, all_statuses:{row[7]}")
+                
                 model_status = {}
                 if row[7]:  # model_status
                     for status_pair in row[7].split(','):
@@ -442,6 +450,9 @@ class StorageService:
                 # Determine if document is indexed for current embedding model
                 current_status = row[8]  # current_model_status
                 indexed = current_status == 'completed' if current_status else False
+                
+                logger.info(f"📊 Document {row[0]} ({row[1]}): current_status='{current_status}', indexed={indexed}, "
+                           f"chunking_method={row[10]}")
                 
                 # Get chunking method
                 chunking_method = row[10] if row[10] else 'general'
@@ -459,10 +470,12 @@ class StorageService:
                     embedding_model = 'Unknown'
                 
                 documents.append({
-                    'id': row[0],
+                    'document_id': row[0],  # Schema field
+                    'id': row[0],  # Frontend compatibility field  
                     'filename': row[1],
                     'file_hash': row[2],
-                    'size': row[3] if row[3] is not None else 0,
+                    'file_size': row[3] if row[3] is not None else 0,  # Schema field
+                    'size': row[3] if row[3] is not None else 0,  # Frontend compatibility field
                     'content_type': row[4],
                     'minio_object_name': row[5],
                     'upload_date': row[6],
@@ -470,7 +483,9 @@ class StorageService:
                     'model_status': model_status,
                     'indexed': indexed,
                     'embedding_model': embedding_model,
-                    'chunking_method': chunking_method
+                    'chunking_method': chunking_method,
+                    'status': 'completed' if indexed else 'pending',
+                    'user_id': None
                 })
             
             return documents
@@ -485,16 +500,18 @@ class StorageService:
         1. Delete chunks from vector store (all embedding models)
         2. Delete file from MinIO
         3. Delete metadata from SQLite
+        
+        This method is idempotent - safe to call multiple times.
         """
         try:
             # Get document info first
             doc_info = self._get_document_by_id(document_id)
             if not doc_info:
-                logger.warning(f"Document not found for deletion: {document_id}")
+                logger.info(f"Document {document_id} not found in database (already deleted)")
                 return False
             
-            deletion_success = True
             filename = doc_info['filename']
+            deletion_success = True
             
             # Step 1: Delete from vector store across all embedding models
             try:
@@ -502,31 +519,23 @@ class StorageService:
                 rag_instance = get_rag_service()
                 
                 if rag_instance:
-                    vector_deletion_success = rag_instance.remove_document_by_id(document_id)
-                    if not vector_deletion_success:
-                        logger.warning(f"Failed to completely remove document {document_id} from vector stores")
-                        deletion_success = False
-                else:
-                    logger.warning("RAG instance not available for vector store cleanup")
-                    deletion_success = False
+                    rag_instance.remove_document_by_id(document_id)
+                    # Don't fail entire deletion if vector cleanup has issues
                     
             except Exception as e:
                 logger.error(f"Error removing document {document_id} from vector stores: {e}")
-                deletion_success = False
             
             # Step 2: Delete from MinIO
             try:
                 self.minio_client.remove_object(self.bucket_name, doc_info['minio_object_name'])
                 logger.info(f"Removed file from MinIO: {doc_info['minio_object_name']}")
             except S3Error as e:
-                if e.code != 'NoSuchKey':
-                    logger.error(f"Error removing from MinIO: {e}")
-                    deletion_success = False
+                if e.code == 'NoSuchKey':
+                    logger.info(f"MinIO object already deleted: {doc_info['minio_object_name']}")
                 else:
-                    logger.warning(f"Object not found in MinIO (already deleted?): {doc_info['minio_object_name']}")
+                    logger.error(f"Error removing from MinIO: {e}")
             except Exception as e:
                 logger.error(f"Error removing from MinIO: {e}")
-                deletion_success = False
             
             # Step 3: Delete from SQLite (metadata and ingestion records)
             try:
@@ -535,7 +544,6 @@ class StorageService:
                 
                 # Delete ingestion metadata first (foreign key constraint)
                 cursor.execute('DELETE FROM ingestion_metadata WHERE document_id = ?', (document_id,))
-                deleted_ingestion_records = cursor.rowcount
                 
                 # Delete document record
                 cursor.execute('DELETE FROM documents WHERE id = ?', (document_id,))
@@ -544,20 +552,16 @@ class StorageService:
                 conn.commit()
                 conn.close()
                 
-                logger.info(f"Deleted {deleted_ingestion_records} ingestion records and {deleted_document_records} document record for {filename}")
-                
-                if deleted_document_records == 0:
-                    logger.warning(f"No document record found to delete for ID {document_id}")
+                if deleted_document_records > 0:
+                    logger.info(f"✓ Document {document_id} deleted successfully: {filename}")
+                    deletion_success = True
+                else:
+                    logger.info(f"Document {document_id} already removed from database")
                     deletion_success = False
                     
             except Exception as e:
                 logger.error(f"Error deleting from database: {e}")
                 deletion_success = False
-            
-            if deletion_success:
-                logger.info(f"Document deleted successfully: {filename} (ID: {document_id})")
-            else:
-                logger.warning(f"Document deletion completed with some failures: {filename} (ID: {document_id})")
             
             return deletion_success
             

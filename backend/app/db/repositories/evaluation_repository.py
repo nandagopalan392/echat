@@ -178,8 +178,9 @@ class EvaluationRepository:
             return False
     
     def update_dataset(self, dataset_id: int, file_path: Optional[str] = None,
-                      question_count: Optional[int] = None, status: Optional[str] = None) -> bool:
-        """Update dataset with file path, question count, and/or status"""
+                      question_count: Optional[int] = None, document_count: Optional[int] = None,
+                      status: Optional[str] = None) -> bool:
+        """Update dataset with file path, question count, document count, and/or status"""
         try:
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
@@ -196,6 +197,10 @@ class EvaluationRepository:
                 if question_count is not None:
                     updates.append("question_count = ?")
                     params.append(question_count)
+                
+                if document_count is not None:
+                    updates.append("document_count = ?")
+                    params.append(document_count)
                 
                 if status is not None:
                     updates.append("status = ?")

@@ -10,6 +10,7 @@ import logging
 import json
 import traceback
 import chromadb
+import asyncio
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
@@ -24,6 +25,11 @@ from langchain.schema.runnable import RunnablePassthrough
 from langchain_community.vectorstores.utils import filter_complex_metadata
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.schema import Document
+
+# Import retrieval config and advanced retrieval components
+from app.config.retrieval import get_retrieval_config_manager
+from app.core.rag.reranker import get_reranker
+from app.core.rag.retriever import AutoMergingRetriever
 
 # Try to import torch, with fallback if not available
 try:
@@ -47,7 +53,7 @@ class RAGEngine:
     This is the pure RAG logic without business orchestration
     """
     
-    def __init__(self, llm_model: str = "deepseek-r1:latest", embedding_model: str = "mxbai-embed-large"):
+    def __init__(self, llm_model: str = "gemma2:2b", embedding_model: str = "mxbai-embed-large"):
         """Initialize RAG engine with models"""
         # Initialize default model parameters
         self.model_parameters = {
@@ -207,7 +213,9 @@ class RAGEngine:
         else:
             hf_model_name = self.embedding_model
         
-        logger.info(f"Starting download of HuggingFace model: {hf_model_name}")
+        logger.info(f"📦 Loading HuggingFace model: {hf_model_name}")
+        logger.info(f"💾 Cache location: /root/.cache/huggingface/hub/")
+        logger.info(f"ℹ️  First load: downloads from internet (~20s). Subsequent loads: from cache (~10-20s)")
         
         # Progress indicator
         download_complete = threading.Event()
@@ -216,7 +224,7 @@ class RAGEngine:
         def progress_logger():
             while not download_complete.is_set():
                 elapsed = int(time.time() - start_time)
-                logger.info(f"⏳ Still downloading {hf_model_name}... ({elapsed}s elapsed)")
+                logger.info(f"⏳ Loading {hf_model_name}... ({elapsed}s elapsed)")
                 if download_complete.wait(10):
                     break
         
@@ -426,8 +434,8 @@ class RAGEngine:
             logger.error(f"Error clearing vector store: {e}")
             return False
 
-    def query(self, question: str, k: int = 4) -> Tuple[str, List[Document]]:
-        """Query the vector store and generate answer"""
+    def query(self, question: str, k: int = 4, user_id: Optional[str] = None) -> Tuple[str, List[Document]]:
+        """Query the vector store and generate answer with retrieval config support"""
         try:
             if not self.vector_store:
                 return "Vector store not initialized", []
@@ -435,11 +443,50 @@ class RAGEngine:
             if not self.model:
                 return "LLM model not initialized", []
             
-            # Create retriever
-            retriever = self.vector_store.as_retriever(search_kwargs={"k": k})
+            # Load retrieval config for the user
+            retrieval_config = None
+            if user_id:
+                try:
+                    config_manager = get_retrieval_config_manager()
+                    retrieval_config = config_manager.get_config(user_id)
+                    logger.info(f"[RETRIEVAL CONFIG] Loaded config for user {user_id}: reranker={retrieval_config.reranker_enabled}, auto_merge={retrieval_config.auto_merging_enabled}")
+                except Exception as e:
+                    logger.warning(f"Could not load retrieval config for user {user_id}: {e}")
+            
+            # Create retriever with max_chunks from config or default k
+            max_chunks = retrieval_config.max_chunks if retrieval_config else k
+            retriever = self.vector_store.as_retriever(search_kwargs={"k": max_chunks})
             
             # Retrieve relevant documents
             docs = retriever.get_relevant_documents(question)
+            logger.info(f"[RETRIEVAL] Retrieved {len(docs)} initial documents")
+            
+            # Apply auto-merging if enabled
+            if retrieval_config and retrieval_config.auto_merging_enabled:
+                try:
+                    logger.info("[AUTO_MERGE] Auto-merging is enabled, applying hierarchical merging")
+                    merger = AutoMergingRetriever(
+                        
+                        similarity_threshold=retrieval_config.auto_merging_similarity_threshold
+                    )
+                    docs = merger.merge_documents(docs)
+                    logger.info(f"[AUTO_MERGE] After merging: {len(docs)} documents")
+                except Exception as e:
+                    logger.error(f"[AUTO_MERGE] Error during auto-merge: {e}")
+            
+            # Apply reranking if enabled
+            if retrieval_config and retrieval_config.reranker_enabled and retrieval_config.reranker_model:
+                try:
+                    logger.info(f"[RERANKER] Reranking enabled with model {retrieval_config.reranker_model}")
+                    reranker = get_reranker(
+                        model_name=retrieval_config.reranker_model,
+                        provider=retrieval_config.reranker_provider or "huggingface"
+                    )
+                    # Run async reranker in sync context
+                    docs = asyncio.run(reranker.rerank(question, docs, top_k=max_chunks))
+                    logger.info(f"[RERANKER] After reranking: {len(docs)} documents")
+                except Exception as e:
+                    logger.error(f"[RERANKER] Error during reranking: {e}")
             
             # Format context
             context = "\n\n".join([doc.page_content for doc in docs])
@@ -459,6 +506,100 @@ class RAGEngine:
         except Exception as e:
             logger.error(f"Error during query: {e}")
             return f"Error: {str(e)}", []
+
+    async def stream_response(
+        self, 
+        question: str, 
+        k: int = 4, 
+        style: str = "conversational",
+        user_id: str = None
+    ):
+        """
+        Stream response chunks for a question with retrieval config support
+        
+        Args:
+            question: User question
+            k: Number of documents to retrieve
+            style: Response style ('conversational' or 'detailed')
+            user_id: Optional user ID for loading retrieval config
+            
+        Yields:
+            Response chunks as strings
+        """
+        try:
+            if not self.vector_store:
+                yield '{"error": "Vector store not initialized"}'
+                return
+            
+            if not self.model:
+                yield '{"error": "LLM model not initialized"}'
+                return
+            
+            # Load retrieval config for the user
+            retrieval_config = None
+            if user_id:
+                try:
+                    config_manager = get_retrieval_config_manager()
+                    retrieval_config = config_manager.get_config(user_id)
+                    logger.info(f"[RETRIEVAL CONFIG] Loaded config for user {user_id}: reranker={retrieval_config.reranker_enabled}, auto_merge={retrieval_config.auto_merging_enabled}")
+                except Exception as e:
+                    logger.warning(f"Could not load retrieval config for user {user_id}: {e}")
+            
+            # Create retriever with max_chunks from config or default k
+            max_chunks = retrieval_config.max_chunks if retrieval_config else k
+            retriever = self.vector_store.as_retriever(search_kwargs={"k": max_chunks})
+            
+            # Retrieve relevant documents
+            docs = retriever.get_relevant_documents(question)
+            logger.info(f"[RETRIEVAL] Retrieved {len(docs)} initial documents")
+            
+            # Apply auto-merging if enabled
+            if retrieval_config and retrieval_config.auto_merging_enabled:
+                try:
+                    logger.info("[AUTO_MERGE] Auto-merging is enabled, applying hierarchical merging")
+                    merger = AutoMergingRetriever(
+                        
+                        similarity_threshold=retrieval_config.auto_merging_similarity_threshold
+                    )
+                    docs = merger.merge_documents(docs)
+                    logger.info(f"[AUTO_MERGE] After merging: {len(docs)} documents")
+                except Exception as e:
+                    logger.error(f"[AUTO_MERGE] Error during auto-merge: {e}")
+            
+            # Apply reranking if enabled
+            if retrieval_config and retrieval_config.reranker_enabled and retrieval_config.reranker_model:
+                try:
+                    logger.info(f"[RERANKER] Reranking enabled with model {retrieval_config.reranker_model}")
+                    reranker = get_reranker(
+                        model_name=retrieval_config.reranker_model,
+                        provider=retrieval_config.reranker_provider or "huggingface"
+                    )
+                    docs = await reranker.rerank(question, docs, top_k=max_chunks)
+                    logger.info(f"[RERANKER] After reranking: {len(docs)} documents")
+                except Exception as e:
+                    logger.error(f"[RERANKER] Error during reranking: {e}")
+            
+            # Format context
+            context = "\n\n".join([doc.page_content for doc in docs])
+            
+            # Select prompt based on style
+            prompt = self.conversational_prompt if style == "conversational" else self.prompt
+            
+            # Create streaming chain
+            chain = (
+                {"context": lambda x: context, "question": RunnablePassthrough()}
+                | prompt
+                | self.model
+                | StrOutputParser()
+            )
+            
+            # Stream response
+            async for chunk in chain.astream(question):
+                yield chunk
+            
+        except Exception as e:
+            logger.error(f"Error during streaming query: {e}")
+            yield f'{{"error": "{str(e)}"}}'
 
     def update_model_parameters(self, parameters: Dict):
         """Update LLM model parameters"""

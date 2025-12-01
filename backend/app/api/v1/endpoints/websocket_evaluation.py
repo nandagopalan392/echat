@@ -77,10 +77,8 @@ async def websocket_evaluation_updates(
         
         # Get current task status for initial sync
         try:
-            from app.db import DatabaseConnection
             from app.db.repositories import EvaluationRepository
             
-            db = DatabaseConnection()
             eval_repo = EvaluationRepository(db)
             task = eval_repo.get_task(task_id)
             

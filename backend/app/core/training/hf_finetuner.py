@@ -24,7 +24,7 @@ from transformers import (
     EarlyStoppingCallback, get_linear_schedule_with_warmup, TrainerCallback
 )
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
-from app.db.repositories.experiment_repository import experiment_db, ExperimentStatus
+from app.db.repositories.experiment_repository import experiment_repository, ExperimentStatus
 from app.core.training.metrics import create_metrics_collector, cleanup_metrics_collector, get_metrics_collector
 
 logger = logging.getLogger(__name__)
@@ -49,25 +49,25 @@ class HuggingFaceFineTuner:
         """Start training process for an experiment"""
         try:
             # Update experiment status
-            experiment_db.update_experiment_status(experiment_id, ExperimentStatus.RUNNING)
+            experiment_repository.update_experiment_status(experiment_id, ExperimentStatus.RUNNING)
             
             # Run training in executor to avoid blocking
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, self._train_model, experiment_id, config)
             
             if result:
-                experiment_db.update_experiment_status(experiment_id, ExperimentStatus.COMPLETED)
+                experiment_repository.update_experiment_status(experiment_id, ExperimentStatus.COMPLETED)
                 logger.info(f"Training completed successfully for experiment {experiment_id}")
                 return True
             else:
-                experiment_db.update_experiment_status(
+                experiment_repository.update_experiment_status(
                     experiment_id, ExperimentStatus.FAILED, "Training failed"
                 )
                 return False
                 
         except Exception as e:
             logger.error(f"Training failed for experiment {experiment_id}: {e}")
-            experiment_db.update_experiment_status(
+            experiment_repository.update_experiment_status(
                 experiment_id, ExperimentStatus.FAILED, str(e)
             )
             return False
@@ -116,7 +116,7 @@ class HuggingFaceFineTuner:
             logger.info(f"Model saved to: {model_save_path}")
             
             # Update experiment with model path
-            experiment_db.update_experiment(experiment_id, {"model_path": model_save_path})
+            experiment_repository.update_experiment(experiment_id, {"model_path": model_save_path})
             
             # Update experiment with final metrics
             eval_results = trainer.evaluate()
@@ -132,9 +132,9 @@ class HuggingFaceFineTuner:
                     'training_completed': True,
                     'completion_time': time.time()
                 }
-                experiment_db.update_experiment_metrics(experiment_id, final_metrics)
+                experiment_repository.update_experiment_metrics(experiment_id, final_metrics)
             else:
-                experiment_db.update_experiment_metrics(experiment_id, eval_results)
+                experiment_repository.update_experiment_metrics(experiment_id, eval_results)
             
             logger.info(f"Training completed successfully for experiment {experiment_id}")
             
@@ -159,7 +159,7 @@ class HuggingFaceFineTuner:
             if is_virtual_dataset and dataset_id:
                 # This is a generated dataset stored in database
                 logger.info(f"Loading dataset samples from database for dataset_id: {dataset_id}")
-                samples = experiment_db.get_dataset_samples(dataset_id)
+                samples = experiment_repository.get_dataset_samples(dataset_id)
                 
                 if not samples:
                     raise ValueError(f"No samples found for dataset_id: {dataset_id}")
@@ -470,7 +470,7 @@ class HuggingFaceFineTuner:
                     )
                     
                     # Log to database
-                    experiment_db.log_training_step(
+                    experiment_repository.log_training_step(
                         self.experiment_id,
                         epoch=int(state.epoch) if state.epoch else 0,
                         step=state.global_step,

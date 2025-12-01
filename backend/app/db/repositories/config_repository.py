@@ -19,26 +19,35 @@ class ConfigRepository:
         self.db = db
     
     # Model settings operations
-    def get_model_settings(self) -> Optional[ModelSettings]:
-        """Get model settings"""
+    def get_model_settings(self) -> Optional[Dict]:
+        """Get current model settings from database"""
         try:
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute(
-                    '''SELECT id, llm, embedding, parameters, updated_at, provider, embedding_provider
-                       FROM model_settings
-                       ORDER BY id DESC
-                       LIMIT 1'''
-                )
+                cursor.execute("""
+                    SELECT llm, embedding, parameters 
+                    FROM model_settings 
+                    ORDER BY id DESC 
+                    LIMIT 1
+                """)
                 row = cursor.fetchone()
-                return ModelSettings.from_db_row(row) if row else None
+                
+                if row:
+                    # sqlite3.Row can be accessed by index, not .get()
+                    return {
+                        'llm': row[0] if row[0] else None,
+                        'embedding': row[1] if row[1] else None,
+                        'parameters': json.loads(row[2]) if row[2] else {}
+                    }
+                return None
         except Exception as e:
             logger.error(f"Error getting model settings: {e}")
             return None
     
     def save_model_settings(self, llm: str, embedding: str, parameters: Dict,
-                           provider: str = 'ollama', embedding_provider: str = 'ollama') -> bool:
-        """Save model settings"""
+                           llm_provider: Optional[str] = None,
+                           embedding_provider: Optional[str] = None) -> bool:
+        """Save model settings to database"""
         try:
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()

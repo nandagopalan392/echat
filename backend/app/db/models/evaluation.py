@@ -77,16 +77,17 @@ class EvaluationDataset:
             return None
         
         if hasattr(row, 'keys'):
+            # sqlite3.Row has keys() but uses dict-style access, not .get()
             return cls(
-                id=row.get('id'),
-                name=row.get('name', ''),
-                description=row.get('description'),
-                document_count=row.get('document_count', 0),
-                status=row.get('status', 'Processing'),
-                created_by=row.get('created_by', ''),
-                created_at=row.get('created_at'),
-                updated_at=row.get('updated_at'),
-                file_path=row.get('file_path')
+                id=row['id'] if 'id' in row.keys() else None,
+                name=row['name'] if 'name' in row.keys() else '',
+                description=row['description'] if 'description' in row.keys() else None,
+                document_count=row['document_count'] if 'document_count' in row.keys() else 0,
+                status=row['status'] if 'status' in row.keys() else 'Processing',
+                created_by=row['created_by'] if 'created_by' in row.keys() else '',
+                created_at=row['created_at'] if 'created_at' in row.keys() else None,
+                updated_at=row['updated_at'] if 'updated_at' in row.keys() else None,
+                file_path=row['file_path'] if 'file_path' in row.keys() else None
             )
         else:
             return cls(

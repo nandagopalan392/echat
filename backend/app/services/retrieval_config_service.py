@@ -83,29 +83,15 @@ class RetrievalConfigService:
             if config.reranker_enabled and config.reranker_model and config.reranker_model.lower() != "none":
                 logger.info(f"🎯 Checking reranker model availability: {config.reranker_model}")
                 
-                if config.reranker_provider == "huggingface":
-                    # For HuggingFace models, start download in background
-                    if config.reranker_model not in download_status_cache:
-                        download_status_cache[config.reranker_model] = {
-                            "downloading": True,
-                            "completed": False,
-                            "message": "Download starting..."
-                        }
-                        asyncio.create_task(self._download_huggingface_model_background(config.reranker_model))
-                    download_result = {
-                        "success": True,
-                        "downloaded": False,
-                        "message": f"HuggingFace model {config.reranker_model} download started in background"
-                    }
-                else:
-                    # For Ollama models, download synchronously
-                    download_result = await self._check_and_download_reranker_model(
-                        config.reranker_model,
-                        config.reranker_provider
-                    )
-                    
-                    if not download_result["success"]:
-                        logger.warning(f"⚠️ Reranker model download failed but continuing with config save: {download_result['message']}")
+                # Download reranker model synchronously for both HuggingFace and Ollama
+                logger.info(f"📥 Downloading reranker model synchronously: {config.reranker_model} (provider: {config.reranker_provider})")
+                download_result = await self._check_and_download_reranker_model(
+                    config.reranker_model,
+                    config.reranker_provider
+                )
+                
+                if not download_result["success"]:
+                    logger.warning(f"⚠️ Reranker model download failed but continuing with config save: {download_result['message']}")
             
             # Validate configuration
             warnings = self.config_manager.validate_config(config)
@@ -298,48 +284,77 @@ class RetrievalConfigService:
         if not model_name or model_name.lower() == "none":
             return {"success": True, "downloaded": False, "message": "No reranker model specified"}
         
-        # For HuggingFace models, handle download with status tracking
+        # For HuggingFace models, handle download synchronously
         if provider == "huggingface":
-            if model_name in download_status_cache:
-                status = download_status_cache[model_name]
+            # Check if already downloaded and cached
+            if model_name in download_status_cache and download_status_cache[model_name].get("completed"):
+                logger.info(f"✅ HuggingFace model {model_name} already downloaded and cached")
                 return {
                     "success": True,
-                    "downloaded": status.get("completed", False),
-                    "message": status.get("message", "Download in progress"),
-                    "downloading": status.get("downloading", False)
+                    "downloaded": False,
+                    "message": f"Model {model_name} already available in cache"
                 }
             
-            # Start download process
+            # Start synchronous download process
             try:
                 logger.info(f"🔄 Downloading HuggingFace reranker model: {model_name}")
+                logger.info(f"📥 This may take a few minutes depending on model size and internet speed...")
+                
                 download_status_cache[model_name] = {
                     "downloading": True,
                     "completed": False,
-                    "message": "Starting download..."
+                    "message": "Downloading model files from HuggingFace Hub...",
+                    "status": "downloading"
                 }
                 
                 from sentence_transformers import CrossEncoder
+                import time
                 
-                # Run in thread pool to avoid blocking
+                start_time = time.time()
+                
+                # Run in thread pool to avoid blocking the event loop
                 loop = asyncio.get_event_loop()
-                model = await loop.run_in_executor(None, lambda: CrossEncoder(model_name))
+                
+                def download_model():
+                    logger.info(f"📦 Initializing CrossEncoder for {model_name}...")
+                    model = CrossEncoder(model_name)
+                    logger.info(f"📦 Model {model_name} loaded successfully")
+                    return model
+                
+                model = await loop.run_in_executor(None, download_model)
+                
+                elapsed_time = time.time() - start_time
                 
                 # Update status on success
                 download_status_cache[model_name] = {
                     "downloading": False,
                     "completed": True,
-                    "message": f"Successfully downloaded {model_name}"
+                    "message": f"Successfully downloaded {model_name} in {elapsed_time:.1f}s",
+                    "status": "completed"
                 }
                 
-                return {"success": True, "downloaded": True, "message": f"HuggingFace model {model_name} downloaded successfully"}
+                logger.info(f"✅ Successfully downloaded HuggingFace model {model_name} in {elapsed_time:.1f}s")
+                
+                return {
+                    "success": True,
+                    "downloaded": True,
+                    "message": f"HuggingFace model {model_name} downloaded successfully in {elapsed_time:.1f}s"
+                }
             except Exception as e:
-                logger.error(f"Failed to download HuggingFace model {model_name}: {e}")
+                error_msg = str(e)
+                logger.error(f"❌ Failed to download HuggingFace model {model_name}: {error_msg}", exc_info=True)
                 download_status_cache[model_name] = {
                     "downloading": False,
                     "completed": False,
-                    "message": f"Download failed: {str(e)}"
+                    "message": f"Download failed: {error_msg}",
+                    "status": "failed",
+                    "error": error_msg
                 }
-                return {"success": False, "downloaded": False, "message": f"Failed to download HuggingFace model: {str(e)}"}
+                return {
+                    "success": False,
+                    "downloaded": False,
+                    "message": f"Failed to download HuggingFace model: {error_msg}"
+                }
         
         # For Ollama models
         try:
@@ -442,12 +457,12 @@ class RetrievalConfigService:
     
     @staticmethod
     def _get_huggingface_models() -> List[Dict[str, Any]]:
-        """Get list of HuggingFace reranker models"""
+        """Get list of publicly accessible HuggingFace reranker models"""
         return [
             {
                 "name": "BAAI/bge-reranker-v2-m3",
-                "display_name": "BGE Reranker V2 M3",
-                "description": "🤗 Multilingual BGE reranking model with excellent cross-lingual performance",
+                "display_name": "BGE Reranker V2 M3 ⭐",
+                "description": "🤗 Multilingual BGE reranking model with excellent cross-lingual performance (Recommended)",
                 "provider": "huggingface",
                 "size": "1.2B",
                 "is_local": False
@@ -469,25 +484,9 @@ class RetrievalConfigService:
                 "is_local": False
             },
             {
-                "name": "jinaai/jina-reranker-v1-base-en",
-                "display_name": "Jina Reranker V1 Base (English)",
-                "description": "🤗 Jina's dedicated reranking model optimized for English",
-                "provider": "huggingface",
-                "size": "278M",
-                "is_local": False
-            },
-            {
-                "name": "jinaai/jina-reranker-v1-tiny-en",
-                "display_name": "Jina Reranker V1 Tiny (English)",
-                "description": "🤗 Lightweight Jina reranker for fast processing",
-                "provider": "huggingface",
-                "size": "33M",
-                "is_local": False
-            },
-            {
                 "name": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-                "display_name": "MS Marco MiniLM L6 V2",
-                "description": "🤗 Microsoft's cross-encoder reranker trained on MS MARCO",
+                "display_name": "MS Marco MiniLM L6 V2 🚀",
+                "description": "🤗 Fast and lightweight Microsoft cross-encoder (Best for quick setup)",
                 "provider": "huggingface",
                 "size": "90M",
                 "is_local": False

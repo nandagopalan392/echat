@@ -24,6 +24,8 @@ import {
 
 const ManageUserPage = () => {
     const navigate = useNavigate();
+    const currentUsername = localStorage.getItem('username');
+    
     const [activeTab, setActiveTab] = useState('users');
     const [loading, setLoading] = useState(true);
     const [users, setUsers] = useState([]);
@@ -64,7 +66,6 @@ const ManageUserPage = () => {
     const loadUsers = async () => {
         try {
             const response = await api.getUsers();
-            console.log('Users API response:', response);
             setUsers(response.users || []);
         } catch (error) {
             console.error('Error loading users:', error);
@@ -74,7 +75,6 @@ const ManageUserPage = () => {
     const loadActivities = async () => {
         try {
             const response = await api.getUserActivities();
-            console.log('Activities API response:', response);
             setActivities(response.activities || []);
         } catch (error) {
             console.error('Error loading activities:', error);
@@ -84,7 +84,6 @@ const ManageUserPage = () => {
     const loadStats = async () => {
         try {
             const response = await api.getUserStatsGeneral();
-            console.log('Stats API response:', response);
             setStats(response.stats || {
                 totalUsers: 0,
                 activeUsers: 0,
@@ -96,13 +95,14 @@ const ManageUserPage = () => {
         }
     };
 
-    const handleDeleteUser = async (userId) => {
-        if (window.confirm('Are you sure you want to delete this user?')) {
+    const handleDeleteUser = async (username) => {
+        if (window.confirm(`Are you sure you want to delete user "${username}"?`)) {
             try {
-                await api.deleteUser(userId);
-                await loadUsers();
+                await api.deleteUser(username);
+                loadUsers();
             } catch (error) {
                 console.error('Error deleting user:', error);
+                alert(error.message || 'Failed to delete user');
             }
         }
     };
@@ -428,12 +428,12 @@ const ManageUserPage = () => {
                                 </thead>
                                 <tbody className="bg-white divide-y divide-gray-200">
                                     {users.map((user) => (
-                                        <tr key={user.id} className="hover:bg-gray-50">
+                                        <tr key={user.user_id || user.username} className="hover:bg-gray-50">
                                             <td className="px-6 py-4 whitespace-nowrap">
                                                 <div className="flex items-center">
                                                     <div className="h-10 w-10 rounded-full bg-indigo-100 flex items-center justify-center">
                                                         <span className="text-indigo-600 font-medium">
-                                                            {user.username.charAt(0).toUpperCase()}
+                                                            {user.username?.charAt(0).toUpperCase()}
                                                         </span>
                                                     </div>
                                                     <div className="ml-4">
@@ -463,12 +463,14 @@ const ManageUserPage = () => {
                                                 {formatDate(user.created_at)}
                                             </td>
                                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                                <button
-                                                    onClick={() => handleDeleteUser(user.id)}
-                                                    className="text-red-600 hover:text-red-900 transition-colors"
-                                                >
-                                                    Delete
-                                                </button>
+                                                {user.username !== currentUsername && (
+                                                    <button
+                                                        onClick={() => handleDeleteUser(user.username)}
+                                                        className="text-red-600 hover:text-red-900 transition-colors"
+                                                    >
+                                                        Delete
+                                                    </button>
+                                                )}
                                             </td>
                                         </tr>
                                     ))}

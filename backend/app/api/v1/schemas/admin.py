@@ -1,30 +1,57 @@
 """
 Pydantic schemas for admin API requests and responses
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any
 
 
 class AddUserRequest(BaseModel):
     """Admin add user request schema"""
-    username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=6)
-    role: str = Field(..., description="User role: Engineer, Manager, Business Development, or Associate")
+    username: str = Field(
+        ..., 
+        min_length=3, 
+        max_length=50,
+        description="Username must be between 3 and 50 characters"
+    )
+    email: Optional[str] = Field(
+        None,
+        description="User email address (optional)"
+    )
+    password: str = Field(
+        ..., 
+        min_length=6,
+        description="Password must be at least 6 characters"
+    )
+    role: str = Field(
+        ..., 
+        description="User role: Engineer, Manager, Business Development, or Associate"
+    )
     
-    class Config:
-        json_schema_extra = {
+    @field_validator('role')
+    @classmethod
+    def validate_role(cls, v):
+        valid_roles = ['Engineer', 'Manager', 'Business Development', 'Associate']
+        if v not in valid_roles:
+            raise ValueError(f"Role must be one of: {', '.join(valid_roles)}")
+        return v
+    
+    model_config = {
+        "json_schema_extra": {
             "example": {
                 "username": "new_user",
+                "email": "user@example.com",
                 "password": "securepass123",
                 "role": "Engineer"
             }
         }
+    }
 
 
 class UserListItem(BaseModel):
     """Single user item in list"""
     user_id: Optional[int] = None
     username: str
+    email: Optional[str] = None
     role: str
     created_at: Optional[str] = None
     last_login: Optional[str] = None

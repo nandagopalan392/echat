@@ -17,10 +17,13 @@ class DatabaseConnection:
     
     def __init__(self, db_path: str = None):
         if db_path is None:
-            db_dir = Path(settings.SQLITE_DB_PATH)
+            db_file = Path(settings.SQLITE_DB_PATH)
+            db_dir = db_file.parent
             db_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = str(db_dir / 'main.db')  # Main application database
+            self.db_path = str(db_file)  # Use the configured database path
         else:
+            db_dir = Path(db_path).parent
+            db_dir.mkdir(parents=True, exist_ok=True)
             self.db_path = db_path
         
         logger.info(f"Database path: {self.db_path}")

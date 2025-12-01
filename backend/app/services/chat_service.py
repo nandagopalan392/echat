@@ -189,7 +189,17 @@ class ChatService:
         try:
             sessions = self.chat_repo.get_user_sessions(username)
             logger.info(f"Retrieved {len(sessions)} sessions for user '{username}'")
-            return sessions
+            # Convert ChatSession objects to dicts
+            return [
+                {
+                    "id": session.id,
+                    "username": session.username,
+                    "topic": session.topic,
+                    "created_at": session.created_at,
+                    "last_updated": session.last_updated
+                }
+                for session in sessions
+            ]
         except Exception as e:
             logger.error(f"Error getting user sessions: {str(e)}")
             raise
@@ -210,14 +220,19 @@ class ChatService:
             
             messages = self.chat_repo.get_session_messages(session_id)
             
-            # Format messages
+            # Format messages - convert Message objects to dicts
             formatted_messages = []
             for i, msg in enumerate(messages):
+                # Handle timestamp - it's stored as string in DB
+                timestamp = msg.timestamp
+                if timestamp and hasattr(timestamp, 'isoformat'):
+                    timestamp = timestamp.isoformat()
+                
                 formatted_msg = {
                     "id": f"{session_id}-{i}",
-                    "content": msg[0],
-                    "isUser": bool(msg[1]),
-                    "timestamp": msg[2] if len(msg) > 2 else None
+                    "content": msg.content,
+                    "isUser": msg.is_user,
+                    "timestamp": timestamp
                 }
                 formatted_messages.append(formatted_msg)
                 logger.debug(
@@ -259,33 +274,30 @@ class ChatService:
                 f"chosen_index: {chosen_index}"
             )
             
-            # Get response options
+            # Get response options from repository
             chosen_response_content = None
             try:
-                with sqlite3.connect(self.rlhf_manager.db_path) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        '''
-                        SELECT response_option_0, response_option_1 
-                        FROM rlhf_response_options 
-                        WHERE session_id = ? AND username = ?
-                        ORDER BY created_at DESC LIMIT 1
-                        ''',
-                        (session_id, username)
-                    )
+                response_options = self.rlhf_manager.repository.get_response_options(
+                    session_id=session_id
+                )
+                
+                if response_options and len(response_options) > 0:
+                    # Get the most recent options
+                    latest_options = response_options[0]
+                    options_list = [
+                        latest_options.get('response_option_0', ''),
+                        latest_options.get('response_option_1', '')
+                    ]
                     
-                    result = cursor.fetchone()
-                    if result:
-                        response_options = [result[0], result[1]]
-                        if 0 <= chosen_index < len(response_options):
-                            chosen_response_content = response_options[chosen_index]
-                            logger.info(f"Found chosen response: {chosen_response_content[:100]}...")
-                        else:
-                            logger.error(f"Invalid chosen_index {chosen_index}, defaulting to 0")
-                            chosen_response_content = response_options[0]
-                            chosen_index = 0
+                    if 0 <= chosen_index < len(options_list):
+                        chosen_response_content = options_list[chosen_index]
+                        logger.info(f"Found chosen response: {chosen_response_content[:100]}...")
                     else:
-                        logger.error(f"No response options found for session {session_id}")
+                        logger.error(f"Invalid chosen_index {chosen_index}, defaulting to 0")
+                        chosen_response_content = options_list[0]
+                        chosen_index = 0
+                else:
+                    logger.error(f"No response options found for session {session_id}")
             
             except Exception as e:
                 logger.error(f"Error retrieving response options: {str(e)}")
@@ -304,8 +316,8 @@ class ChatService:
             # Save chosen response to chat history
             if chosen_response_content:
                 try:
-                    # Check for duplicates
-                    with sqlite3.connect(self.db.db_path) as conn:
+                    # Check for duplicates and save if not exists
+                    with self.db.get_connection() as conn:
                         cursor = conn.cursor()
                         cursor.execute(
                             """SELECT COUNT(*) FROM messages 
@@ -314,6 +326,7 @@ class ChatService:
                         )
                         
                         if cursor.fetchone()[0] == 0:  # Not found, save it
+                            # Save using the repository method
                             self.chat_repo.save_message(
                                 session_id,
                                 chosen_response_content,

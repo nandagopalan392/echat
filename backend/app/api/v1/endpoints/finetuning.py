@@ -27,7 +27,7 @@ from app.api.v1.schemas.finetuning import (
     StartTrainingResponse
 )
 from app.services.finetuning_service import FinetuningService
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_current_admin_user
 
 logger = logging.getLogger(__name__)
 

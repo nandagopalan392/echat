@@ -8,7 +8,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import Dict, Any, Optional
 
-from app.dependencies import get_current_user, get_document_repository
+from app.dependencies import get_current_user,  get_current_admin_user, get_document_repository
+from app.db.models.user import User
 from app.api.v1.schemas.retrieval import (
     RetrievalConfigResponse,
     RetrievalConfigUpdateResponse,
@@ -33,7 +34,7 @@ def get_retrieval_service(
 
 @router.get("/config", response_model=RetrievalConfigResponse)
 async def get_retrieval_config(
-    current_admin: dict = Depends(get_current_admin_user),
+    current_admin: User = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """
@@ -43,7 +44,7 @@ async def get_retrieval_config(
     otherwise default configuration).
     """
     try:
-        user_id = current_user.get('sub')
+        user_id = current_admin.username
         config = service.get_config(user_id)
         
         return RetrievalConfigResponse(config=config)
@@ -60,7 +61,7 @@ async def get_retrieval_config(
 async def update_retrieval_config(
     config_data: Dict[str, Any],
     background_tasks: BackgroundTasks,
-    current_admin: dict = Depends(get_current_admin_user),
+    current_admin: User = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """
@@ -73,11 +74,11 @@ async def update_retrieval_config(
     Args:
         config_data: New configuration data
         background_tasks: FastAPI background tasks
-        current_user: Current authenticated user
+        current_admin: Current authenticated admin user
         service: Retrieval config service
     """
     try:
-        user_id = current_user.get('sub')
+        user_id = current_admin.username
         
         # Update configuration
         updated_config, warnings, download_result, message = await service.update_config(
@@ -108,7 +109,7 @@ async def update_retrieval_config(
 @router.get("/reranker-models", response_model=RerankerModelsResponse)
 async def get_available_reranker_models(
     provider: Optional[str] = None,
-    current_admin: dict = Depends(get_current_admin_user),
+    current_admin: User = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """
@@ -119,6 +120,7 @@ async def get_available_reranker_models(
     
     Args:
         provider: Optional filter by provider ('ollama' or 'huggingface')
+        current_admin: Current authenticated admin user
     """
     try:
         models_data = await service.get_available_reranker_models(provider)
@@ -152,7 +154,7 @@ async def get_available_reranker_models(
 @router.get("/reranker-download-status", response_model=RerankerDownloadStatus)
 async def get_reranker_download_status(
     model_name: str,
-    current_admin: dict = Depends(get_current_admin_user),
+    current_admin: User = Depends(get_current_admin_user),
     service: RetrievalConfigService = Depends(get_retrieval_service)
 ):
     """
@@ -163,6 +165,7 @@ async def get_reranker_download_status(
     
     Args:
         model_name: Name of the reranker model
+        current_admin: Current authenticated admin user
     """
     try:
         status_data = service.get_reranker_download_status(model_name)

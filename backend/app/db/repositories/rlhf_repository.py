@@ -9,7 +9,7 @@ import logging
 import datetime
 from typing import List, Optional
 
-from app.db.connection import DatabaseConnection, get_db_connection
+from app.db.base import DatabaseConnection, get_db
 from app.db.models.rlhf import RLHFFeedback, RLHFResponseOption, RLHFTrainingData
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ class RLHFRepository:
             db: Optional DatabaseConnection instance (defaults to singleton)
         """
         if db is None:
-            self.db = get_db_connection()
+            self.db = DatabaseConnection()
         else:
             self.db = db
         
@@ -63,19 +63,19 @@ class RLHFRepository:
         try:
             now = datetime.datetime.now().isoformat()
             
-            conn = self.db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                '''
-                INSERT INTO rlhf_response_options 
-                (session_id, question, response_option_0, response_option_1, 
-                 username, created_at, message_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (session_id, question, response_option_0, response_option_1,
-                 username, now, message_id)
-            )
-            conn.commit()
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''
+                    INSERT INTO rlhf_response_options 
+                    (session_id, question, response_option_0, response_option_1, 
+                     username, created_at, message_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (session_id, question, response_option_0, response_option_1,
+                     username, now, message_id)
+                )
+                conn.commit()
             
             logger.info(f"Saved RLHF response options for session {session_id}")
             return True
@@ -104,65 +104,65 @@ class RLHFRepository:
             True if successful, False otherwise
         """
         try:
-            conn = self.db.get_connection()
-            cursor = conn.cursor()
-            
-            # Get latest response options for this session
-            cursor.execute(
-                '''
-                SELECT id, response_option_0, response_option_1 
-                FROM rlhf_response_options 
-                WHERE session_id = ? AND username = ? AND chosen_response IS NULL
-                ORDER BY created_at DESC LIMIT 1
-                ''',
-                (session_id, username)
-            )
-            
-            result = cursor.fetchone()
-            if not result:
-                logger.error(
-                    f"No pending response options found for session {session_id} "
-                    f"and user {username}"
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get latest response options for this session
+                cursor.execute(
+                    '''
+                    SELECT id, response_option_0, response_option_1 
+                    FROM rlhf_response_options 
+                    WHERE session_id = ? AND username = ? AND chosen_response IS NULL
+                    ORDER BY created_at DESC LIMIT 1
+                    ''',
+                    (session_id, username)
                 )
-                return False
-            
-            record_id, option_0, option_1 = result
-            response_options = [option_0, option_1]
-            
-            # Validate chosen_index
-            if chosen_index >= len(response_options) or chosen_index < 0:
-                logger.error(
-                    f"Invalid chosen_index {chosen_index} for session {session_id}"
+                
+                result = cursor.fetchone()
+                if not result:
+                    logger.error(
+                        f"No pending response options found for session {session_id} "
+                        f"and user {username}"
+                    )
+                    return False
+                
+                record_id, option_0, option_1 = result
+                response_options = [option_0, option_1]
+                
+                # Validate chosen_index
+                if chosen_index >= len(response_options) or chosen_index < 0:
+                    logger.error(
+                        f"Invalid chosen_index {chosen_index} for session {session_id}"
+                    )
+                    chosen_index = 0
+                
+                chosen_response = response_options[chosen_index]
+                logger.info(
+                    f"Selected response option {chosen_index} for session {session_id}: "
+                    f"{chosen_response[:50]}..."
                 )
-                chosen_index = 0
-            
-            chosen_response = response_options[chosen_index]
-            logger.info(
-                f"Selected response option {chosen_index} for session {session_id}: "
-                f"{chosen_response[:50]}..."
-            )
-            
-            # Update record with chosen response
-            cursor.execute(
-                '''
-                UPDATE rlhf_response_options 
-                SET chosen_response = ?, chosen_index = ?
-                WHERE id = ?
-                ''',
-                (chosen_response, chosen_index, record_id)
-            )
-            
-            if cursor.rowcount == 0:
-                logger.error(f"Failed to update response options record {record_id}")
-                return False
-            
-            conn.commit()
-            
-            logger.info(
-                f"Successfully updated RLHF selected response for session {session_id}: "
-                f"option {chosen_index}"
-            )
-            return True
+                
+                # Update record with chosen response
+                cursor.execute(
+                    '''
+                    UPDATE rlhf_response_options 
+                    SET chosen_response = ?, chosen_index = ?
+                    WHERE id = ?
+                    ''',
+                    (chosen_response, chosen_index, record_id)
+                )
+                
+                if cursor.rowcount == 0:
+                    logger.error(f"Failed to update response options record {record_id}")
+                    return False
+                
+                conn.commit()
+                
+                logger.info(
+                    f"Successfully updated RLHF selected response for session {session_id}: "
+                    f"option {chosen_index}"
+                )
+                return True
             
         except Exception as e:
             logger.error(f"Error updating RLHF selected response: {str(e)}")
@@ -190,17 +190,17 @@ class RLHFRepository:
         try:
             now = datetime.datetime.now().isoformat()
             
-            conn = self.db.get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                '''
-                INSERT INTO rlhf_feedback 
-                (session_id, chosen_index, username, comment, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                ''',
-                (session_id, chosen_index, username, comment, now)
-            )
-            conn.commit()
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''
+                    INSERT INTO rlhf_feedback 
+                    (session_id, chosen_index, username, comment, created_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ''',
+                    (session_id, chosen_index, username, comment, now)
+                )
+                conn.commit()
             
             logger.info(f"Saved RLHF feedback for session {session_id}")
             return True
@@ -246,6 +246,41 @@ class RLHFRepository:
                 
         except Exception as e:
             logger.error(f"Error retrieving session response options: {str(e)}")
+            return []
+    
+    def get_response_options(self, session_id: int) -> List[dict]:
+        """
+        Get response options for a session as dictionaries.
+        
+        Args:
+            session_id: Chat session ID
+            
+        Returns:
+            List of dictionaries with response option data
+        """
+        try:
+            with self.db.get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                
+                cursor.execute(
+                    """
+                    SELECT * FROM rlhf_response_options
+                    WHERE session_id = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (session_id,)
+                )
+                
+                results = [dict(row) for row in cursor.fetchall()]
+                
+                logger.debug(
+                    f"Retrieved {len(results)} response options for session {session_id}"
+                )
+                return results
+                    
+        except Exception as e:
+            logger.error(f"Error retrieving response options: {str(e)}")
             return []
     
     def get_session_feedback(
