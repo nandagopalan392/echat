@@ -9,3 +9,5 @@ venv/
 *.log
 .git
 .gitignore
+data/
+temp_uploads/

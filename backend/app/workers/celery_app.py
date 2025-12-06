@@ -25,7 +25,8 @@ celery_app = Celery(
     backend=os.getenv("CELERY_RESULT_BACKEND", redis_url),
     include=[
         "app.workers.tasks.evaluation_tasks",
-        "app.workers.tasks.qca_tasks"
+        "app.workers.tasks.qca_tasks",
+        "app.workers.tasks.finetuning_tasks"
     ]  # Import tasks modules
 )
 
@@ -74,6 +75,16 @@ celery_app.conf.update(
         'app.workers.tasks.qca_tasks.create_qca_dataset_background': {
             'priority': 6,  # Medium-low priority for Q-C-A dataset creation
             'rate_limit': '1/m',  # Max 1 Q-C-A dataset creation per minute
+        },
+        'app.workers.tasks.finetuning_tasks.start_training_background': {
+            'priority': 2,  # High priority for training (resource-intensive)
+            'rate_limit': '1/m',  # Max 1 training job per minute
+        },
+        'app.workers.tasks.finetuning_tasks.stop_training_background': {
+            'priority': 1,  # Highest priority for stop requests
+        },
+        'app.workers.tasks.finetuning_tasks.cleanup_training_artifacts': {
+            'priority': 9,  # Lowest priority for cleanup
         },
     },
     

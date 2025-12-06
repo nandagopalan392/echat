@@ -261,23 +261,25 @@ class DatabaseInitializer:
             )
         ''')
         
-        # Evaluation results
+        # Evaluation results - drop and recreate to ensure schema is correct
+        cursor.execute('DROP TABLE IF EXISTS evaluation_results')
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS evaluation_results (
+            CREATE TABLE evaluation_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT,
                 dataset_id INTEGER NOT NULL,
-                model_name TEXT NOT NULL,
+                query TEXT NOT NULL,
+                expected_answer TEXT,
+                actual_answer TEXT,
+                context TEXT,
                 groundedness_score REAL,
-                context_relevance_score REAL,
-                answer_quality_score REAL,
-                avg_latency REAL,
-                total_queries INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'Running',
-                run_by TEXT NOT NULL,
-                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                completed_at TIMESTAMP,
+                relevance_score REAL,
+                quality_score REAL,
+                latency_ms INTEGER,
+                model_used TEXT,
+                evaluated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (dataset_id) REFERENCES evaluation_datasets (id) ON DELETE CASCADE,
-                FOREIGN KEY (run_by) REFERENCES users (username)
+                FOREIGN KEY (task_id) REFERENCES evaluation_tasks (task_id) ON DELETE CASCADE
             )
         ''')
         
@@ -304,6 +306,7 @@ class DatabaseInitializer:
                 evaluation_time REAL,
                 error_message TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 completed_at TIMESTAMP,
                 FOREIGN KEY (dataset_id) REFERENCES evaluation_datasets(id)
@@ -445,6 +448,9 @@ class DatabaseInitializer:
             # Evaluation datasets migrations
             ("evaluation_datasets", "file_path", "TEXT"),
             ("evaluation_datasets", "question_count", "INTEGER DEFAULT 0"),
+            
+            # Finetuning datasets migrations
+            ("datasets", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
         ]
         
         for table, column, definition in migrations:

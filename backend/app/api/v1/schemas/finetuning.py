@@ -85,7 +85,7 @@ class DatasetCreateRequest(BaseModel):
     """Create dataset from documents request"""
     name: str = Field(..., description="Dataset name")
     description: str = Field("", description="Dataset description")
-    document_ids: List[str] = Field(..., min_items=1, description="Document IDs to process")
+    document_ids: List[str] = Field(..., min_length=1, description="Document IDs to process")
     questions_per_doc: int = Field(5, ge=1, le=20, description="Questions per document")
     model_name: str = Field("gemma2:2b", description="Model for question generation")
 
@@ -96,6 +96,7 @@ class DatasetCreateResponse(BaseModel):
     task_id: str
     message: str
     total_documents: int
+    websocket_url: Optional[str] = None
 
 
 class DatasetDetailsResponse(BaseModel):
@@ -118,9 +119,17 @@ class DatasetValidationResult(BaseModel):
     errors: Optional[List[str]] = None
 
 
+class ModelInfo(BaseModel):
+    """Model information"""
+    name: str
+    description: str
+    size: str
+    type: str
+
+
 class ModelListResponse(BaseModel):
     """Available models response"""
-    models: List[str]
+    models: List[ModelInfo]
 
 
 class DeleteResponse(BaseModel):
@@ -133,3 +142,4 @@ class StartTrainingResponse(BaseModel):
     """Start training response"""
     status: str
     experiment_id: str
+    task_id: Optional[str] = None  # Celery task ID for WebSocket tracking

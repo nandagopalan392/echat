@@ -28,23 +28,23 @@ def call_ollama_sync(model: str, prompt: str, temperature: float = 0.0) -> str:
     try:
         payload = {
             "model": model,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "options": {
                 "temperature": temperature,
-                "max_tokens": 1000
+                "num_predict": 1000
             }
         }
         
         response = requests.post(
-            f"{os.getenv('OLLAMA_HOST', 'http://ollama:11434')}/api/generate",
+            f"{os.getenv('OLLAMA_HOST', 'http://ollama:11434')}/api/chat",
             json=payload,
             timeout=60.0
         )
         
         if response.status_code == 200:
             result = response.json()
-            return result.get('response', '').strip()
+            return result.get('message', {}).get('content', '').strip()
         else:
             logger.error(f"Ollama API error: {response.status_code} - {response.text}")
             return ""
@@ -436,11 +436,11 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
         })
         logger.info(f"🚀 REDIS: Published STARTED status for task {task_id}")
         
-        logger.info(f"🚀 DATASET: Loaded dataset '{dataset.get('name', 'Unknown')}'")
+        logger.info(f"🚀 DATASET: Loaded dataset '{dataset.name}'")
         
         # Load dataset content from file path
         questions = []
-        file_path = dataset.get('file_path')
+        file_path = dataset.file_path
         if file_path:
             try:
                 import os
@@ -498,18 +498,25 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
             "progress": 0.1
         })
         
-        logger.info(f"🚀 RAG: Initializing RAG system with model {model_id}")
+        # Use evaluation model from config, not from database
+        from app.core.evaluation.config import EvaluationConfig
+        evaluation_model = EvaluationConfig.EVALUATION_MODEL
         
-        # Import RAG service (new structure)
-        from app.services.rag_service import get_rag_service
+        logger.info(f"🚀 RAG: Initializing RAG system with evaluation model {evaluation_model}")
         
-        # Get RAG service instance
-        rag_service = get_rag_service()
+        # Import RAG engine directly and create instance with evaluation model
+        from app.core.rag import RAGEngine
+        
+        # Create RAG engine instance with evaluation model (NOT from database)
+        rag_engine = RAGEngine(llm_model=evaluation_model)
+        rag_engine.ensure_models_loaded()
+        
+        logger.info(f"🚀 RAG: RAG engine initialized with model {evaluation_model}")
         
         # Update retrieval configuration if needed
         if retrieval_config:
             logger.info(f"🚀 RAG: Applying retrieval config: {retrieval_config}")
-            # The RAG service uses default retrieval configuration
+            # The RAG engine uses default retrieval configuration
             # You can add specific config application here if needed
         
         # Initialize evaluation system
@@ -542,9 +549,9 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
                 # Use RAG system to generate real answer and context
                 logger.info(f"🚀 RAG: Generating answer for question {i+1}")
                 
-                # Get answer and context from RAG service
+                # Get answer and context from RAG engine
                 # The query method returns (answer, docs)
-                response, context_docs = rag_service.query(
+                response, context_docs = rag_engine.query(
                     question=query,
                     k=4  # Number of context chunks to retrieve
                 )
@@ -658,6 +665,7 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
             # Save each individual evaluation result to database
             for result_data in valid_results:
                 eval_repo.save_evaluation_result(
+                    task_id=task_id,
                     dataset_id=dataset_id,
                     query=result_data['question'],
                     expected_answer="",  # Not available in this context

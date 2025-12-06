@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
     Box,
     Grid,
@@ -27,9 +27,6 @@ import {
     Memory,
     Speed,
     Timer,
-    Pause,
-    PlayArrow,
-    Stop,
     Refresh
 } from '@mui/icons-material';
 import ReactECharts from 'echarts-for-react';
@@ -39,41 +36,182 @@ import LossChart from './charts/LossChart';
 import LearningRateChart from './charts/LearningRateChart';
 import SystemChart from './charts/SystemChart';
 
-const TrainingDashboard = ({ experimentId, onClose }) => {
+/**
+ * TrainingDashboard - displays real-time training metrics
+ * 
+ * Props:
+ * - experimentId: The experiment ID to display
+ * - trainingUpdate: WebSocket update passed from parent (FinetuningPage)
+ * - onClose: Callback when dashboard is closed
+ */
+const TrainingDashboard = ({ experimentId, trainingUpdate, onClose }) => {
     const theme = useTheme();
     const [metrics, setMetrics] = useState(null);
     const [tabValue, setTabValue] = useState(0);
     const [autoRefresh, setAutoRefresh] = useState(true);
+    const [connectionStatus, setConnectionStatus] = useState('connected');
+    const [wsError, setWsError] = useState(null);
     const intervalRef = useRef(null);
+    const lossHistoryRef = useRef([]); // Store loss history across renders
 
-    // Fetch metrics function
-    const fetchMetrics = async () => {
+    // Fetch metrics function (HTTP fallback)
+    const fetchMetrics = useCallback(async () => {
         try {
             const response = await api.getFineTuningMetrics(experimentId);
             setMetrics(response);
+            return response;
         } catch (error) {
             console.error('Failed to fetch training metrics:', error);
+            return null;
         }
-    };
+    }, [experimentId]);
 
-    // Set up polling
+    // Process WebSocket update passed from parent
+    const processTrainingUpdate = useCallback((message) => {
+        console.log('📨 TrainingDashboard received update:', message);
+
+        if (message.type === 'experiment_update') {
+            // Extract loss data from latest_logs (which contains actual training logs with loss values)
+            const latestLogs = message.latest_logs || [];
+            
+            // Build loss history from training logs
+            latestLogs.forEach(log => {
+                const logStep = log.step;
+                const logLoss = log.loss || log.train_loss;
+                const logEvalLoss = log.eval_loss;
+                
+                if (logStep !== undefined && logStep !== null) {
+                    // Add train loss
+                    if (logLoss !== undefined && logLoss !== null) {
+                        const existingTrainStep = lossHistoryRef.current.find(h => h.step === logStep && h.type === 'train');
+                        if (!existingTrainStep) {
+                            lossHistoryRef.current.push({ step: logStep, loss: logLoss, type: 'train' });
+                        }
+                    }
+                    // Add eval loss
+                    if (logEvalLoss !== undefined && logEvalLoss !== null) {
+                        const existingEvalStep = lossHistoryRef.current.find(h => h.step === logStep && h.type === 'eval');
+                        if (!existingEvalStep) {
+                            lossHistoryRef.current.push({ step: logStep, loss: logEvalLoss, type: 'eval' });
+                        }
+                    }
+                }
+            });
+            
+            // Keep last 500 data points
+            if (lossHistoryRef.current.length > 500) {
+                lossHistoryRef.current = lossHistoryRef.current.slice(-500);
+            }
+            
+            // Calculate progress properly - use progress_info if available, otherwise estimate from epoch
+            let epochProgress = 0;
+            const progressInfo = message.progress_info || {};
+            const currentEpoch = progressInfo.current_epoch || 0;
+            const totalEpochs = progressInfo.total_epochs || 3;
+            
+            if (progressInfo.progress !== undefined && progressInfo.progress !== null && progressInfo.progress > 0) {
+                // Use the backend-provided progress (0.0 to 1.0 scale)
+                epochProgress = progressInfo.progress * 100;
+            } else if (currentEpoch > 0 && totalEpochs > 0) {
+                // Estimate from epoch info
+                epochProgress = (currentEpoch / totalEpochs) * 100;
+            }
+            
+            // Transform WebSocket data to metrics format
+            const wsMetrics = {
+                progress: {
+                    epoch_progress: epochProgress,
+                    current_epoch: currentEpoch,
+                    total_epochs: totalEpochs,
+                    elapsed_time: message.training_metrics?.elapsed_time,
+                    eta: message.training_metrics?.eta,
+                    samples_per_sec: message.training_metrics?.samples_per_sec
+                },
+                training_logs: latestLogs,
+                system: message.training_metrics?.system || {},
+                status: message.status,
+                message: progressInfo.message
+            };
+
+            const lossHistory = lossHistoryRef.current;
+            const trainLosses = lossHistory.filter(h => h.type === 'train').map(h => ({ step: h.step, value: h.loss }));
+            const evalLosses = lossHistory.filter(h => h.type === 'eval').map(h => ({ step: h.step, value: h.loss }));
+
+            // Merge with existing metrics to preserve history and build chart data
+            setMetrics(prev => {
+                const prevMetrics = prev || {};
+                
+                // Keep the best progress (don't go backwards)
+                const prevProgress = prevMetrics.progress?.epoch_progress || 0;
+                const newProgress = wsMetrics.progress.epoch_progress;
+                const finalProgress = message.status === 'completed' ? 100 : Math.max(prevProgress, newProgress);
+                
+                return {
+                    ...prevMetrics,
+                    ...wsMetrics,
+                    progress: {
+                        ...wsMetrics.progress,
+                        epoch_progress: finalProgress
+                    },
+                    // Preserve and update loss history
+                    loss_history: lossHistory,
+                    // Merge training logs, keeping history
+                    training_logs: wsMetrics.training_logs.length > 0 
+                        ? [...(prevMetrics.training_logs || []).filter(log => 
+                            !wsMetrics.training_logs.some(newLog => 
+                                newLog.step === log.step && newLog.epoch === log.epoch
+                            )
+                          ), ...wsMetrics.training_logs].sort((a, b) => 
+                            (a.step || 0) - (b.step || 0)
+                          )
+                        : prevMetrics.training_logs || [],
+                    // Update metrics with loss history formatted for LossChart
+                    metrics: {
+                        ...(prevMetrics.metrics || {}),
+                        ...(message.metrics || {}),
+                        // Format for LossChart component: [{step, value}, ...]
+                        train_losses: trainLosses,
+                        eval_losses: evalLosses
+                    }
+                };
+            });
+            
+            setConnectionStatus('connected');
+        } else if (message.type === 'completion') {
+            console.log('🏁 Training completed:', message.final_status);
+            // Final fetch to get complete data
+            fetchMetrics();
+        } else if (message.type === 'error') {
+            console.error('❌ WebSocket error message:', message.message);
+            setWsError(message.message);
+        }
+    }, [fetchMetrics]);
+
+    // Process trainingUpdate prop when it changes (from parent WebSocket)
     useEffect(() => {
+        if (trainingUpdate) {
+            processTrainingUpdate(trainingUpdate);
+        }
+    }, [trainingUpdate, processTrainingUpdate]);
+
+    // Initial fetch and optional polling fallback
+    useEffect(() => {
+        // Initial fetch to get current state
+        fetchMetrics();
+
+        // Set up polling as a fallback (slower rate since WebSocket is primary)
         if (autoRefresh) {
-            fetchMetrics(); // Initial fetch
-            intervalRef.current = setInterval(fetchMetrics, 2000); // Poll every 2 seconds
-        } else {
+            intervalRef.current = setInterval(fetchMetrics, 5000); // Poll every 5 seconds as fallback
+        }
+
+        // Cleanup on unmount
+        return () => {
             if (intervalRef.current) {
                 clearInterval(intervalRef.current);
                 intervalRef.current = null;
             }
-        }
-
-        return () => {
-            if (intervalRef.current) {
-                clearInterval(intervalRef.current);
-            }
         };
-    }, [autoRefresh, experimentId]);
+    }, [autoRefresh, experimentId, fetchMetrics]);
 
     const onRefresh = () => {
         fetchMetrics();
@@ -125,13 +263,45 @@ const TrainingDashboard = ({ experimentId, onClose }) => {
     const logsData = metrics?.training_logs || [];
     const systemData = metrics?.system || {};
 
+    // Get connection status color and label (no icon)
+    const getConnectionStatusDisplay = () => {
+        switch (connectionStatus) {
+            case 'connected':
+                return { color: 'success', label: 'Live' };
+            case 'connecting':
+            case 'reconnecting':
+                return { color: 'warning', label: 'Connecting...' };
+            case 'polling':
+                return { color: 'info', label: 'Polling' };
+            default:
+                return { color: 'default', label: 'Offline' };
+        }
+    };
+
+    const statusDisplay = getConnectionStatusDisplay();
+
     return (
         <Box sx={{ width: '100%', height: '100%' }}>
+            {/* WebSocket Error Alert */}
+            {wsError && (
+                <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setWsError(null)}>
+                    {wsError} - Using polling fallback
+                </Alert>
+            )}
+
             {/* Header with controls */}
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                <Typography variant="h5" fontWeight={600}>
-                    Training Dashboard - Experiment {experimentId.slice(-8)}
-                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <Typography variant="h5" fontWeight={600}>
+                        Training Dashboard - Experiment {experimentId.slice(-8)}
+                    </Typography>
+                    <Chip
+                        label={statusDisplay.label}
+                        color={statusDisplay.color}
+                        size="small"
+                        variant="outlined"
+                    />
+                </Box>
                 <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
                     <FormControlLabel
                         control={

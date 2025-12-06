@@ -46,34 +46,42 @@ class Experiment:
         if row is None:
             return None
         
+        # Helper function to safely get values from sqlite3.Row or dict
+        def safe_get(key, default=None):
+            try:
+                value = row[key]
+                return value if value is not None else default
+            except (KeyError, IndexError, TypeError):
+                return default
+        
         if hasattr(row, 'keys'):
-            # Dictionary-like row (sqlite3.Row)
+            # Dictionary-like row (sqlite3.Row or dict)
             # Parse JSON fields
-            config = row.get('config', '{}')
+            config = safe_get('config', '{}')
             if isinstance(config, str):
                 config = json.loads(config) if config else {}
             
-            metrics = row.get('metrics')
+            metrics = safe_get('metrics')
             if isinstance(metrics, str):
                 metrics = json.loads(metrics) if metrics else None
             
             return cls(
-                id=row.get('id'),
-                name=row.get('name', ''),
-                description=row.get('description', ''),
-                user_id=row.get('user_id'),
-                base_model=row.get('base_model'),
-                model_provider=row.get('model_provider', 'huggingface'),
-                status=row.get('status'),
+                id=safe_get('id'),
+                name=safe_get('name', ''),
+                description=safe_get('description', ''),
+                user_id=safe_get('user_id'),
+                base_model=safe_get('base_model'),
+                model_provider=safe_get('model_provider', 'huggingface'),
+                status=safe_get('status'),
                 config=config,
-                dataset_path=row.get('dataset_path'),
-                model_path=row.get('model_path'),
+                dataset_path=safe_get('dataset_path'),
+                model_path=safe_get('model_path'),
                 metrics=metrics,
-                error_message=row.get('error_message'),
-                created_at=row.get('created_at'),
-                started_at=row.get('started_at'),
-                completed_at=row.get('completed_at'),
-                updated_at=row.get('updated_at')
+                error_message=safe_get('error_message'),
+                created_at=safe_get('created_at'),
+                started_at=safe_get('started_at'),
+                completed_at=safe_get('completed_at'),
+                updated_at=safe_get('updated_at')
             )
         else:
             # Tuple row
@@ -169,18 +177,26 @@ class TrainingLog:
         if row is None:
             return None
         
+        # Helper function to safely get values from sqlite3.Row or dict
+        def safe_get(key, default=None):
+            try:
+                value = row[key]
+                return value if value is not None else default
+            except (KeyError, IndexError, TypeError):
+                return default
+        
         if hasattr(row, 'keys'):
-            # Dictionary-like row (sqlite3.Row)
+            # Dictionary-like row (sqlite3.Row or dict)
             return cls(
-                id=row.get('id'),
-                experiment_id=row.get('experiment_id'),
-                epoch=row.get('epoch'),
-                step=row.get('step'),
-                loss=row.get('loss'),
-                eval_loss=row.get('eval_loss'),
-                learning_rate=row.get('learning_rate'),
-                accuracy=row.get('accuracy'),
-                timestamp=row.get('timestamp')
+                id=safe_get('id'),
+                experiment_id=safe_get('experiment_id'),
+                epoch=safe_get('epoch'),
+                step=safe_get('step'),
+                loss=safe_get('loss'),
+                eval_loss=safe_get('eval_loss'),
+                learning_rate=safe_get('learning_rate'),
+                accuracy=safe_get('accuracy'),
+                timestamp=safe_get('timestamp')
             )
         else:
             # Tuple row
@@ -240,7 +256,7 @@ class Dataset:
         Create Dataset instance from database row.
         
         Args:
-            row: Database row (dict or tuple)
+            row: Database row (dict, sqlite3.Row, or tuple)
             
         Returns:
             Dataset instance
@@ -248,19 +264,27 @@ class Dataset:
         if row is None:
             return None
         
+        # Helper function to safely get values from sqlite3.Row or dict
+        def safe_get(key, default=None):
+            try:
+                value = row[key]
+                return value if value is not None else default
+            except (KeyError, IndexError, TypeError):
+                return default
+        
         if hasattr(row, 'keys'):
-            # Dictionary-like row (sqlite3.Row)
+            # Dictionary-like row (sqlite3.Row or dict)
             return cls(
-                id=row.get('id'),
-                name=row.get('name', ''),
-                user_id=row.get('user_id'),
-                file_path=row.get('file_path'),
-                file_size=row.get('file_size'),
-                num_samples=row.get('num_samples'),
-                format=row.get('format'),
-                description=row.get('description'),
-                status=row.get('status', 'Processing'),
-                created_at=row.get('created_at')
+                id=safe_get('id'),
+                name=safe_get('name', ''),
+                user_id=safe_get('user_id'),
+                file_path=safe_get('file_path'),
+                file_size=safe_get('file_size'),
+                num_samples=safe_get('num_samples'),
+                format=safe_get('format'),
+                description=safe_get('description'),
+                status=safe_get('status', 'Processing'),
+                created_at=safe_get('created_at')
             )
         else:
             # Tuple row
@@ -335,20 +359,28 @@ class DatasetSample:
         if row is None:
             return None
         
+        # Helper function to safely get values from sqlite3.Row or dict
+        def safe_get(key, default=None):
+            try:
+                value = row[key]
+                return value if value is not None else default
+            except (KeyError, IndexError, TypeError):
+                return default
+        
         if hasattr(row, 'keys'):
-            # Dictionary-like row (sqlite3.Row)
-            metadata = row.get('metadata')
+            # Dictionary-like row (sqlite3.Row or dict)
+            metadata = safe_get('metadata')
             if isinstance(metadata, str):
                 metadata = json.loads(metadata) if metadata else None
             
             return cls(
-                id=row.get('id'),
-                dataset_id=row.get('dataset_id'),
-                sample_index=row.get('sample_index'),
-                input_text=row.get('input_text'),
-                output_text=row.get('output_text'),
+                id=safe_get('id'),
+                dataset_id=safe_get('dataset_id'),
+                sample_index=safe_get('sample_index'),
+                input_text=safe_get('input_text'),
+                output_text=safe_get('output_text'),
                 metadata=metadata,
-                created_at=row.get('created_at')
+                created_at=safe_get('created_at')
             )
         else:
             # Tuple row

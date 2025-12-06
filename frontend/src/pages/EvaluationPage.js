@@ -192,7 +192,6 @@ const EvaluationPage = () => {
                 await Promise.all([
                     loadEvaluationDataWithoutLoading(),
                     loadDatasets(),
-                    loadEvaluationResults(),
                     loadRecentBackgroundEvaluations() // Load existing completed evaluations for the table
                 ]);
                 // Set loading to false after essential data is loaded
@@ -492,8 +491,8 @@ const EvaluationPage = () => {
             setTestCaseResults(transformedResults);
         } catch (error) {
             console.error('Error loading test case results:', error);
-            // Keep empty array on error - real results will be added when tests are run
-            setTestCaseResults([]);
+            // Don't clear results on error - keep existing results from loadRecentBackgroundEvaluations
+            // setTestCaseResults([]);
         }
     };
 
@@ -730,10 +729,10 @@ const EvaluationPage = () => {
             const datasetEvaluationData = {
                 dataset_id: selectedDatasetId,
                 dataset_name: selectedDataset.name,
+                model_id: selectedModelId,  // Top-level field, not in metadata
+                retrieval_config: testRetrievalConfig,
                 user_id: localStorage.getItem('username'),
                 metadata: {
-                    model_id: selectedModelId,
-                    retrieval_config: testRetrievalConfig,
                     test_type: 'dataset_evaluation'
                 }
             };
@@ -852,6 +851,7 @@ const EvaluationPage = () => {
             const testCaseData = recentEvals.map(evaluation => {
                 const metadata = evaluation.metadata || {};
                 const isRunning = evaluation.status === 'STARTED' || evaluation.status === 'PENDING';
+                const isCompleted = evaluation.status === 'SUCCESS' || evaluation.status === 'completed';
                 
                 return {
                     id: evaluation.task_id,
@@ -859,7 +859,7 @@ const EvaluationPage = () => {
                     dataset_name: metadata.dataset_name || `Dataset ${metadata.dataset_id || 'Unknown'}`,
                     models: [metadata.model_name || metadata.model_id || 'Unknown Model'],
                     status: isRunning ? 'running' : 'completed',
-                    results: (evaluation.status === 'SUCCESS' && evaluation.results) ? [{
+                    results: (isCompleted && evaluation.results) ? [{
                         groundedness: evaluation.results.groundedness?.score || 0,
                         context_relevance: evaluation.results.context_relevance?.score || 0,
                         answer_quality: evaluation.results.answer_relevance?.score || 0,
@@ -1151,9 +1151,8 @@ const EvaluationPage = () => {
         // Reload evaluation results from backend
         const reloadData = async () => {
             try {
-                // Load evaluation results and recent background evaluations in parallel
+                // Load only the recent background evaluations (not loadEvaluationResults)
                 await Promise.all([
-                    loadEvaluationResults(),
                     loadRecentBackgroundEvaluations(),
                     loadEvaluationDataWithoutLoading()
                 ]);
@@ -1302,6 +1301,12 @@ const EvaluationPage = () => {
             console.log('🧮 [DEBUG] Calculating overview from real data');
             console.log('🧮 [DEBUG] testCaseResults length:', testCaseResults.length);
             console.log('🧮 [DEBUG] testCaseResults:', testCaseResults);
+            
+            // Debug: Check what status values exist
+            if (testCaseResults.length > 0) {
+                console.log('🧮 [DEBUG] Sample testCase structure:', testCaseResults[0]);
+                console.log('🧮 [DEBUG] Status values in results:', testCaseResults.map(tc => tc.status));
+            }
             
             // Get completed evaluations from testCaseResults (same data that evaluation tab shows)
             const completedEvaluations = testCaseResults.filter(testCase => 

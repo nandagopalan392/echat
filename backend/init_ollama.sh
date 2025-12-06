@@ -146,4 +146,14 @@ export ACCELERATE_USE_FSDP=false
 export CUDA_LAUNCH_BLOCKING=1
 
 # Start with proper settings for metrics collection
-exec uvicorn app.main:app --host $HOST --port $PORT --reload --log-level info
+# Exclude data directories from file watching to prevent restarts during training/model downloads
+exec uvicorn app.main:app --host $HOST --port $PORT --reload --log-level info \
+    --reload-exclude '/app/data' \
+    --reload-exclude 'data' \
+    --reload-exclude 'hf_cache' \
+    --reload-exclude 'finetuned_models' \
+    --reload-exclude 'chroma_db' \
+    --reload-exclude '*.sqlite3' \
+    --reload-exclude '*.pyc' \
+    --reload-exclude '__pycache__' \
+    --reload-exclude 'temp_uploads'

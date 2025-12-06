@@ -70,10 +70,10 @@ class OllamaProvider(LLMProvider):
             max_tok = max_tokens if max_tokens is not None else evaluation_config.EVALUATION_MAX_TOKENS
             
             response = requests.post(
-                f"{self.base_url}/api/generate",
+                f"{self.base_url}/api/chat",
                 json={
                     "model": self.model,
-                    "prompt": prompt,
+                    "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                     "options": {
                         "temperature": temp,
@@ -83,7 +83,7 @@ class OllamaProvider(LLMProvider):
                 timeout=evaluation_config.EVALUATION_TIMEOUT
             )
             response.raise_for_status()
-            return response.json().get("response", "")
+            return response.json().get("message", {}).get("content", "")
         except requests.exceptions.Timeout as e:
             logger.error(f"Timeout error when calling Ollama (timeout: {evaluation_config.EVALUATION_TIMEOUT}s): {e}")
             # Return a default low score for timeout cases instead of failing completely

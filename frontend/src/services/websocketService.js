@@ -67,9 +67,8 @@ class WebSocketService {
         this.connections.set(taskId, connection);
         this._createWebSocket(connection);
         
-        if (enablePolling && pollCallback) {
-            this._startPolling(connection);
-        }
+        // Don't start polling immediately - wait for WebSocket to fail
+        // Polling will be started by _scheduleReconnect if WebSocket fails to connect
 
         return connection;
     }
@@ -187,6 +186,8 @@ class WebSocketService {
         let wsUrl;
         if (endpointType === 'qca-dataset') {
             wsUrl = `${protocol}//${host}/api/ws/qca-dataset/${taskId}`;
+        } else if (endpointType === 'finetuning') {
+            wsUrl = `${protocol}//${host}/api/ws/finetuning/${taskId}`;
         } else {
             // Default to evaluation endpoint
             wsUrl = `${protocol}//${host}/api/evaluation/ws/evaluation/${taskId}`;
@@ -246,8 +247,14 @@ class WebSocketService {
                     console.error('❌ WebSocket authentication failed:', event.reason);
                     this._updateConnectionStatus(connection, 'auth_failed');
                     connection.callbacks.onError(new Error(`Authentication failed: ${event.reason}`));
-                    // Don't attempt to reconnect on auth failures
+                    // Don't attempt to reconnect on auth failures, but start polling as fallback
                     connection.isManualClose = true;
+                    
+                    // Start polling as fallback for auth-failed connections
+                    if (connection.enablePolling && connection.pollCallback && !connection.pollingIntervalId) {
+                        console.log(`📊 Starting HTTP polling as fallback (auth failed) for task ${taskId}`);
+                        this._startPolling(connection);
+                    }
                 }
                 
                 if (!connection.isManualClose) {
@@ -274,6 +281,12 @@ class WebSocketService {
         if (connection.isManualClose || connection.reconnectAttempts >= this.config.maxReconnectAttempts) {
             console.log(`🚫 Max reconnection attempts reached for task ${connection.taskId}`);
             this._updateConnectionStatus(connection, 'failed');
+            
+            // Start polling as fallback when WebSocket has completely failed
+            if (connection.enablePolling && connection.pollCallback && !connection.pollingIntervalId) {
+                console.log(`📊 Starting HTTP polling as fallback for task ${connection.taskId}`);
+                this._startPolling(connection);
+            }
             return;
         }
 
@@ -284,6 +297,12 @@ class WebSocketService {
 
         console.log(`🔄 Scheduling reconnection for task ${connection.taskId} in ${delay}ms (attempt ${connection.reconnectAttempts + 1})`);
         this._updateConnectionStatus(connection, 'reconnecting');
+        
+        // Start polling during reconnection attempts as temporary fallback
+        if (connection.enablePolling && connection.pollCallback && !connection.pollingIntervalId) {
+            console.log(`📊 Starting HTTP polling during reconnection for task ${connection.taskId}`);
+            this._startPolling(connection);
+        }
 
         connection.reconnectTimeoutId = setTimeout(() => {
             connection.reconnectAttempts++;

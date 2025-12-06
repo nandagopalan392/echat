@@ -14,8 +14,8 @@ import json
 import re
 from dataclasses import dataclass
 
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter, TokenTextSplitter
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter, TokenTextSplitter
 
 from app.config.chunking import ChunkingMethod, ChunkingConfig, get_chunking_config_manager
 from app.core.rag.chunking.table_extraction import (

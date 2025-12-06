@@ -274,7 +274,7 @@ class EvaluationRepository:
             return []
     
     # Evaluation results operations
-    def save_evaluation_result(self, dataset_id: int, query: str, expected_answer: str,
+    def save_evaluation_result(self, task_id: str, dataset_id: int, query: str, expected_answer: str,
                               actual_answer: str, context: Optional[str],
                               groundedness_score: Optional[float], relevance_score: Optional[float],
                               quality_score: Optional[float], latency_ms: Optional[int],
@@ -287,11 +287,11 @@ class EvaluationRepository:
                 
                 cursor.execute(
                     '''INSERT INTO evaluation_results 
-                       (dataset_id, query, expected_answer, actual_answer, context,
+                       (task_id, dataset_id, query, expected_answer, actual_answer, context,
                         groundedness_score, relevance_score, quality_score, latency_ms,
                         model_used, evaluated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                    (dataset_id, query, expected_answer, actual_answer, context,
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (task_id, dataset_id, query, expected_answer, actual_answer, context,
                      groundedness_score, relevance_score, quality_score, latency_ms,
                      model_used, now)
                 )

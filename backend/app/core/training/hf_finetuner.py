@@ -35,7 +35,8 @@ class HuggingFaceFineTuner:
     def __init__(self):
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.cache_dir = "/app/data/hf_cache"
+        # Use the HuggingFace cache volume mount to avoid triggering file watcher restarts
+        self.cache_dir = os.environ.get("HF_HOME", "/root/.cache/huggingface")
         self.models_dir = "/app/data/finetuned_models"
         self.datasets_dir = "/app/data/datasets"
         
@@ -147,6 +148,181 @@ class HuggingFaceFineTuner:
             # Always cleanup metrics collector
             cleanup_metrics_collector(experiment_id)
     
+    def _train_model_with_progress(
+        self, 
+        experiment_id: str, 
+        config: Dict[str, Any],
+        progress_callback: callable = None
+    ) -> bool:
+        """
+        Core training logic with progress callback support for Celery tasks.
+        
+        This method is used by the Celery background task to run training
+        with progress updates published to Redis/WebSocket.
+        
+        Args:
+            experiment_id: The experiment ID
+            config: Training configuration
+            progress_callback: Callback function(progress, message, epoch, total_epochs)
+            
+        Returns:
+            bool: True if training succeeded, False otherwise
+        """
+        try:
+            # Create metrics collector for this training run
+            metrics_collector = create_metrics_collector(experiment_id)
+            
+            total_epochs = config.get('epochs', 3)
+            
+            # Report progress: Loading dataset
+            if progress_callback:
+                progress_callback(0.1, "Loading and preparing dataset", 0, total_epochs)
+            
+            # Load and prepare dataset
+            dataset_id = config.get('dataset_id')
+            train_dataset, eval_dataset = self._prepare_dataset(config['dataset_path'], dataset_id)
+            
+            # Report progress: Loading model
+            if progress_callback:
+                progress_callback(0.15, "Loading model and tokenizer", 0, total_epochs)
+            
+            # Load model and tokenizer
+            model, tokenizer = self._load_model_and_tokenizer(config['base_model'])
+            
+            # Report progress: Setting up LoRA
+            if progress_callback:
+                progress_callback(0.2, "Setting up LoRA adapter", 0, total_epochs)
+            
+            # Setup LoRA if enabled
+            if config.get('use_lora', True):
+                model = self._setup_lora(model, config)
+            
+            # Prepare training arguments
+            training_args = self._create_training_arguments(experiment_id, config)
+            
+            # Create a custom callback for progress reporting with metrics
+            class ProgressCallback(TrainerCallback):
+                def __init__(self, callback, total_epochs, metrics_collector_ref):
+                    self.callback = callback
+                    self.total_epochs = total_epochs
+                    self.metrics_collector = metrics_collector_ref
+                    self.last_loss = None
+                    
+                def on_epoch_begin(self, args, state, control, **kwargs):
+                    if self.callback:
+                        epoch = state.epoch or 0
+                        # Progress from 0.25 to 0.9 during training epochs
+                        progress = 0.25 + (epoch / self.total_epochs) * 0.65
+                        self.callback(
+                            progress, 
+                            f"Training epoch {int(epoch) + 1}/{self.total_epochs}", 
+                            int(epoch), 
+                            self.total_epochs,
+                            {"loss": self.last_loss, "step": state.global_step}
+                        )
+                
+                def on_epoch_end(self, args, state, control, **kwargs):
+                    if self.callback:
+                        epoch = (state.epoch or 0)
+                        progress = 0.25 + (epoch / self.total_epochs) * 0.65
+                        self.callback(
+                            progress, 
+                            f"Completed epoch {int(epoch)}/{self.total_epochs}", 
+                            int(epoch), 
+                            self.total_epochs,
+                            {"loss": self.last_loss, "step": state.global_step}
+                        )
+                        
+                def on_log(self, args, state, control, logs=None, **kwargs):
+                    """Capture training logs (loss values)"""
+                    if logs:
+                        self.last_loss = logs.get('loss')
+                        
+                def on_step_end(self, args, state, control, **kwargs):
+                    # Report progress every 10 steps with loss information
+                    if state.global_step % 10 == 0 and self.callback:
+                        epoch = state.epoch or 0
+                        progress = 0.25 + (epoch / self.total_epochs) * 0.65
+                        self.callback(
+                            progress, 
+                            f"Training step {state.global_step}", 
+                            int(epoch), 
+                            self.total_epochs,
+                            {"loss": self.last_loss, "step": state.global_step}
+                        )
+            
+            # Create trainer with progress callback
+            trainer = self._create_trainer(
+                model, tokenizer, train_dataset, eval_dataset, training_args, 
+                experiment_id, config.get('max_length', 512), metrics_collector
+            )
+            
+            # Add progress callback if provided
+            if progress_callback:
+                trainer.add_callback(ProgressCallback(progress_callback, total_epochs, metrics_collector))
+            
+            # Report progress: Starting training
+            if progress_callback:
+                progress_callback(0.25, "Starting training", 0, total_epochs)
+            
+            # Start training
+            logger.info(f"Starting training for experiment {experiment_id}")
+            trainer.train()
+            
+            # Report progress: Saving model
+            if progress_callback:
+                progress_callback(0.92, "Saving model", total_epochs, total_epochs)
+            
+            # Save model
+            dataset_name = config.get('dataset_id', 'unknown')
+            base_model_name = config.get('base_model', 'model').replace('/', '-')
+            model_save_path = os.path.join(self.models_dir, f"{base_model_name}-{dataset_name}-{experiment_id}")
+            trainer.save_model(model_save_path)
+            tokenizer.save_pretrained(model_save_path)
+            
+            logger.info(f"Model saved to: {model_save_path}")
+            
+            # Update experiment with model path
+            experiment_repository.update_experiment(experiment_id, {"model_path": model_save_path})
+            
+            # Report progress: Evaluating
+            if progress_callback:
+                progress_callback(0.95, "Running final evaluation", total_epochs, total_epochs)
+            
+            # Update experiment with final metrics
+            eval_results = trainer.evaluate()
+            
+            # Save complete training metrics history
+            if metrics_collector:
+                complete_metrics = metrics_collector.get_metrics_summary()
+                final_metrics = {
+                    **eval_results,
+                    'training_history': complete_metrics.get('metrics', {}),
+                    'final_progress': complete_metrics.get('progress', {}),
+                    'training_completed': True,
+                    'completion_time': time.time()
+                }
+                experiment_repository.update_experiment_metrics(experiment_id, final_metrics)
+            else:
+                experiment_repository.update_experiment_metrics(experiment_id, eval_results)
+            
+            # Report progress: Complete
+            if progress_callback:
+                progress_callback(1.0, "Training completed successfully", total_epochs, total_epochs)
+            
+            logger.info(f"Training completed successfully for experiment {experiment_id}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Training error: {e}")
+            if progress_callback:
+                progress_callback(0.0, f"Training failed: {str(e)}", 0, config.get('epochs', 3))
+            return False
+        finally:
+            # Always cleanup metrics collector
+            cleanup_metrics_collector(experiment_id)
+    
     def _prepare_dataset(self, dataset_path: str, dataset_id: str = None) -> tuple:
         """Prepare training and evaluation datasets"""
         temp_path = None  # Initialize temp_path
@@ -172,8 +348,9 @@ class HuggingFaceFineTuner:
                 temp_path = temp_file.name
                 
                 for sample in samples:
-                    # samples are already parsed JSON objects from get_dataset_samples
-                    temp_file.write(json.dumps(sample) + '\n')
+                    # Convert DatasetSample objects to training format dict
+                    sample_dict = sample.to_training_format() if hasattr(sample, 'to_training_format') else sample
+                    temp_file.write(json.dumps(sample_dict) + '\n')
                 temp_file.close()
                 
                 logger.info(f"Created temporary dataset file: {temp_path} with {len(samples)} samples")
@@ -371,8 +548,15 @@ class HuggingFaceFineTuner:
                 else:
                     texts = [f"Instruction: {instruction}\nOutput: {output}" 
                             for instruction, output in zip(instructions, outputs)]
+            elif 'input' in examples and 'output' in examples:
+                # For Q-C-A datasets with input/output format (from DatasetSample.to_training_format())
+                # The input field contains the context/question, output contains the answer
+                inputs = [clean_text(inp) for inp in examples['input']]
+                outputs = [clean_text(output) for output in examples['output']]
+                texts = [f"Input: {input_text}\nOutput: {output}" 
+                        for input_text, output in zip(inputs, outputs)]
             else:
-                raise ValueError("Dataset must have 'text' field, 'prompt'+'completion' fields, or 'instruction'+'output' fields")
+                raise ValueError("Dataset must have 'text' field, 'prompt'+'completion' fields, 'instruction'+'output' fields, or 'input'+'output' fields")
             
             # Filter out empty texts
             texts = [text for text in texts if text.strip()]

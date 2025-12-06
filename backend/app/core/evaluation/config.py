@@ -10,7 +10,8 @@ class EvaluationConfig:
     
     # LLM Provider settings
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-    EVALUATION_MODEL = os.getenv("EVALUATION_MODEL", "gemma3n:e2b")
+
+    EVALUATION_MODEL = os.getenv("EVALUATION_MODEL", "gemma2:2b")
     
     # Evaluation settings
     EVALUATION_TEMPERATURE = float(os.getenv("EVALUATION_TEMPERATURE", "0.0"))

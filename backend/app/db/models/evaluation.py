@@ -58,6 +58,7 @@ class EvaluationMetric:
 
 
 @dataclass
+@dataclass
 class EvaluationDataset:
     """Evaluation dataset model"""
     id: Optional[int] = None
@@ -202,16 +203,16 @@ class EvaluationTask:
         
         if hasattr(row, 'keys'):
             return cls(
-                id=row.get('id'),
-                task_id=row.get('task_id', ''),
-                dataset_id=row.get('dataset_id'),
-                status=row.get('status', 'pending'),
-                progress=row.get('progress', 0),
-                total_queries=row.get('total_queries', 0),
-                created_at=row.get('created_at'),
-                started_at=row.get('started_at'),
-                completed_at=row.get('completed_at'),
-                error_message=row.get('error_message')
+                id=row['id'] if 'id' in row.keys() else None,
+                task_id=row['task_id'] if 'task_id' in row.keys() else '',
+                dataset_id=row['dataset_id'] if 'dataset_id' in row.keys() else None,
+                status=row['status'] if 'status' in row.keys() else 'pending',
+                progress=row['progress'] if 'progress' in row.keys() else 0,
+                total_queries=row['total_queries'] if 'total_queries' in row.keys() else 0,
+                created_at=row['created_at'] if 'created_at' in row.keys() else None,
+                started_at=row['started_at'] if 'started_at' in row.keys() else None,
+                completed_at=row['completed_at'] if 'completed_at' in row.keys() else None,
+                error_message=row['error_message'] if 'error_message' in row.keys() else None
             )
         else:
             return cls(

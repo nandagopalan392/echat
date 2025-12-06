@@ -19,7 +19,7 @@ from app.config.chunking import ChunkingMethod, ChunkingConfig, get_chunking_con
 from app.core.rag.chunking.enhanced_document_processor import get_document_processor
 from app.db import DatabaseConnection
 from app.db.repositories import ConfigRepository
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 

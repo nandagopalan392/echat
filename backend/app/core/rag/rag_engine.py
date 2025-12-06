@@ -17,14 +17,14 @@ from datetime import datetime
 
 from langchain_core.globals import set_verbose, set_debug
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain.schema.output_parser import StrOutputParser
+from langchain_core.output_parsers import StrOutputParser
 from langchain_chroma import Chroma
 from chromadb.config import Settings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema.runnable import RunnablePassthrough
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.runnables import RunnablePassthrough
 from langchain_community.vectorstores.utils import filter_complex_metadata
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 # Import retrieval config and advanced retrieval components
 from app.config.retrieval import get_retrieval_config_manager
@@ -458,7 +458,7 @@ class RAGEngine:
             retriever = self.vector_store.as_retriever(search_kwargs={"k": max_chunks})
             
             # Retrieve relevant documents
-            docs = retriever.get_relevant_documents(question)
+            docs = retriever.invoke(question)
             logger.info(f"[RETRIEVAL] Retrieved {len(docs)} initial documents")
             
             # Apply auto-merging if enabled
@@ -550,7 +550,7 @@ class RAGEngine:
             retriever = self.vector_store.as_retriever(search_kwargs={"k": max_chunks})
             
             # Retrieve relevant documents
-            docs = retriever.get_relevant_documents(question)
+            docs = retriever.invoke(question)
             logger.info(f"[RETRIEVAL] Retrieved {len(docs)} initial documents")
             
             # Apply auto-merging if enabled

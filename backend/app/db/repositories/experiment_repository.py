@@ -426,20 +426,37 @@ class ExperimentRepository:
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             
+            # Ensure updated_at column exists (migration)
+            try:
+                cursor.execute('ALTER TABLE datasets ADD COLUMN updated_at TIMESTAMP')
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
+            
             # Clear existing samples
             cursor.execute('DELETE FROM dataset_samples WHERE dataset_id = ?', (dataset_id,))
             
-            # Insert new samples
+            # Insert new samples using correct column names: input_text, output_text, metadata
             for i, sample in enumerate(samples):
+                # Extract Q-C-A fields from sample
+                input_text = sample.get('question', sample.get('input', ''))
+                output_text = sample.get('answer', sample.get('output', ''))
+                metadata = json.dumps({
+                    'context': sample.get('context', ''),
+                    'document_id': sample.get('document_id', ''),
+                    'document_name': sample.get('document_name', ''),
+                    'chunk_id': sample.get('chunk_id', '')
+                })
+                
                 cursor.execute('''
-                    INSERT INTO dataset_samples (dataset_id, sample_index, content)
-                    VALUES (?, ?, ?)
-                ''', (dataset_id, i, json.dumps(sample)))
+                    INSERT INTO dataset_samples (dataset_id, sample_index, input_text, output_text, metadata)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (dataset_id, i, input_text, output_text, metadata))
             
             # Update dataset metadata
             cursor.execute('''
                 UPDATE datasets 
-                SET num_samples = ?, file_size = ?, updated_at = CURRENT_TIMESTAMP
+                SET num_samples = ?, file_size = ?
                 WHERE id = ?
             ''', (len(samples), len(json.dumps(samples).encode('utf-8')), dataset_id))
             
@@ -449,11 +466,27 @@ class ExperimentRepository:
         """Update dataset status"""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE datasets 
-                SET status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            ''', (status, dataset_id))
+            
+            # Ensure updated_at column exists (migration)
+            try:
+                cursor.execute('ALTER TABLE datasets ADD COLUMN updated_at TIMESTAMP')
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
+            
+            # Update status - use simpler query without updated_at if it fails
+            try:
+                cursor.execute('''
+                    UPDATE datasets 
+                    SET status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (status, dataset_id))
+            except Exception:
+                cursor.execute('''
+                    UPDATE datasets 
+                    SET status = ?
+                    WHERE id = ?
+                ''', (status, dataset_id))
             conn.commit()
 
 # Global instance

@@ -1550,6 +1550,65 @@ export const api = {
         }
     },
 
+    // Create Q-C-A dataset from documents
+    createQCADataset: async (datasetConfig) => {
+        try {
+            // Map frontend field names to backend expected names
+            const payload = {
+                name: datasetConfig.name,
+                description: datasetConfig.description || '',
+                document_ids: datasetConfig.document_ids.map(id => String(id)),  // Ensure strings
+                questions_per_doc: datasetConfig.questions_per_document || 5,
+                model_name: datasetConfig.model_name || 'gemma2:2b'
+            };
+            
+            console.log('🔧 [DEBUG] createQCADataset payload:', JSON.stringify(payload, null, 2));
+            
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets/create`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...getAuthHeader()
+                },
+                credentials: 'include',
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: 'Dataset creation failed' }));
+                console.error('❌ [DEBUG] createQCADataset error response:', errorData);
+                throw new Error(typeof errorData.detail === 'object' ? JSON.stringify(errorData.detail) : (errorData.detail || `HTTP error! status: ${response.status}`));
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error creating Q-C-A dataset:', error);
+            throw error;
+        }
+    },
+
+    // Get Q-C-A dataset creation status (polling endpoint)
+    getQCADatasetStatus: async (taskId) => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/api/finetuning/datasets/create/${taskId}/status`, {
+                method: 'GET',
+                headers: {
+                    ...getAuthHeader()
+                },
+                credentials: 'include'
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Error getting Q-C-A dataset status:', error);
+            throw error;
+        }
+    },
+
     // Convert evaluation dataset to finetuning format
     convertEvaluationDataset: async (evaluationDatasetId, name, description = '') => {
         try {

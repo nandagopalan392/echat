@@ -43,13 +43,14 @@ async def evaluate_dataset(
     Evaluate RAG system against a dataset
     """
     try:
+        # Use default model if not specified
+        model_id = request.model_id or "gemma2:2b"
+        
         task = evaluate_dataset_with_rag.delay(
             dataset_id=request.dataset_id,
-            dataset_name=request.dataset_name,
-            model_id=request.model_id,
+            model_id=model_id,
             retrieval_config=request.retrieval_config,
-            user_id=request.user_id or current_admin.get("username"),
-            metadata=request.metadata
+            user_id=request.user_id or current_admin.get("username")
         )
         
         websocket_url = f"/api/evaluation/ws/evaluation/{task.id}"

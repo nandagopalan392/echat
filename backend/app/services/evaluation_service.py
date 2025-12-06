@@ -204,13 +204,69 @@ class EvaluationService:
    
       
     def get_recent_results(self, limit: int = 10, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get recent evaluation results"""
+        """Get recent evaluation tasks with aggregated results"""
         try:
-            # get_recent_evaluation_stats uses 'last_n' parameter, not 'limit'
-            stats = get_recent_evaluation_stats(last_n=limit)
-            return stats.get("recent_evaluations", [])
+            eval_repo = self.get_evaluation_repository()
+            
+            with eval_repo.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Query evaluation_tasks with aggregated metrics from evaluation_results
+                query = """
+                    SELECT 
+                        t.task_id,
+                        t.dataset_id,
+                        t.status,
+                        t.created_at,
+                        t.completed_at,
+                        d.name as dataset_name,
+                        AVG(r.groundedness_score) as avg_groundedness,
+                        AVG(r.relevance_score) as avg_relevance,
+                        AVG(r.quality_score) as avg_quality,
+                        AVG(r.latency_ms) as avg_latency,
+                        COUNT(r.id) as total_questions,
+                        MAX(r.model_used) as model_used
+                    FROM evaluation_tasks t
+                    LEFT JOIN datasets d ON t.dataset_id = d.id
+                    LEFT JOIN evaluation_results r ON r.task_id = t.task_id
+                    GROUP BY t.task_id, t.dataset_id, t.status, t.created_at, t.completed_at, d.name
+                    ORDER BY t.created_at DESC
+                    LIMIT ?
+                """
+                
+                cursor.execute(query, (limit,))
+                rows = cursor.fetchall()
+                
+                results = []
+                for row in rows:
+                    task_data = {
+                        "task_id": row[0],
+                        "dataset_id": row[1],
+                        "status": row[2],
+                        "created_at": row[3],
+                        "completed_at": row[4],
+                        "metadata": {
+                            "dataset_id": row[1],
+                            "dataset_name": row[5] or f"Dataset {row[1]}",
+                            "model_id": row[11] or "gemma2:2b",
+                            "model_name": row[11] or "gemma2:2b",
+                            "total_questions": row[10] or 0
+                        },
+                        "results": {
+                            "groundedness": {"score": row[6] or 0},
+                            "context_relevance": {"score": row[7] or 0},
+                            "answer_relevance": {"score": row[8] or 0},
+                            "evaluation_time_seconds": (row[9] or 0) / 1000.0  # Convert ms to seconds
+                        },
+                        "user_id": "admin"
+                    }
+                    results.append(task_data)
+                
+                return results
+                
         except Exception as e:
             logger.error(f"Error getting recent results: {e}")
+            logger.exception(e)
             return []
     
     def get_evaluation_results(

@@ -80,6 +80,7 @@ const FinetuningPage = () => {
     // Training Dashboard State
     const [selectedTrainingExperiment, setSelectedTrainingExperiment] = useState(null);
     const [showTrainingDashboard, setShowTrainingDashboard] = useState(false);
+    const [trainingUpdates, setTrainingUpdates] = useState(null); // Store training updates for dashboard
     
     // Core State
     const [experiments, setExperiments] = useState([]);
@@ -118,6 +119,11 @@ const FinetuningPage = () => {
     
     // WebSocket State
     const [webSocket, setWebSocket] = useState(null);
+    
+    // Q-C-A Dataset WebSocket State (following EvaluationPage pattern)
+    const [qcaActiveConnections, setQcaActiveConnections] = useState(new Set());
+    const [qcaProgress, setQcaProgress] = useState(new Map()); // taskId -> progress info
+    const [qcaConnectionStatuses, setQcaConnectionStatuses] = useState(new Map());
 
     // Load initial data
     useEffect(() => {
@@ -218,8 +224,59 @@ const FinetuningPage = () => {
             formData.append('lora_dropout', loraDropout.toString());
             formData.append('target_modules', targetModules);
 
+            console.log('🧪 [Experiment] Creating experiment...');
             const result = await api.createFineTuningExperiment(formData);
+            console.log('🧪 [Experiment] Create result:', result);
+            
+            const experimentId = result?.experiment?.id;
             setSuccess(`Experiment "${result?.experiment?.name || 'New experiment'}" created successfully!`);
+            
+            // Set up WebSocket connection for training progress (training auto-starts)
+            if (experimentId) {
+                console.log('🔌 [Experiment] Setting up WebSocket for auto-started training:', experimentId);
+                const ws = webSocketService.connect(experimentId, {
+                    endpointType: 'finetuning',
+                    onMessage: (data) => {
+                        console.log('📨 [Experiment] Training update:', data);
+                        // Store updates for TrainingDashboard
+                        setTrainingUpdates(data);
+                        if (data.status === 'completed') {
+                            setSuccess('Training completed successfully!');
+                            webSocketService.disconnect(experimentId);
+                        } else if (data.status === 'failed') {
+                            setError('Training failed: ' + (data.error_message || 'Unknown error'));
+                            webSocketService.disconnect(experimentId);
+                        }
+                        // Update experiment status
+                        setExperiments(prev => prev.map(exp => 
+                            exp.id === experimentId ? { ...exp, status: data.status } : exp
+                        ));
+                    },
+                    onError: (error) => {
+                        console.error('❌ [Experiment] WebSocket error:', error);
+                    },
+                    onClose: () => {
+                        console.log('🔒 [Experiment] WebSocket closed');
+                    },
+                    onStatusChange: (status, oldStatus) => {
+                        console.log(`🔄 [Experiment] Connection: ${oldStatus} → ${status}`);
+                    },
+                    enablePolling: true,
+                    pollCallback: async (expId) => {
+                        try {
+                            const exp = await api.getFineTuningExperiment(expId);
+                            if (exp.status === 'completed' || exp.status === 'failed') {
+                                setExperiments(prev => prev.map(e => 
+                                    e.id === expId ? { ...e, status: exp.status } : e
+                                ));
+                            }
+                        } catch (error) {
+                            console.error('[Experiment] Polling error:', error);
+                        }
+                    }
+                });
+                setWebSocket(ws);
+            }
             
             // Reset form
             setExperimentName('');
@@ -229,6 +286,7 @@ const FinetuningPage = () => {
             
             await loadExperiments();
         } catch (err) {
+            console.error('❌ [Experiment] Failed to create:', err);
             setError('Failed to create experiment: ' + (err.message || 'Unknown error'));
         } finally {
             setLoading(false);
@@ -237,9 +295,11 @@ const FinetuningPage = () => {
 
     const handleStartTraining = async (experimentId) => {
         try {
-            // Set up WebSocket for training updates
+            // Set up WebSocket for training updates - use 'finetuning' endpoint type
             const ws = webSocketService.connect(experimentId, {
+                endpointType: 'finetuning', // Use finetuning WebSocket endpoint
                 onMessage: (data) => {
+                    console.log('📨 [Training] WebSocket message:', data);
                     if (data.status === 'completed') {
                         setSuccess('Training completed successfully!');
                     } else if (data.status === 'failed') {
@@ -252,10 +312,29 @@ const FinetuningPage = () => {
                     ));
                 },
                 onError: (error) => {
+                    console.error('❌ [Training] WebSocket error:', error);
                     setError('WebSocket connection error.');
                 },
                 onClose: () => {
+                    console.log('🔒 [Training] WebSocket closed');
                     loadExperiments(); // Refresh experiments when WebSocket closes
+                },
+                onStatusChange: (status, oldStatus) => {
+                    console.log(`🔄 [Training] Connection status changed: ${oldStatus} → ${status}`);
+                },
+                enablePolling: true,
+                pollCallback: async (expId) => {
+                    // HTTP fallback polling for training status
+                    try {
+                        const exp = await api.getFineTuningExperiment(expId);
+                        if (exp.status === 'completed' || exp.status === 'failed') {
+                            setExperiments(prev => prev.map(e => 
+                                e.id === expId ? { ...e, status: exp.status } : e
+                            ));
+                        }
+                    } catch (error) {
+                        console.error('[Training] Polling error:', error);
+                    }
                 }
             });
             
@@ -314,12 +393,15 @@ const FinetuningPage = () => {
             const payload = {
                 name: newDatasetName,
                 description: newDatasetDescription,
-                document_ids: selectedDocuments,
+                document_ids: selectedDocuments.map(id => String(id)),  // Convert to strings
                 questions_per_document: questionsPerDoc
             };
 
-            await api.createQCADataset(payload);
-            setSuccess('Dataset creation started successfully!');
+            console.log('📊 [QCA] Creating dataset with payload:', payload);
+            const result = await api.createQCADataset(payload);
+            console.log('📊 [QCA] Create dataset result:', result);
+            
+            setSuccess(`Dataset creation started! Task ID: ${result.task_id}`);
             setCreateDatasetDialogOpen(false);
             
             // Reset form
@@ -328,9 +410,135 @@ const FinetuningPage = () => {
             setSelectedDocuments([]);
             setQuestionsPerDoc(5);
             
+            // Use WebSocket as primary, with HTTP fallback (following EvaluationPage pattern)
+            if (result.task_id) {
+                console.log('🔌 [QCA] About to create WebSocket connection for task:', result.task_id);
+                createQCAWebSocketConnection(result.task_id);
+                console.log('🔌 [QCA] WebSocket connection initiated');
+            } else {
+                console.warn('⚠️ [QCA] No task_id in result, cannot create WebSocket connection');
+            }
+            
             await loadDatasets();
         } catch (err) {
+            console.error('❌ [QCA] Failed to create dataset:', err);
             setError('Failed to create dataset: ' + (err.message || 'Unknown error'));
+        }
+    };
+
+    // Create WebSocket connection for Q-C-A dataset creation (following EvaluationPage pattern)
+    const createQCAWebSocketConnection = (taskId) => {
+        // Check if we already have an active connection
+        if (qcaActiveConnections.has(taskId)) {
+            console.log(`🔄 Q-C-A WebSocket connection already exists for task ${taskId}`);
+            return null;
+        }
+
+        console.log(`🔌 Creating Q-C-A WebSocket connection for task ${taskId}`);
+
+        // Add to active connections
+        setQcaActiveConnections(prev => new Set(prev).add(taskId));
+
+        // Create connection using WebSocket service with 'qca-dataset' endpoint type
+        const connection = webSocketService.connect(taskId, {
+            endpointType: 'qca-dataset', // Use Q-C-A dataset endpoint
+            onMessage: (message) => {
+                handleQCAWebSocketMessage(taskId, message);
+            },
+            onError: (error) => {
+                console.error(`❌ Q-C-A WebSocket error for task ${taskId}:`, error);
+                handleQCAWebSocketError(taskId, error);
+            },
+            onClose: (event) => {
+                console.log(`🔒 Q-C-A WebSocket closed for task ${taskId}:`, event?.code, event?.reason);
+                handleQCAWebSocketClose(taskId, event);
+            },
+            onStatusChange: (status, oldStatus) => {
+                console.log(`🔄 Q-C-A connection status changed for task ${taskId}: ${oldStatus} → ${status}`);
+                setQcaConnectionStatuses(prev => new Map(prev).set(taskId, status));
+            },
+            enablePolling: true,
+            pollCallback: async (taskId) => {
+                // HTTP fallback polling for Q-C-A status
+                try {
+                    const status = await api.getQCADatasetStatus(taskId);
+                    // Convert polling response to WebSocket message format
+                    if (status.status === 'SUCCESS') {
+                        handleQCAWebSocketMessage(taskId, { status: 'SUCCESS', data: status.data });
+                    } else if (status.status === 'FAILURE' || status.status === 'ERROR') {
+                        handleQCAWebSocketMessage(taskId, { status: 'FAILURE', error: status.data?.message || 'Unknown error' });
+                    } else if (status.data?.progress !== undefined) {
+                        handleQCAWebSocketMessage(taskId, { 
+                            status: 'PROGRESS', 
+                            progress: status.data.progress,
+                            message: status.data.message || 'Processing...'
+                        });
+                    }
+                } catch (error) {
+                    console.error('Q-C-A polling error:', error);
+                }
+            }
+        });
+
+        return connection;
+    };
+
+    // Handle Q-C-A WebSocket messages
+    const handleQCAWebSocketMessage = async (taskId, message) => {
+        console.log(`📨 Q-C-A WebSocket message for task ${taskId}:`, message);
+
+        const status = message.status || message.type;
+        const progress = message.progress || message.data?.progress || 0;
+        const messageText = message.message || message.data?.message || '';
+
+        // Update progress state
+        setQcaProgress(prev => new Map(prev).set(taskId, {
+            status,
+            progress,
+            message: messageText,
+            timestamp: new Date().toISOString()
+        }));
+
+        if (status === 'SUCCESS' || status === 'COMPLETED') {
+            setSuccess('Q-C-A Dataset created successfully!');
+            // Disconnect WebSocket and cleanup
+            webSocketService.disconnect(taskId);
+            setQcaActiveConnections(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(taskId);
+                return newSet;
+            });
+            // Reload datasets to show the new one
+            await loadDatasets();
+        } else if (status === 'FAILURE' || status === 'ERROR') {
+            setError(`Q-C-A Dataset creation failed: ${message.error || messageText || 'Unknown error'}`);
+            // Disconnect WebSocket and cleanup
+            webSocketService.disconnect(taskId);
+            setQcaActiveConnections(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(taskId);
+                return newSet;
+            });
+            await loadDatasets();
+        }
+    };
+
+    // Handle Q-C-A WebSocket errors
+    const handleQCAWebSocketError = (taskId, error) => {
+        console.error(`Q-C-A WebSocket error for ${taskId}:`, error);
+        // WebSocket service will auto-reconnect or fall back to polling
+    };
+
+    // Handle Q-C-A WebSocket close
+    const handleQCAWebSocketClose = (taskId, event) => {
+        console.log(`Q-C-A WebSocket closed for ${taskId}:`, event?.code);
+        // Cleanup if this was a normal close after completion
+        if (event?.code === 1000) {
+            setQcaActiveConnections(prev => {
+                const newSet = new Set(prev);
+                newSet.delete(taskId);
+                return newSet;
+            });
         }
     };
 
@@ -400,9 +608,11 @@ const FinetuningPage = () => {
         return (
             <TrainingDashboard
                 experimentId={selectedTrainingExperiment}
+                trainingUpdate={trainingUpdates}
                 onClose={() => {
                     setShowTrainingDashboard(false);
                     setSelectedTrainingExperiment(null);
+                    setTrainingUpdates(null);
                 }}
             />
         );
