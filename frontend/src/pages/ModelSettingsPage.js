@@ -196,8 +196,44 @@ const ModelSettingsPage = () => {
 
     const loadAvailableModels = async () => {
         try {
-            const response = await api.get('/api/models/available');
-            setAvailableModels(response.models || []);
+            // Use providers endpoint to get all models including HuggingFace with display_name
+            const providersResponse = await api.get('/api/models/providers');
+            console.log('Providers API response for model settings:', providersResponse);
+            
+            if (providersResponse.providers) {
+                // Combine Ollama and HuggingFace LLM models
+                const ollamaModels = providersResponse.providers.ollama?.models || [];
+                const hfModels = providersResponse.providers.huggingface?.models || [];
+                
+                // Filter for LLM models only
+                const ollamaLLMs = ollamaModels.filter(m => m.type === 'llm' || m.category === 'llm' || !m.type);
+                const hfLLMs = hfModels.filter(m => m.type === 'llm' || m.is_finetuned);
+                
+                // Format models consistently with display_name
+                const formattedOllama = ollamaLLMs.map(m => ({
+                    ...m,
+                    provider: 'ollama',
+                    display_name: m.display_name || m.name
+                }));
+                
+                const formattedHF = hfLLMs.map(m => ({
+                    ...m,
+                    provider: 'huggingface',
+                    display_name: m.display_name || m.name
+                }));
+                
+                // Debug: Log finetuned models with their display_name
+                const finetunedModels = formattedHF.filter(m => m.is_finetuned);
+                console.log('🎯 Finetuned models with display_name:', finetunedModels.map(m => ({name: m.name, display_name: m.display_name, is_finetuned: m.is_finetuned})));
+                
+                const allModels = [...formattedOllama, ...formattedHF];
+                console.log(`Loaded ${allModels.length} models (Ollama: ${formattedOllama.length}, HuggingFace: ${formattedHF.length})`);
+                setAvailableModels(allModels);
+            } else {
+                // Fallback to old endpoint
+                const response = await api.get('/api/models/available');
+                setAvailableModels(response.models || []);
+            }
             
             // Also load current LLM model
             const currentResponse = await api.get('/api/models/current');
@@ -276,15 +312,22 @@ const ModelSettingsPage = () => {
                 }
                 return true;
             }).map(model => {
-                // Handle both string and object formats
-                const modelName = typeof model === 'string' ? model : model.name;
+                // Handle both string and object formats - PRESERVE all fields including display_name
+                if (typeof model === 'object') {
+                    return {
+                        ...model,  // Preserve all original fields including display_name, is_finetuned, etc.
+                        category: type,
+                        provider: targetProvider,
+                        source: 'provider'
+                    };
+                }
+                // String format (legacy)
                 return {
-                    name: modelName,
+                    name: model,
                     category: type,
                     provider: targetProvider,
-                    size: typeof model === 'object' ? model.size || 'Unknown' : 'Unknown',
-                    source: 'provider',
-                    downloads: typeof model === 'object' ? model.downloads : undefined
+                    size: 'Unknown',
+                    source: 'provider'
                 };
             });
         }
@@ -755,6 +798,15 @@ const ModelSettingsPage = () => {
 
     // Helper function to format model display name with size and parameters
     const formatModelDisplayName = (model) => {
+        // For finetuned models, use display_name directly if available
+        if (model && typeof model === 'object' && model.display_name) {
+            // For finetuned models, show display_name with a finetuned indicator
+            if (model.is_finetuned) {
+                return `🎯 ${model.display_name}`;
+            }
+            return model.display_name;
+        }
+        
         let displayName = getModelName(model);
         
         // Extract parameter count from model name (this shows model complexity)
@@ -1004,7 +1056,30 @@ const ModelSettingsPage = () => {
                                             <h4 className="text-sm font-medium text-blue-900 mb-2">Currently Selected Model</h4>
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <p className="text-lg font-semibold text-blue-800">{currentLLMModel}</p>
+                                                    <p className="text-lg font-semibold text-blue-800">
+                                                        {(() => {
+                                                            // Look up model from availableModels list to get display_name
+                                                            let modelFromList = availableModels.find(m => m.name === currentLLMModel);
+                                                            
+                                                            // Also check in providers (includes finetuned models with display_name)
+                                                            if (!modelFromList && providers) {
+                                                                for (const providerKey of Object.keys(providers)) {
+                                                                    const providerModels = providers[providerKey]?.models || [];
+                                                                    const found = providerModels.find(m => m.name === currentLLMModel);
+                                                                    if (found) {
+                                                                        modelFromList = found;
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                            
+                                                            if (modelFromList && modelFromList.display_name) {
+                                                                return modelFromList.is_finetuned ? `🎯 ${modelFromList.display_name}` : modelFromList.display_name;
+                                                            }
+                                                            // Fallback to raw name if not found in list
+                                                            return currentLLMModel;
+                                                        })()}
+                                                    </p>
                                                     <p className="text-sm text-blue-600">Active language model for chat responses</p>
                                                 </div>
                                                 <span className="inline-flex px-3 py-1 text-sm font-semibold rounded-full bg-green-100 text-green-800">
@@ -1095,16 +1170,15 @@ const ModelSettingsPage = () => {
                                                 className="bg-white"
                                             >
                                                 <MenuItem value="">Select a model</MenuItem>
-                                                {getFilteredModels('llm', selectedProvider).map((model, index) => {
-                                                    const modelName = getModelName(model);
-                                                    const key = modelName || `model-${index}`;
-                                                    return (
-                                                        <MenuItem key={key} value={modelName}>
-                                                            {String(formatModelDisplayName(model))} {currentLLMModel === modelName ? ' (Current)' : ''}
-                                                            {model.provider && model.provider !== 'ollama' ? ` [${model.provider}]` : ''}
+                                                {availableModels
+                                                    .filter(model => model.provider === selectedProvider)
+                                                    .map((model) => (
+                                                        <MenuItem key={model?.name || 'unknown'} value={model?.name || ''}>
+                                                            {model?.is_finetuned ? '🎯 ' : ''}{model?.display_name || model?.name || 'Unknown Model'}
+                                                            {currentLLMModel === model?.name ? ' (Current)' : ''}
+                                                            {model?.provider === 'huggingface' ? ' [huggingface]' : ''}
                                                         </MenuItem>
-                                                    );
-                                                })}
+                                                    ))}
                                             </Select>
                                         </FormControl>
                                         <p className="mt-1 text-sm text-gray-500">

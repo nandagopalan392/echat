@@ -118,7 +118,38 @@ class RetrievalConfigService:
     
     async def get_available_reranker_models(self, provider: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Get list of available reranker models from Ollama and HuggingFace.
+        Get list of available reranker models from cache.
+        
+        Uses the centralized model cache for fast response times.
+        Falls back to live fetch if cache is unavailable.
+        
+        Args:
+            provider: Optional filter by provider (ollama, huggingface)
+            
+        Returns:
+            List of reranker model information
+        """
+        try:
+            # Use model cache for fast response
+            from app.core.providers import get_model_cache
+            model_cache = get_model_cache()
+            cached_models = model_cache.get_reranker_models(provider=provider)
+            
+            if cached_models:
+                logger.info(f"Serving {len(cached_models)} reranker models from cache (provider={provider})")
+                return cached_models
+            
+            # Fall back to live fetch if cache is empty
+            logger.warning("Reranker cache empty, falling back to live fetch...")
+            return await self._fetch_reranker_models_live(provider)
+            
+        except Exception as e:
+            logger.error(f"Error getting reranker models: {e}")
+            return self._get_fallback_models()
+    
+    async def _fetch_reranker_models_live(self, provider: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Fetch reranker models from live sources (fallback when cache is empty).
         
         Args:
             provider: Optional filter by provider (ollama, huggingface)

@@ -645,9 +645,12 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
             "user_id": user_id,
             "metadata": {
                 "dataset_id": dataset_id,
+                "dataset_name": dataset_name,  # Include actual dataset name
                 "model_id": model_id,
+                "model_name": model_id,  # Include model name for display
                 "retrieval_config": retrieval_config,
-                "test_type": "dataset_evaluation"
+                "test_type": "dataset_evaluation",
+                "total_questions": total_questions
             },
             "results": {
                 "groundedness": {"score": avg_groundedness},
@@ -678,9 +681,27 @@ def evaluate_dataset_with_rag(self, dataset_id: int, model_id: str, retrieval_co
                     model_used=model_id
                 )
             
-            # Complete the task with success status
-            eval_repo.complete_task(task_id, status='completed')
-            logger.info(f"🚀 DATABASE: Saved {len(valid_results)} evaluation results and completed task {task_id}")
+            # Complete the task with success status and scores
+            eval_repo.complete_task(
+                task_id, 
+                status='SUCCESS',
+                groundedness_score=avg_groundedness,
+                answer_relevance_score=avg_answer_relevance,
+                context_relevance_score=avg_context_relevance,
+                overall_score=avg_overall,
+                evaluation_time=time.time() - start_time,
+                metadata={
+                    "dataset_id": dataset_id,
+                    "dataset_name": dataset_name,
+                    "model_id": model_id,
+                    "model_name": model_id,
+                    "retrieval_config": retrieval_config,
+                    "test_type": "dataset_evaluation",
+                    "total_questions": total_questions,
+                    "successful_evaluations": len(valid_results)
+                }
+            )
+            logger.info(f"🚀 DATABASE: Saved {len(valid_results)} evaluation results and completed task {task_id} with scores g={avg_groundedness:.2f}, ar={avg_answer_relevance:.2f}, cr={avg_context_relevance:.2f}")
         except Exception as db_error:
             logger.error(f"🚀 DATABASE ERROR: Failed to save results: {db_error}")
         

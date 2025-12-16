@@ -211,7 +211,8 @@ class EvaluationService:
             with eval_repo.db.get_connection() as conn:
                 cursor = conn.cursor()
                 
-                # Query evaluation_tasks with aggregated metrics from evaluation_results
+                # Query evaluation_tasks directly - scores are stored in the task table
+                # Also check evaluation_results for legacy data
                 query = """
                     SELECT 
                         t.task_id,
@@ -220,16 +221,24 @@ class EvaluationService:
                         t.created_at,
                         t.completed_at,
                         d.name as dataset_name,
-                        AVG(r.groundedness_score) as avg_groundedness,
-                        AVG(r.relevance_score) as avg_relevance,
-                        AVG(r.quality_score) as avg_quality,
-                        AVG(r.latency_ms) as avg_latency,
+                        t.groundedness_score,
+                        t.answer_relevance_score,
+                        t.context_relevance_score,
+                        t.overall_score,
+                        t.evaluation_time,
+                        t.metadata,
+                        COALESCE(AVG(r.groundedness_score), 0) as r_groundedness,
+                        COALESCE(AVG(r.relevance_score), 0) as r_relevance,
+                        COALESCE(AVG(r.quality_score), 0) as r_quality,
+                        COALESCE(AVG(r.latency_ms), 0) as r_latency,
                         COUNT(r.id) as total_questions,
                         MAX(r.model_used) as model_used
                     FROM evaluation_tasks t
                     LEFT JOIN datasets d ON t.dataset_id = d.id
                     LEFT JOIN evaluation_results r ON r.task_id = t.task_id
-                    GROUP BY t.task_id, t.dataset_id, t.status, t.created_at, t.completed_at, d.name
+                    GROUP BY t.task_id, t.dataset_id, t.status, t.created_at, t.completed_at, 
+                             d.name, t.groundedness_score, t.answer_relevance_score, 
+                             t.context_relevance_score, t.overall_score, t.evaluation_time, t.metadata
                     ORDER BY t.created_at DESC
                     LIMIT ?
                 """
@@ -239,6 +248,25 @@ class EvaluationService:
                 
                 results = []
                 for row in rows:
+                    # Parse stored metadata from task (contains dataset_name and model info)
+                    stored_metadata = {}
+                    if row[11]:  # metadata column (index 11)
+                        try:
+                            stored_metadata = json.loads(row[11]) if isinstance(row[11], str) else row[11]
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    
+                    # Priority: stored metadata > datasets table > fallback
+                    dataset_name = stored_metadata.get('dataset_name') or row[5] or f"Dataset {row[1]}"
+                    model_id = stored_metadata.get('model_id') or row[17] or "gemma2:2b"
+                    model_name = stored_metadata.get('model_name') or row[17] or "gemma2:2b"
+                    
+                    # Use scores from evaluation_tasks table first, fallback to evaluation_results
+                    groundedness = row[6] if row[6] is not None else row[12]  # t.groundedness_score or r_groundedness
+                    answer_relevance = row[7] if row[7] is not None else row[13]  # t.answer_relevance_score or r_relevance
+                    context_relevance = row[8] if row[8] is not None else row[14]  # t.context_relevance_score or r_quality
+                    evaluation_time = row[10] if row[10] is not None else (row[15] / 1000.0 if row[15] else 0)  # t.evaluation_time or r_latency
+                    
                     task_data = {
                         "task_id": row[0],
                         "dataset_id": row[1],
@@ -247,16 +275,16 @@ class EvaluationService:
                         "completed_at": row[4],
                         "metadata": {
                             "dataset_id": row[1],
-                            "dataset_name": row[5] or f"Dataset {row[1]}",
-                            "model_id": row[11] or "gemma2:2b",
-                            "model_name": row[11] or "gemma2:2b",
-                            "total_questions": row[10] or 0
+                            "dataset_name": dataset_name,
+                            "model_id": model_id,
+                            "model_name": model_name,
+                            "total_questions": row[16] or stored_metadata.get('total_questions', 0)
                         },
                         "results": {
-                            "groundedness": {"score": row[6] or 0},
-                            "context_relevance": {"score": row[7] or 0},
-                            "answer_relevance": {"score": row[8] or 0},
-                            "evaluation_time_seconds": (row[9] or 0) / 1000.0  # Convert ms to seconds
+                            "groundedness": {"score": groundedness or 0},
+                            "context_relevance": {"score": context_relevance or 0},
+                            "answer_relevance": {"score": answer_relevance or 0},
+                            "evaluation_time_seconds": evaluation_time or 0
                         },
                         "user_id": "admin"
                     }

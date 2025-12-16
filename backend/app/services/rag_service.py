@@ -54,16 +54,22 @@ class RAGService:
                 llm_model = db_settings.get('llm')
                 embedding_model = db_settings.get('embedding')
                 parameters = db_settings.get('parameters', {})
+                llm_provider = db_settings.get('provider', 'ollama')
+                embedding_provider = db_settings.get('embedding_provider', 'ollama')
                 
-                # Update RAG engine models
+                # Update RAG engine models with providers
                 if llm_model or embedding_model:
-                    self.rag_engine.reload_models(llm_model, embedding_model)
+                    self.rag_engine.reload_models(
+                        llm_model, embedding_model,
+                        llm_provider=llm_provider,
+                        embedding_provider=embedding_provider
+                    )
                 
                 # Update parameters
                 if parameters:
                     self.rag_engine.update_model_parameters(parameters)
                 
-                logger.info(f"Loaded model settings: LLM={llm_model}, Embedding={embedding_model}")
+                logger.info(f"Loaded model settings: LLM={llm_model} (provider={llm_provider}), Embedding={embedding_model}")
             
         except Exception as e:
             logger.warning(f"Could not load model settings from database: {e}")

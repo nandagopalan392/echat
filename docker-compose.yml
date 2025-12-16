@@ -37,6 +37,7 @@ services:
       - TRANSFORMERS_CACHE=/root/.cache/huggingface  # Transformers cache
       - EASYOCR_MODULE_PATH=/root/.EasyOCR      # EasyOCR cache directory
       - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN}  # HuggingFace authentication token
+      - HF_HUB_DISABLE_PROGRESS_BARS=0  # Enable HuggingFace download progress bars
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - REDIS_URL=redis://redis:6379/0

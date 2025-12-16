@@ -985,6 +985,110 @@ class HuggingFaceFineTuner:
                 "description": "DeBERTa large model",
                 "size": "large",
                 "type": "encoder-only"
+            },
+            
+            # Qwen Models (Alibaba)
+            {
+                "name": "Qwen/Qwen2.5-0.5B",
+                "description": "Qwen 2.5 0.5B base model",
+                "size": "small",
+                "type": "text-generation"
+            },
+            {
+                "name": "Qwen/Qwen2.5-0.5B-Instruct",
+                "description": "Qwen 2.5 0.5B instruction model",
+                "size": "small",
+                "type": "instruction-following"
+            },
+            {
+                "name": "Qwen/Qwen2.5-1.5B",
+                "description": "Qwen 2.5 1.5B base model",
+                "size": "medium",
+                "type": "text-generation"
+            },
+            {
+                "name": "Qwen/Qwen2.5-1.5B-Instruct",
+                "description": "Qwen 2.5 1.5B instruction model",
+                "size": "medium",
+                "type": "instruction-following"
+            },
+            {
+                "name": "Qwen/Qwen2.5-3B",
+                "description": "Qwen 2.5 3B base model",
+                "size": "medium",
+                "type": "text-generation"
+            },
+            {
+                "name": "Qwen/Qwen2.5-3B-Instruct",
+                "description": "Qwen 2.5 3B instruction model",
+                "size": "medium",
+                "type": "instruction-following"
+            },
+            {
+                "name": "Qwen/Qwen2.5-7B",
+                "description": "Qwen 2.5 7B base model",
+                "size": "large",
+                "type": "text-generation"
+            },
+            {
+                "name": "Qwen/Qwen2.5-7B-Instruct",
+                "description": "Qwen 2.5 7B instruction model",
+                "size": "large",
+                "type": "instruction-following"
+            },
+            
+            # TinyLlama Models
+            {
+                "name": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                "description": "TinyLlama 1.1B chat model",
+                "size": "small",
+                "type": "conversational"
+            },
+            {
+                "name": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+                "description": "TinyLlama 1.1B base model",
+                "size": "small",
+                "type": "text-generation"
+            },
+            
+            # Phi Models (Microsoft)
+            {
+                "name": "microsoft/phi-1_5",
+                "description": "Phi-1.5 1.3B parameter model",
+                "size": "small",
+                "type": "text-generation"
+            },
+            {
+                "name": "microsoft/phi-2",
+                "description": "Phi-2 2.7B parameter model",
+                "size": "medium",
+                "type": "text-generation"
+            },
+            
+            # Gemma Models (Google)
+            {
+                "name": "google/gemma-2b",
+                "description": "Gemma 2B base model",
+                "size": "medium",
+                "type": "text-generation"
+            },
+            {
+                "name": "google/gemma-2b-it",
+                "description": "Gemma 2B instruction model",
+                "size": "medium",
+                "type": "instruction-following"
+            },
+            {
+                "name": "google/gemma-7b",
+                "description": "Gemma 7B base model",
+                "size": "large",
+                "type": "text-generation"
+            },
+            {
+                "name": "google/gemma-7b-it",
+                "description": "Gemma 7B instruction model",
+                "size": "large",
+                "type": "instruction-following"
             }
         ]
     

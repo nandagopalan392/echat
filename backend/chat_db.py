@@ -1863,7 +1863,8 @@ class ChatDB:
                         SELECT id, task_type, status, query, response, context_chunks,
                                conversation_id, user_id, metadata, groundedness_score,
                                answer_relevance_score, context_relevance_score, overall_score,
-                               evaluation_time, error_message, created_at, updated_at, completed_at
+                               evaluation_time, error_message, created_at, updated_at, completed_at,
+                               dataset_id
                         FROM evaluation_tasks 
                         WHERE status = ?
                         ORDER BY created_at DESC
@@ -1874,7 +1875,8 @@ class ChatDB:
                         SELECT id, task_type, status, query, response, context_chunks,
                                conversation_id, user_id, metadata, groundedness_score,
                                answer_relevance_score, context_relevance_score, overall_score,
-                               evaluation_time, error_message, created_at, updated_at, completed_at
+                               evaluation_time, error_message, created_at, updated_at, completed_at,
+                               dataset_id
                         FROM evaluation_tasks 
                         ORDER BY created_at DESC
                         LIMIT ?
@@ -1902,7 +1904,8 @@ class ChatDB:
                         'error_message': row[14],
                         'created_at': row[15],
                         'updated_at': row[16],
-                        'completed_at': row[17]
+                        'completed_at': row[17],
+                        'dataset_id': row[18] if len(row) > 18 else None
                     }
                     tasks.append(task)
                 

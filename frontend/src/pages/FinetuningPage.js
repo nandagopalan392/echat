@@ -159,8 +159,41 @@ const FinetuningPage = () => {
 
     const loadAvailableModels = async () => {
         try {
-            const data = await api.getAvailableHFModels();
-            setAvailableModels(data.models || []);
+            // Use providers endpoint to get all models including HuggingFace with display_name
+            const response = await api.call('/api/models/providers');
+            console.log('Providers API response for finetuning:', response);
+            
+            if (response.providers) {
+                // Get HuggingFace LLM models for finetuning (not finetuned ones - we want base models)
+                const hfModels = response.providers.huggingface?.models || [];
+                console.log('All HuggingFace models:', hfModels.length, hfModels);
+                
+                // Filter for LLM models that are suitable for finetuning (not already finetuned)
+                // Include models with type='llm', type='text-generation', or no type (assume LLM)
+                // Exclude embedding models explicitly
+                const hfLLMs = hfModels.filter(m => {
+                    const modelType = m.type?.toLowerCase() || '';
+                    const isEmbedding = modelType === 'embedding' || m.name?.toLowerCase().includes('embed');
+                    const isLLM = modelType === 'llm' || modelType === 'text-generation' || modelType === '';
+                    const isFinetuned = m.is_finetuned === true;
+                    console.log(`Model ${m.name}: type=${m.type}, isEmbedding=${isEmbedding}, isLLM=${isLLM}, isFinetuned=${isFinetuned}`);
+                    return isLLM && !isEmbedding && !isFinetuned;
+                });
+                
+                // Format models consistently with display_name
+                const formattedModels = hfLLMs.map(m => ({
+                    ...m,
+                    provider: 'huggingface',
+                    display_name: m.display_name || m.name
+                }));
+                
+                console.log(`Loaded ${formattedModels.length} HuggingFace models for finetuning`);
+                setAvailableModels(formattedModels);
+            } else {
+                // Fallback to old endpoint
+                const data = await api.getAvailableHFModels();
+                setAvailableModels(data.models || []);
+            }
         } catch (err) {
             console.error('Failed to load models:', err);
             setError('Failed to load models: ' + (err.message || 'Unknown error'));
@@ -728,7 +761,7 @@ const FinetuningPage = () => {
                                             >
                                                 {availableModels.map((model) => (
                                                     <MenuItem key={model.name} value={model.name}>
-                                                        {model.name}
+                                                        {model.display_name || model.name}
                                                     </MenuItem>
                                                 ))}
                                             </Select>
@@ -860,7 +893,7 @@ const FinetuningPage = () => {
                                                             {experiment.description || 'No description'}
                                                         </Typography>
                                                     </TableCell>
-                                                    <TableCell>{experiment.model_name || 'Unknown'}</TableCell>
+                                                    <TableCell>{experiment.base_model || experiment.model_name || 'Unknown'}</TableCell>
                                                     <TableCell>{getStatusChip(experiment.status)}</TableCell>
                                                     <TableCell>{formatDate(experiment.created_at)}</TableCell>
                                                     <TableCell>

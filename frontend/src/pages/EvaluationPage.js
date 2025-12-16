@@ -194,6 +194,10 @@ const EvaluationPage = () => {
                     loadDatasets(),
                     loadRecentBackgroundEvaluations() // Load existing completed evaluations for the table
                 ]);
+                
+                // Also load available models for display name lookup (in background, non-blocking)
+                loadAvailableModels().catch(err => console.warn('Background model load:', err));
+                
                 // Set loading to false after essential data is loaded
                 setLoading(false);
                 console.log('✅ [DEBUG] Essential data loaded successfully');
@@ -209,7 +213,7 @@ const EvaluationPage = () => {
         
         // Note: loadTestCaseResults() will be populated by loadRecentBackgroundEvaluations()
         // and then updated in real-time via WebSocket during active evaluations
-        // Note: loadAvailableModels(), loadRerankerModels(), loadAvailableRetrievers(),
+        // Note: loadRerankerModels(), loadAvailableRetrievers(),
         // and loadAvailableDocuments() are loaded only when needed (on Create Test dialog open)
     }, [timeRange]);
 
@@ -358,18 +362,53 @@ const EvaluationPage = () => {
     // Load available models
     const loadAvailableModels = async () => {
         try {
-            console.log('Loading available models...');
-            const response = await api.call('/api/models/available');
-            console.log('Models API response:', response);
-            setAvailableModels(response.llm_models || []);
-            console.log('Set available models:', response.llm_models || []);
+            console.log('Loading available models from providers...');
+            // Use providers endpoint to get all models including HuggingFace and finetuned
+            const response = await api.call('/api/models/providers');
+            console.log('Providers API response:', response);
+            
+            if (response.providers) {
+                // Combine Ollama and HuggingFace LLM models
+                const ollamaModels = response.providers.ollama?.models || [];
+                const hfModels = response.providers.huggingface?.models || [];
+                
+                // Filter for LLM models only
+                const ollamaLLMs = ollamaModels.filter(m => m.type === 'llm' || m.category === 'llm' || !m.type);
+                const hfLLMs = hfModels.filter(m => m.type === 'llm' || m.is_finetuned);
+                
+                // Format models consistently
+                const formattedOllama = ollamaLLMs.map(m => ({
+                    ...m,
+                    provider: 'ollama',
+                    display_name: m.display_name || m.name
+                }));
+                
+                const formattedHF = hfLLMs.map(m => ({
+                    ...m,
+                    provider: 'huggingface',
+                    display_name: m.display_name || m.name
+                }));
+                
+                // Debug: Log finetuned models with their display_name
+                const finetunedModels = formattedHF.filter(m => m.is_finetuned);
+                console.log('🎯 [EvaluationPage] Finetuned models with display_name:', finetunedModels.map(m => ({name: m.name, display_name: m.display_name, is_finetuned: m.is_finetuned})));
+                
+                const allModels = [...formattedOllama, ...formattedHF];
+                console.log(`Loaded ${allModels.length} models (Ollama: ${formattedOllama.length}, HuggingFace: ${formattedHF.length})`);
+                setAvailableModels(allModels);
+            } else {
+                // Fallback to old endpoint
+                const fallbackResponse = await api.call('/api/models/available');
+                setAvailableModels(fallbackResponse.llm_models || []);
+            }
         } catch (error) {
             console.error('Error loading models:', error);
             // Fallback to some sample data for testing
             const sampleModels = [
-                { name: 'llama3', category: 'llm', description: 'LLaMA 3 Model', source: 'local' },
-                { name: 'deepseek-r1', category: 'llm', description: 'DeepSeek R1 Model', source: 'local' },
-                { name: 'gemma3n:e2b', category: 'llm', description: 'Gemma 3N Model', source: 'local' }
+                { name: 'llama3', category: 'llm', description: 'LLaMA 3 Model', source: 'local', provider: 'ollama' },
+                { name: 'deepseek-r1', category: 'llm', description: 'DeepSeek R1 Model', source: 'local', provider: 'ollama' },
+                { name: 'Qwen/Qwen2.5-0.5B-Instruct', category: 'llm', description: 'Qwen 2.5 0.5B Instruct', provider: 'huggingface' },
+                { name: 'gemma3n:e2b', category: 'llm', description: 'Gemma 3N Model', source: 'local', provider: 'ollama' }
             ];
             setAvailableModels(sampleModels);
             console.log('Set fallback sample models:', sampleModels);
@@ -838,6 +877,13 @@ const EvaluationPage = () => {
             const recentEvals = response.results || [];
             console.log('✅ [DEBUG] Processing', recentEvals.length, 'recent evaluations');
             
+            // Debug: Log first evaluation to see structure
+            if (recentEvals.length > 0) {
+                console.log('🔍 [DEBUG] First evaluation structure:', JSON.stringify(recentEvals[0], null, 2));
+                console.log('🔍 [DEBUG] First evaluation results:', recentEvals[0].results);
+                console.log('🔍 [DEBUG] First evaluation metadata:', recentEvals[0].metadata);
+            }
+            
             // Convert to Map for easier lookup
             const evalMap = new Map();
             recentEvals.forEach(evaluation => {
@@ -853,11 +899,34 @@ const EvaluationPage = () => {
                 const isRunning = evaluation.status === 'STARTED' || evaluation.status === 'PENDING';
                 const isCompleted = evaluation.status === 'SUCCESS' || evaluation.status === 'completed';
                 
+                // Get model name - store raw for lookup, will be formatted when displayed
+                const rawModelName = metadata.model_name || metadata.model_id || 'Unknown Model';
+                // Use model_display_name from metadata if available (for future-proofing)
+                const modelDisplayName = metadata.model_display_name || rawModelName;
+                
+                // Format dataset name - use actual name from datasets list when possible
+                let datasetDisplayName = metadata.dataset_name || '';
+                const datasetId = metadata.dataset_id;
+                
+                // Always try to look up from datasets list first for the most accurate name
+                if (datasetId && datasets && datasets.length > 0) {
+                    const datasetFromList = datasets.find(d => d.id === datasetId || d.dataset_id === datasetId);
+                    if (datasetFromList && datasetFromList.name) {
+                        datasetDisplayName = datasetFromList.name;
+                    }
+                }
+                
+                // Fallback if still no name or starts with "Dataset "
+                if (!datasetDisplayName || datasetDisplayName.startsWith('Dataset ')) {
+                    datasetDisplayName = metadata.dataset_name || `Dataset #${datasetId || 'Unknown'}`;
+                }
+                
                 return {
                     id: evaluation.task_id,
                     task_id: evaluation.task_id,
-                    dataset_name: metadata.dataset_name || `Dataset ${metadata.dataset_id || 'Unknown'}`,
-                    models: [metadata.model_name || metadata.model_id || 'Unknown Model'],
+                    dataset_name: datasetDisplayName,
+                    models: [modelDisplayName],
+                    raw_model_name: rawModelName, // Store raw name for model lookup
                     status: isRunning ? 'running' : 'completed',
                     results: (isCompleted && evaluation.results) ? [{
                         groundedness: evaluation.results.groundedness?.score || 0,
@@ -2969,7 +3038,16 @@ const EvaluationPage = () => {
                                                                 <TableCell>{testCase.dataset_name}</TableCell>
                                                                 <TableCell>
                                                                     <Chip 
-                                                                        label={testCase.models && testCase.models.length > 0 ? testCase.models[0] : 'N/A'} 
+                                                                        label={(() => {
+                                                                            // Try to get display name from availableModels using raw_model_name
+                                                                            const rawName = testCase.raw_model_name || (testCase.models && testCase.models[0]) || 'N/A';
+                                                                            const modelFromList = availableModels.find(m => m.name === rawName);
+                                                                            if (modelFromList && modelFromList.display_name) {
+                                                                                return modelFromList.is_finetuned ? `🎯 ${modelFromList.display_name}` : modelFromList.display_name;
+                                                                            }
+                                                                            // Fallback to stored model name
+                                                                            return testCase.models && testCase.models.length > 0 ? testCase.models[0] : 'N/A';
+                                                                        })()} 
                                                                         size="small" 
                                                                         variant="outlined"
                                                                     />
@@ -3171,7 +3249,8 @@ const EvaluationPage = () => {
                                             >
                                                 {availableModels.map((model) => (
                                                     <MenuItem key={model?.name || 'unknown'} value={model?.name || ''}>
-                                                        {model?.display_name || model?.name || 'Unknown Model'}
+                                                        {model?.is_finetuned ? '🎯 ' : ''}{model?.display_name || model?.name || 'Unknown Model'}
+                                                        {model?.provider && ` (${model.provider})`}
                                                     </MenuItem>
                                                 ))}
                                             </Select>
@@ -3441,7 +3520,7 @@ const EvaluationPage = () => {
                                         {availableModels.map((model) => (
                                             <MenuItem key={model.name} value={model.name}>
                                                 <ListItemText 
-                                                    primary={model.display_name || model.name}
+                                                    primary={`${model.is_finetuned ? '🎯 ' : ''}${model.display_name || model.name}${model.provider ? ` (${model.provider})` : ''}`}
                                                     secondary={`Size: ${model.size || 'Unknown'}`}
                                                 />
                                             </MenuItem>

@@ -35,6 +35,7 @@ from app.api.v1.endpoints.models import router as models_router
 from app.db import DatabaseConnection, initialize_database
 from app.services.rag_service import get_rag_service
 from app.core.training.rlhf import RLHFManager
+from app.core.providers import get_model_cache
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -134,6 +135,17 @@ async def startup_event():
             
         except Exception as e:
             logger.warning(f"🚀 Error initializing Docling processors: {e}")
+        
+        # Initialize model cache and warm it up
+        logger.info("🚀 Initializing model cache...")
+        cache_start = time.time()
+        try:
+            model_cache = get_model_cache()
+            model_cache.warm_up()
+            cache_time = time.time() - cache_start
+            logger.info(f"🚀 Model cache warmed up in {cache_time:.2f} seconds")
+        except Exception as e:
+            logger.warning(f"🚀 Error warming up model cache: {e}")
         
         total_time = time.time() - total_startup_time
         logger.info(f"🚀 Application startup completed in {total_time:.2f} seconds")

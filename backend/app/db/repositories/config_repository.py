@@ -25,7 +25,7 @@ class ConfigRepository:
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT llm, embedding, parameters 
+                    SELECT llm, embedding, parameters, provider, embedding_provider 
                     FROM model_settings 
                     ORDER BY id DESC 
                     LIMIT 1
@@ -37,7 +37,9 @@ class ConfigRepository:
                     return {
                         'llm': row[0] if row[0] else None,
                         'embedding': row[1] if row[1] else None,
-                        'parameters': json.loads(row[2]) if row[2] else {}
+                        'parameters': json.loads(row[2]) if row[2] else {},
+                        'provider': row[3] if len(row) > 3 and row[3] else 'ollama',
+                        'embedding_provider': row[4] if len(row) > 4 and row[4] else 'ollama'
                     }
                 return None
         except Exception as e:
@@ -57,7 +59,7 @@ class ConfigRepository:
                     '''INSERT INTO model_settings 
                        (llm, embedding, parameters, provider, embedding_provider, updated_at)
                        VALUES (?, ?, ?, ?, ?, ?)''',
-                    (llm, embedding, json.dumps(parameters), provider, embedding_provider, now)
+                    (llm, embedding, json.dumps(parameters), llm_provider, embedding_provider, now)
                 )
                 conn.commit()
                 return True

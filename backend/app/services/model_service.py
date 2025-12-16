@@ -18,7 +18,7 @@ import requests
 
 # Import new core modules
 from app.core.rag import get_rag_engine, RAGEngine
-from app.core.providers import OllamaProvider, HuggingFaceProvider
+from app.core.providers import OllamaProvider, HuggingFaceProvider, get_model_cache
 
 # Import database repositories
 from app.db import DatabaseConnection
@@ -60,6 +60,7 @@ class ModelService:
         self.config_repo = ConfigRepository(self.db)
         self.ollama_host = os.getenv('OLLAMA_HOST', 'http://ollama:11434')
         self.ollama_provider = OllamaProvider()
+        self.hf_provider = HuggingFaceProvider()
         
         # Validate models on startup
         self._validate_models_on_startup()
@@ -109,7 +110,9 @@ class ModelService:
     
     async def get_available_models(self) -> Dict[str, Any]:
         """
-        Get list of available models from both local Ollama and Ollama library.
+        Get list of available models from cache.
+        
+        Uses the production-grade model cache for fast response times.
         
         Returns:
             Dict containing all available models categorized by type
@@ -118,7 +121,11 @@ class ModelService:
             Exception: If unable to fetch models
         """
         try:
-            # Get locally installed models
+            # Get models from cache (fast path)
+            model_cache = get_model_cache()
+            ollama_models = model_cache.get_ollama_models()
+            
+            # Get locally installed models for status check
             local_model_names = set()
             local_models = []
             
@@ -127,27 +134,9 @@ class ModelService:
                 local_model_names = {model['name'] for model in local_models}
             except Exception as e:
                 self.logger.warning(f"Could not fetch local models: {e}")
-                local_model_names = set()
             
-            # Get available models from Ollama library using provider
-            try:
-                ollama_models = await self.ollama_provider.get_available_models()
-                # Convert provider format to expected format
-                available_models = [
-                    {
-                        'name': model.get('name'),
-                        'description': model.get('description', ''),
-                        'tags': model.get('tags', []),
-                        'installed': model.get('installed', False)
-                    }
-                    for model in ollama_models
-                ]
-            except Exception as e:
-                self.logger.warning(f"Could not fetch Ollama library models: {e}")
-                available_models = []
-            
-            # Combine local and available models
-            all_models = self._combine_models(local_models, available_models, local_model_names)
+            # Combine local and cached models
+            all_models = self._combine_models(local_models, ollama_models, local_model_names)
             
             # Convert to list and separate by category
             models_list = list(all_models.values())
@@ -159,8 +148,13 @@ class ModelService:
                 "models": models_list,
                 "llm_models": llm_models,
                 "embedding_models": embedding_models,
-                "total_models": len(models_list)
+                "total_models": len(models_list),
+                "from_cache": True
             }
+                    
+        except Exception as e:
+            self.logger.error(f"Error getting available models: {str(e)}")
+            raise
                     
         except Exception as e:
             self.logger.error(f"Error getting available models: {str(e)}")
@@ -171,7 +165,7 @@ class ModelService:
         Get current model settings including parameters and provider.
         
         Returns:
-            Dict containing current LLM, embedding model, provider, and parameters
+            Dict containing current LLM, embedding model, provider, embedding_provider, and parameters
             
         Raises:
             Exception: If unable to retrieve current settings
@@ -188,6 +182,7 @@ class ModelService:
                 'presence_penalty': 0.0
             }
             provider = "ollama"
+            embedding_provider = "ollama"
             
             try:
                 db_settings = self.config_repo.get_model_settings()
@@ -196,16 +191,21 @@ class ModelService:
                         parameters.update(db_settings['parameters'])
                     if 'provider' in db_settings:
                         provider = db_settings['provider']
+                    if 'embedding_provider' in db_settings:
+                        embedding_provider = db_settings['embedding_provider']
                 else:
                     self.logger.warning("No model settings found in database, using defaults")
             except Exception as e:
                 self.logger.warning(f"Could not load parameters from database: {e}")
+            
+            self.logger.info(f"Returning current models: llm={rag_engine.llm_model}, embedding={rag_engine.embedding_model}, provider={provider}, embedding_provider={embedding_provider}")
             
             return {
                 "success": True,
                 "llm": rag_engine.llm_model,
                 "embedding": rag_engine.embedding_model,
                 "provider": provider,
+                "embedding_provider": embedding_provider,
                 "parameters": parameters
             }
         except Exception as e:
@@ -214,7 +214,10 @@ class ModelService:
     
     async def get_model_providers(self) -> Dict[str, Any]:
         """
-        Get available model providers and their models.
+        Get available model providers and their models from cache.
+        
+        Uses the production-grade model cache for fast response times.
+        Falls back to direct fetching if cache is unavailable.
         
         Returns:
             Dict containing Ollama and HuggingFace providers with their models
@@ -223,36 +226,56 @@ class ModelService:
             Exception: If unable to fetch provider information
         """
         try:
+            # Get models from cache (fast path)
+            model_cache = get_model_cache()
+            cached_models = model_cache.get_all_models()
+            
+            # Get locally finetuned models (always fresh, as they're local)
+            finetuned_models = self._get_finetuned_models()
+            
+            # Build HuggingFace model list: finetuned first, then cached
+            hf_models = finetuned_models + cached_models.get('huggingface', [])
+            
             providers = {
                 "ollama": {
                     "name": "Ollama",
                     "icon": "ollama",
-                    "models": []
+                    "models": cached_models.get('ollama', [])
                 },
                 "huggingface": {
                     "name": "Hugging Face",
                     "icon": "huggingface", 
-                    "models": await self._fetch_huggingface_models()
+                    "models": hf_models
                 }
             }
             
-            # Get Ollama models
-            try:
-                ollama_models = await self._fetch_all_ollama_models()
-                providers["ollama"]["models"] = sorted(ollama_models, key=lambda x: x['name'])
-                self.logger.info(f"Found {len(ollama_models)} total Ollama models (local + library)")
-            except Exception as e:
-                self.logger.warning(f"Could not fetch Ollama models: {e}")
+            # If cache is empty or stale, trigger refresh in background
+            ollama_count = len(providers["ollama"]["models"])
+            hf_count = len(providers["huggingface"]["models"])
+            
+            if ollama_count == 0:
+                # Try direct fetch as fallback
+                self.logger.warning("Model cache empty for Ollama, fetching directly...")
+                try:
+                    ollama_models = await self._fetch_all_ollama_models()
+                    providers["ollama"]["models"] = sorted(ollama_models, key=lambda x: x['name'])
+                    ollama_count = len(providers["ollama"]["models"])
+                except Exception as e:
+                    self.logger.warning(f"Could not fetch Ollama models directly: {e}")
             
             # Log summary
-            hf_models = providers["huggingface"]["models"]
             hf_llm_count = len([m for m in hf_models if m.get('type') == 'llm'])
             hf_emb_count = len([m for m in hf_models if m.get('type') == 'embedding'])
-            self.logger.info(f"Total HuggingFace models: {len(hf_models)} (LLM: {hf_llm_count}, Embedding: {hf_emb_count})")
+            hf_finetuned_count = len(finetuned_models)
+            self.logger.info(f"Model providers served from cache - Ollama: {ollama_count}, HuggingFace: {hf_count} (LLM: {hf_llm_count}, Embedding: {hf_emb_count}, Finetuned: {hf_finetuned_count})")
             
             return {
                 "success": True,
-                "providers": providers
+                "providers": providers,
+                "cache_status": {
+                    "ollama_cached": ollama_count > 0,
+                    "huggingface_cached": (hf_count - hf_finetuned_count) > 0
+                }
             }
         except Exception as e:
             self.logger.error(f"Error getting model providers: {str(e)}")
@@ -622,6 +645,82 @@ class ModelService:
             {"name": "sentence-transformers/all-MiniLM-L6-v2", "type": "embedding", "provider": "huggingface", "downloads": 200000}
         ]
     
+    def _get_finetuned_models(self) -> List[Dict]:
+        """Get list of locally finetuned models with experiment names from database."""
+        models_dir = "/app/data/finetuned_models"
+        models = []
+        
+        # Build a map of model_path -> experiment info from database
+        experiment_map = {}
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT model_path, name, base_model FROM experiments WHERE model_path IS NOT NULL AND status = 'completed'"
+                )
+                for row in cursor.fetchall():
+                    if row[0]:  # model_path
+                        experiment_map[row[0]] = {
+                            'experiment_name': row[1],
+                            'base_model': row[2]
+                        }
+        except Exception as e:
+            self.logger.warning(f"Could not fetch experiment info from database: {e}")
+        
+        try:
+            if os.path.exists(models_dir):
+                for model_name in os.listdir(models_dir):
+                    model_path = os.path.join(models_dir, model_name)
+                    if os.path.isdir(model_path):
+                        # Check if it's a valid model directory (has config.json or pytorch files)
+                        has_config = os.path.exists(os.path.join(model_path, "config.json"))
+                        has_pytorch = any(f.endswith(('.bin', '.safetensors')) for f in os.listdir(model_path) if os.path.isfile(os.path.join(model_path, f)))
+                        
+                        if has_config or has_pytorch:
+                            # Try to get experiment info from database
+                            exp_info = experiment_map.get(model_path, {})
+                            experiment_name = exp_info.get('experiment_name')
+                            base_model = exp_info.get('base_model', '')
+                            
+                            # If no experiment info, parse from directory name
+                            if not experiment_name:
+                                # Format: {base_model}-{dataset_id}-{experiment_id}
+                                parts = model_name.split('-')
+                                base_model_parts = []
+                                for part in parts:
+                                    if len(part) == 8 and all(c in '0123456789abcdef' for c in part.lower()):
+                                        break
+                                    base_model_parts.append(part)
+                                base_model = '-'.join(base_model_parts) if base_model_parts else model_name[:30]
+                                experiment_name = base_model
+                            
+                            # Clean up base_model for display (remove 'facebook/' etc)
+                            base_model_display = base_model.split('/')[-1] if base_model else 'unknown'
+                            
+                            # Create a friendly display name with experiment name
+                            display_name = f"{experiment_name} ({base_model_display})"
+                            
+                            models.append({
+                                "name": model_path,  # Full path for loading
+                                "display_name": display_name,
+                                "experiment_name": experiment_name,
+                                "type": "llm",
+                                "provider": "huggingface",
+                                "source": "finetuned",
+                                "is_finetuned": True,
+                                "is_local": True,
+                                "base_model": base_model,
+                                "downloads": 0,  # Local models don't have downloads
+                                "description": f"Finetuned '{experiment_name}' based on {base_model_display}"
+                            })
+                            self.logger.debug(f"Found finetuned model: {model_name} -> {display_name}")
+                
+                self.logger.info(f"Found {len(models)} finetuned models in {models_dir}")
+        except Exception as e:
+            self.logger.warning(f"Error scanning finetuned models directory: {e}")
+        
+        return models
+    
     def _combine_models(
         self,
         local_models: List[Dict],
@@ -759,7 +858,11 @@ class ModelService:
                 logger.info("Models unchanged, only updating parameters - skipping model downloads")
                 
                 try:
-                    rag.reload_models(llm_model, embedding_model)
+                    rag.reload_models(
+                        llm_model, embedding_model,
+                        llm_provider=provider,
+                        embedding_provider=embedding_provider
+                    )
                 except Exception as e:
                     logger.error(f"Error updating parameters: {str(e)}")
                     raise Exception(f"Failed to update parameters: {str(e)}")
@@ -879,7 +982,11 @@ class ModelService:
             # Update models in RAG system (embedding_changed already calculated above)
             
             try:
-                rag.reload_models(llm_model, embedding_model)
+                rag.reload_models(
+                    llm_model, embedding_model,
+                    llm_provider=llm_provider,
+                    embedding_provider=embedding_provider_final
+                )
             except Exception as e:
                 logger.error(f"Error updating models: {str(e)}")
                 raise Exception(f"Failed to update models: {str(e)}")
@@ -1086,7 +1193,11 @@ class ModelService:
                 logger.info("Models unchanged, only updating parameters - skipping model downloads")
                 
                 try:
-                    rag.reload_models(llm_model, embedding_model)
+                    rag.reload_models(
+                        llm_model, embedding_model,
+                        llm_provider=detected_provider,
+                        embedding_provider=detected_embedding_provider
+                    )
                 except Exception as e:
                     logger.error(f"Error updating parameters: {str(e)}")
                     raise Exception(f"Failed to update parameters: {str(e)}")
@@ -1124,13 +1235,25 @@ class ModelService:
             
             # Try to initialize models with provider-specific logic
             if detected_provider == 'huggingface':
-                # For HuggingFace, attempt direct initialization
-                logger.info(f"Testing HuggingFace model download: {llm_model}")
+                # Check if it's a local finetuned model (path starts with /app/data/finetuned_models)
+                is_local_finetuned = llm_model.startswith('/app/data/finetuned_models')
                 
-                download_result = await self.hf_provider.download_model(
-                    model_name=llm_model,
-                    model_type='llm'
-                )
+                if is_local_finetuned:
+                    # Local finetuned model - no download needed, just verify it exists
+                    if os.path.exists(llm_model) and os.path.isdir(llm_model):
+                        logger.info(f"Using local finetuned model: {llm_model}")
+                        download_result = {'success': True, 'message': 'Local finetuned model found'}
+                    else:
+                        logger.error(f"Local finetuned model not found: {llm_model}")
+                        raise Exception(f"Finetuned model not found at: {llm_model}")
+                else:
+                    # For HuggingFace hub models, attempt download
+                    logger.info(f"Testing HuggingFace model download: {llm_model}")
+                    
+                    download_result = await self.hf_provider.download_model(
+                        model_name=llm_model,
+                        model_type='llm'
+                    )
                 
                 if download_result.get('success') == False:
                     logger.error(f"HuggingFace model download failed: {download_result}")
@@ -1210,7 +1333,11 @@ class ModelService:
                             raise Exception(f"Failed to download model {model_name}: {str(e)}")
             
             # Update the models with provider-specific logic
-            rag.reload_models(llm_model, embedding_model)
+            rag.reload_models(
+                llm_model, embedding_model,
+                llm_provider=detected_provider,
+                embedding_provider=detected_embedding_provider
+            )
             
             # Save settings to database
             try:

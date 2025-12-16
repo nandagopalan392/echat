@@ -374,20 +374,62 @@ class EvaluationRepository:
             return False
     
     def complete_task(self, task_id: str, status: str = 'completed',
-                     error_message: Optional[str] = None) -> bool:
-        """Complete evaluation task"""
+                     error_message: Optional[str] = None,
+                     groundedness_score: float = None,
+                     answer_relevance_score: float = None,
+                     context_relevance_score: float = None,
+                     overall_score: float = None,
+                     evaluation_time: float = None,
+                     metadata: dict = None) -> bool:
+        """Complete evaluation task with optional scores and metadata"""
         try:
             with self.db.get_connection() as conn:
                 cursor = conn.cursor()
                 now = datetime.now().isoformat()
                 
+                # Build dynamic update query based on provided parameters
+                update_fields = ['status = ?', 'completed_at = ?']
+                values = [status, now]
+                
+                if error_message is not None:
+                    update_fields.append('error_message = ?')
+                    values.append(error_message)
+                
+                if groundedness_score is not None:
+                    update_fields.append('groundedness_score = ?')
+                    values.append(groundedness_score)
+                
+                if answer_relevance_score is not None:
+                    update_fields.append('answer_relevance_score = ?')
+                    values.append(answer_relevance_score)
+                
+                if context_relevance_score is not None:
+                    update_fields.append('context_relevance_score = ?')
+                    values.append(context_relevance_score)
+                
+                if overall_score is not None:
+                    update_fields.append('overall_score = ?')
+                    values.append(overall_score)
+                
+                if evaluation_time is not None:
+                    update_fields.append('evaluation_time = ?')
+                    values.append(evaluation_time)
+                
+                if metadata is not None:
+                    import json
+                    update_fields.append('metadata = ?')
+                    values.append(json.dumps(metadata))
+                
+                values.append(task_id)
+                
                 cursor.execute(
-                    '''UPDATE evaluation_tasks
-                       SET status = ?, completed_at = ?, error_message = ?
+                    f'''UPDATE evaluation_tasks
+                       SET {', '.join(update_fields)}
                        WHERE task_id = ?''',
-                    (status, now, error_message, task_id)
+                    tuple(values)
                 )
                 conn.commit()
+                logger.info(f"Completed task {task_id} with status {status}, scores: g={groundedness_score}, ar={answer_relevance_score}, cr={context_relevance_score}")
                 return True
         except Exception as e:
             logger.error(f"Error completing task: {e}")

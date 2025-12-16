@@ -1017,9 +1017,35 @@ async def get_recent_evaluation_results(
         chat_db = get_chat_db()
         if chat_db:
             db_tasks = chat_db.get_evaluation_tasks(limit=limit)
+            
+            # Build a mapping of dataset_id to dataset_name
+            dataset_names = {}
+            try:
+                datasets = chat_db.get_evaluation_datasets()
+                logger.info(f"📊 DEBUG: Fetched {len(datasets)} datasets for name lookup")
+                for ds in datasets:
+                    ds_id = ds.get('id') or ds.get('dataset_id')
+                    ds_name = ds.get('name')
+                    logger.info(f"📊 DEBUG: Dataset id={ds_id} (type={type(ds_id).__name__}), name={ds_name}")
+                    if ds_id and ds_name:
+                        dataset_names[ds_id] = ds_name
+                logger.info(f"📊 DEBUG: Dataset names map: {dataset_names}")
+            except Exception as e:
+                logger.warning(f"Could not fetch dataset names: {e}")
+            
             for task in db_tasks:
                 if task_type and task['task_type'] != task_type:
                     continue
+                
+                # Enrich metadata with dataset_name if not already set
+                metadata = task['metadata'] or {}
+                dataset_id = task.get('dataset_id')
+                logger.info(f"📊 DEBUG: Task {task['id']}: dataset_id={dataset_id} (type={type(dataset_id).__name__}), metadata dataset_name={metadata.get('dataset_name')}")
+                if dataset_id and 'dataset_name' not in metadata:
+                    resolved_name = dataset_names.get(dataset_id, f'Dataset {dataset_id}')
+                    logger.info(f"📊 DEBUG: Resolved dataset name: {resolved_name} (from dataset_names.get({dataset_id}))")
+                    metadata['dataset_name'] = resolved_name
+                    metadata['dataset_id'] = dataset_id
                     
                 result = {
                     "task_id": task['id'],
@@ -1030,20 +1056,20 @@ async def get_recent_evaluation_results(
                     "context_chunks": task['context_chunks'],
                     "conversation_id": task['conversation_id'],
                     "user_id": task['user_id'],
-                    "metadata": task['metadata'],
+                    "metadata": metadata,
                     "timestamp": task['created_at'],
                     "updated_at": task['updated_at'],
                     "completed_at": task['completed_at']
                 }
                 
-                # Add scores if available
-                if task['status'] == 'SUCCESS':
+                # Add scores if available (check both 'SUCCESS' and 'completed' status)
+                if task['status'] in ['SUCCESS', 'completed']:
                     result["results"] = {
-                        "groundedness": {"score": task['groundedness_score']},
-                        "answer_relevance": {"score": task['answer_relevance_score']},
-                        "context_relevance": {"score": task['context_relevance_score']},
-                        "overall_score": task['overall_score'],
-                        "evaluation_time_seconds": task['evaluation_time']
+                        "groundedness": {"score": task['groundedness_score'] or 0},
+                        "answer_relevance": {"score": task['answer_relevance_score'] or 0},
+                        "context_relevance": {"score": task['context_relevance_score'] or 0},
+                        "overall_score": task['overall_score'] or 0,
+                        "evaluation_time_seconds": task['evaluation_time'] or 0
                     }
                 elif task['status'] == 'FAILURE':
                     result["error"] = task['error_message']

@@ -220,7 +220,7 @@ class HuggingFaceProvider(BaseModelProvider):
     
     async def _download_llm_model(self, model_name: str) -> Dict[str, Any]:
         """
-        Download and validate an LLM model from HuggingFace.
+        Download and validate an LLM model from HuggingFace with progress tracking.
         
         Args:
             model_name: HuggingFace model identifier
@@ -229,22 +229,199 @@ class HuggingFaceProvider(BaseModelProvider):
             Download status dictionary
         """
         try:
-            # Download the model using HuggingFace transformers
-            from transformers import AutoTokenizer, AutoModel
+            # Download the model using HuggingFace Hub with progress tracking
+            from transformers import AutoTokenizer, AutoConfig
+            from huggingface_hub import snapshot_download, HfApi, try_to_load_from_cache
+            import threading
+            import time
+            import os
             
-            # This will download if not already cached
-            self.logger.info(f"Downloading HuggingFace LLM model: {model_name}")
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModel.from_pretrained(model_name)
+            start_time = time.time()
             
-            # If we get here, download/load was successful
-            return {
-                'success': True,
-                'message': f"Successfully downloaded and validated LLM model: {model_name}",
-                'model_name': model_name,
-                'model_type': 'llm',
-                'ready_to_use': True
-            }
+            self.logger.info(f"📦 Checking HuggingFace LLM model: {model_name}")
+            
+            # Check if model is already cached - just verify files exist, don't load the model
+            # Loading the model here would consume GPU memory and potentially crash
+            try:
+                cached_path = try_to_load_from_cache(model_name, "config.json")
+                if cached_path:
+                    cache_dir = os.path.dirname(cached_path)
+                    self.logger.info(f"✅ Model already cached at: {cache_dir}")
+                    
+                    # Just verify the tokenizer and config can be loaded (lightweight check)
+                    self.logger.info(f"📥 Verifying cached model files...")
+                    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+                    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+                    
+                    # Check if model weights exist (without loading them)
+                    weight_files = [f for f in os.listdir(cache_dir) 
+                                   if f.endswith('.bin') or f.endswith('.safetensors')]
+                    
+                    if weight_files or os.path.exists(os.path.join(cache_dir, 'model.safetensors.index.json')):
+                        elapsed = int(time.time() - start_time)
+                        self.logger.info(f"✅ Model cache verified in {elapsed}s (weights: {weight_files[:3]}...)")
+                        
+                        return {
+                            'success': True,
+                            'message': f"LLM model verified from cache: {model_name}",
+                            'model_name': model_name,
+                            'model_type': 'llm',
+                            'ready_to_use': True,
+                            'from_cache': True,
+                            'download_time_seconds': elapsed
+                        }
+                    else:
+                        self.logger.warning(f"Cache found but missing weight files, will re-download")
+            except Exception as cache_check_error:
+                self.logger.info(f"Model not in cache or incomplete, will download: {cache_check_error}")
+            
+            self.logger.info(f"📦 Starting download of HuggingFace LLM model: {model_name}")
+            self.logger.info(f"💾 Cache location: /root/.cache/huggingface/hub/")
+            
+            # Get model info to calculate total size
+            total_size_bytes = 0
+            files_to_download = []
+            try:
+                api = HfApi()
+                model_info = api.model_info(model_name, files_metadata=True)
+                
+                # Calculate total size from siblings (files in the repo)
+                if hasattr(model_info, 'siblings') and model_info.siblings:
+                    for sibling in model_info.siblings:
+                        if hasattr(sibling, 'size') and sibling.size:
+                            total_size_bytes += sibling.size
+                            files_to_download.append({
+                                'name': sibling.rfilename,
+                                'size': sibling.size
+                            })
+                
+                total_size_mb = total_size_bytes / (1024 * 1024)
+                total_size_gb = total_size_bytes / (1024 * 1024 * 1024)
+                
+                if total_size_gb >= 1:
+                    self.logger.info(f"📊 Total model size: {total_size_gb:.2f} GB ({len(files_to_download)} files)")
+                else:
+                    self.logger.info(f"📊 Total model size: {total_size_mb:.2f} MB ({len(files_to_download)} files)")
+                    
+                # Log large files
+                large_files = [f for f in files_to_download if f['size'] > 100 * 1024 * 1024]  # > 100MB
+                for f in large_files:
+                    f_size_mb = f['size'] / (1024 * 1024)
+                    self.logger.info(f"   📁 {f['name']}: {f_size_mb:.1f} MB")
+                    
+            except Exception as e:
+                self.logger.warning(f"Could not get model size info: {e}")
+            
+            # Progress tracking state
+            download_complete = threading.Event()
+            current_file = ['']
+            downloaded_bytes = [0]
+            current_file_downloaded = [0]
+            current_file_total = [0]
+            
+            def log_progress():
+                """Background thread to log progress every 10 seconds"""
+                while not download_complete.is_set():
+                    elapsed = int(time.time() - start_time)
+                    elapsed_min = elapsed // 60
+                    elapsed_sec = elapsed % 60
+                    
+                    if total_size_bytes > 0 and downloaded_bytes[0] > 0:
+                        overall_percent = min(100, (downloaded_bytes[0] / total_size_bytes) * 100)
+                        downloaded_mb = downloaded_bytes[0] / (1024 * 1024)
+                        total_mb = total_size_bytes / (1024 * 1024)
+                        
+                        # Calculate speed and ETA
+                        if elapsed > 0:
+                            speed_mb_s = downloaded_mb / elapsed
+                            remaining_mb = total_mb - downloaded_mb
+                            eta_seconds = int(remaining_mb / speed_mb_s) if speed_mb_s > 0 else 0
+                            eta_min = eta_seconds // 60
+                            eta_sec = eta_seconds % 60
+                            
+                            self.logger.info(
+                                f"⬇️ [{model_name}] {overall_percent:.1f}% "
+                                f"({downloaded_mb:.0f}/{total_mb:.0f} MB) | "
+                                f"Speed: {speed_mb_s:.1f} MB/s | "
+                                f"Elapsed: {elapsed_min}m {elapsed_sec}s | ETA: {eta_min}m {eta_sec}s"
+                            )
+                    elif current_file[0]:
+                        # Show current file being downloaded
+                        if current_file_total[0] > 0:
+                            file_percent = (current_file_downloaded[0] / current_file_total[0]) * 100
+                            self.logger.info(
+                                f"⬇️ [{model_name}] Downloading {current_file[0]}: {file_percent:.1f}% "
+                                f"(Elapsed: {elapsed_min}m {elapsed_sec}s)"
+                            )
+                        else:
+                            self.logger.info(
+                                f"⬇️ [{model_name}] Downloading {current_file[0]}... "
+                                f"(Elapsed: {elapsed_min}m {elapsed_sec}s)"
+                            )
+                    else:
+                        self.logger.info(f"⬇️ [{model_name}] Downloading... (Elapsed: {elapsed_min}m {elapsed_sec}s)")
+                    
+                    if download_complete.wait(10):
+                        break
+            
+            progress_thread = threading.Thread(target=log_progress, daemon=True)
+            progress_thread.start()
+            
+            try:
+                # Use snapshot_download for better progress tracking
+                # This downloads all model files with progress
+                self.logger.info(f"📥 Downloading model files for {model_name}...")
+                
+                local_dir = snapshot_download(
+                    repo_id=model_name,
+                    repo_type="model",
+                    local_dir=None,  # Use default cache
+                    resume_download=True  # Enable resume for interrupted downloads
+                )
+                
+                self.logger.info(f"✅ Model files downloaded to: {local_dir}")
+                
+                # Verify the download by loading tokenizer and config (lightweight)
+                # Don't load the full model here - it will be loaded when actually used
+                self.logger.info(f"📥 Verifying tokenizer for {model_name}...")
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True
+                )
+                self.logger.info(f"✅ Tokenizer verified for {model_name}")
+                
+                # Verify config loads correctly
+                from transformers import AutoConfig
+                config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+                self.logger.info(f"✅ Model config verified: {config.model_type}")
+                
+                # Verify weight files exist (without loading them - saves GPU memory)
+                weight_files = [f for f in os.listdir(local_dir) 
+                               if f.endswith('.bin') or f.endswith('.safetensors')]
+                has_sharded = os.path.exists(os.path.join(local_dir, 'model.safetensors.index.json'))
+                
+                if weight_files or has_sharded:
+                    self.logger.info(f"✅ Model weights verified: {len(weight_files)} files found")
+                else:
+                    self.logger.warning(f"⚠️ No weight files found in {local_dir}")
+                
+                download_complete.set()
+                elapsed = int(time.time() - start_time)
+                elapsed_min = elapsed // 60
+                elapsed_sec = elapsed % 60
+                
+                # If we get here, download was successful
+                self.logger.info(f"✅ Successfully downloaded LLM model: {model_name} ({elapsed_min}m {elapsed_sec}s)")
+                return {
+                    'success': True,
+                    'message': f"Successfully downloaded and verified LLM model: {model_name}",
+                    'model_name': model_name,
+                    'model_type': 'llm',
+                    'ready_to_use': True,
+                    'download_time_seconds': elapsed
+                }
+            finally:
+                download_complete.set()
             
         except ValueError as e:
             # Check if this is a gated model error
@@ -273,7 +450,7 @@ class HuggingFaceProvider(BaseModelProvider):
     
     async def _download_embedding_model(self, model_name: str) -> Dict[str, Any]:
         """
-        Download and validate an embedding model from HuggingFace.
+        Download and validate an embedding model from HuggingFace with progress tracking.
         
         Args:
             model_name: HuggingFace model identifier
@@ -282,29 +459,74 @@ class HuggingFaceProvider(BaseModelProvider):
             Download status dictionary
         """
         try:
-            # Create embedding model (this will download if needed)
-            embedding_model = create_embedding_model(model_name, 'huggingface')
+            import threading
+            import time
             
-            # Test the embedding model with a simple query
-            test_embedding = embedding_model.embed_query("test")
+            start_time = time.time()
+            download_complete = threading.Event()
             
-            if test_embedding and len(test_embedding) > 0:
-                return {
-                    'success': True,
-                    'message': f"Successfully downloaded and validated embedding model: {model_name}",
-                    'model_name': model_name,
-                    'model_type': 'embedding',
-                    'embedding_dimension': len(test_embedding),
-                    'ready_to_use': True
-                }
-            else:
-                return {
-                    'success': False,
-                    'message': "Model downloaded but failed validation test",
-                    'model_name': model_name,
-                    'model_type': 'embedding',
-                    'error': 'validation_failed'
-                }
+            self.logger.info(f"📦 Starting download of HuggingFace embedding model: {model_name}")
+            self.logger.info(f"💾 Cache location: ~/.cache/huggingface/hub/")
+            
+            # Get model info to calculate total size
+            total_size_bytes = 0
+            try:
+                from huggingface_hub import HfApi
+                api = HfApi()
+                model_info = api.model_info(model_name)
+                
+                if hasattr(model_info, 'siblings') and model_info.siblings:
+                    for sibling in model_info.siblings:
+                        if hasattr(sibling, 'size') and sibling.size:
+                            total_size_bytes += sibling.size
+                
+                total_size_mb = total_size_bytes / (1024 * 1024)
+                self.logger.info(f"📊 Model size: {total_size_mb:.2f} MB")
+                    
+            except Exception as e:
+                self.logger.warning(f"Could not get model size info: {e}")
+            
+            def progress_logger():
+                while not download_complete.is_set():
+                    elapsed = int(time.time() - start_time)
+                    self.logger.info(f"⏳ Downloading embedding '{model_name}'... ({elapsed}s elapsed)")
+                    if download_complete.wait(10):
+                        break
+            
+            progress_thread = threading.Thread(target=progress_logger, daemon=True)
+            progress_thread.start()
+            
+            try:
+                # Create embedding model (this will download if needed)
+                embedding_model = create_embedding_model(model_name, 'huggingface')
+                
+                # Test the embedding model with a simple query
+                test_embedding = embedding_model.embed_query("test")
+                
+                download_complete.set()
+                elapsed = int(time.time() - start_time)
+                
+                if test_embedding and len(test_embedding) > 0:
+                    self.logger.info(f"✅ Successfully downloaded embedding model: {model_name} ({elapsed}s)")
+                    return {
+                        'success': True,
+                        'message': f"Successfully downloaded and validated embedding model: {model_name}",
+                        'model_name': model_name,
+                        'model_type': 'embedding',
+                        'embedding_dimension': len(test_embedding),
+                        'ready_to_use': True,
+                        'download_time_seconds': elapsed
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'message': "Model downloaded but failed validation test",
+                        'model_name': model_name,
+                        'model_type': 'embedding',
+                        'error': 'validation_failed'
+                    }
+            finally:
+                download_complete.set()
                 
         except Exception as e:
             error_msg = f"Failed to download embedding model {model_name}: {str(e)}"

@@ -120,6 +120,7 @@ class Experiment:
             'description': self.description,
             'user_id': self.user_id,
             'base_model': self.base_model,
+            'model_name': self.base_model,  # Alias for frontend compatibility
             'model_provider': self.model_provider,
             'status': self.status,
             'config': self.config,

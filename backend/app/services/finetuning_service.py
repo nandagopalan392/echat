@@ -24,13 +24,33 @@ class FinetuningService:
         self.hf_finetuner = hf_finetuner
     
     # Model operations
-    def get_available_models(self) -> List[str]:
-        """Get list of available models for fine-tuning"""
+    def get_available_models(self) -> List[Dict[str, Any]]:
+        """Get list of available models for fine-tuning from cache"""
         try:
-            return self.hf_finetuner.get_available_models()
+            from app.core.providers import get_model_cache
+            model_cache = get_model_cache()
+            finetuning_models = model_cache.get_finetuning_models()
+            
+            # Ensure each model has required fields for ModelInfo schema
+            result = []
+            for model in finetuning_models:
+                result.append({
+                    "name": model.get("name", ""),
+                    "description": model.get("description", ""),
+                    "size": model.get("size", "unknown"),
+                    "type": model.get("type", "text-generation")
+                })
+            return result
         except Exception as e:
-            logger.error(f"Error getting available models: {e}")
-            raise
+            logger.warning(f"Could not get models from cache: {e}")
+            # Fallback to direct fetch
+            try:
+                model_names = self.hf_finetuner.get_available_models()
+                # Convert to dict format for schema compatibility
+                return [{"name": name, "description": "", "size": "unknown", "type": "text-generation"} for name in model_names]
+            except Exception as inner_e:
+                logger.error(f"Error getting available models: {inner_e}")
+                raise
     
     # Experiment operations
     def create_experiment(

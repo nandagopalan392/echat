@@ -74,6 +74,12 @@ class RAGEngine:
         self.retriever = None
         self.models_loaded = False
         
+        # HuggingFace model context limits (set when loading HF models)
+        self._hf_tokenizer = None
+        self._hf_max_position_embeddings = None
+        self._hf_max_new_tokens = None
+        self._hf_max_input_length = None
+        
         # Text splitter for document chunking
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
@@ -185,11 +191,20 @@ class RAGEngine:
                 # Load LLM model
                 if not self.model:
                     logger.info(f"Loading LLM model: {self.llm_model}")
-                    self.model = ChatOllama(
-                        model=self.llm_model,
-                        temperature=self.model_parameters.get('temperature', 0.7),
-                        base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434')
-                    )
+                    
+                    # Check if this is a local finetuned HuggingFace model
+                    is_local_finetuned = self.llm_model.startswith('/app/data/finetuned_models')
+                    llm_provider = getattr(self, 'llm_provider', 'ollama')
+                    
+                    if is_local_finetuned or llm_provider == 'huggingface':
+                        logger.info(f"Loading HuggingFace LLM model: {self.llm_model}")
+                        self._load_huggingface_llm()
+                    else:
+                        self.model = ChatOllama(
+                            model=self.llm_model,
+                            temperature=self.model_parameters.get('temperature', 0.7),
+                            base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434')
+                        )
                 
                 self.models_loaded = True
                 logger.info(f"Models loaded successfully (attempt {attempt + 1})")
@@ -250,6 +265,145 @@ class RAGEngine:
             base_url=os.getenv('OLLAMA_HOST', 'http://ollama:11434')
         )
         logger.info(f"Loaded Ollama embedding model: {self.embedding_model}")
+
+    def _load_huggingface_llm(self):
+        """Load a HuggingFace LLM model (including local finetuned PEFT/LoRA models)"""
+        from langchain_huggingface import HuggingFacePipeline
+        from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+        import threading
+        import time
+        import os
+        import json
+        
+        model_path = self.llm_model
+        logger.info(f"📦 Loading HuggingFace LLM: {model_path}")
+        
+        # Progress indicator
+        download_complete = threading.Event()
+        start_time = time.time()
+        
+        def progress_logger():
+            while not download_complete.is_set():
+                elapsed = int(time.time() - start_time)
+                logger.info(f"⏳ Loading HuggingFace LLM... ({elapsed}s elapsed)")
+                if download_complete.wait(10):
+                    break
+        
+        progress_thread = threading.Thread(target=progress_logger, daemon=True)
+        progress_thread.start()
+        
+        try:
+            # Determine device
+            device = "cuda" if torch and torch.cuda.is_available() else "cpu"
+            logger.info(f"Using device: {device}")
+            
+            # Check if this is a PEFT/LoRA adapter (has adapter_config.json)
+            is_peft_adapter = False
+            adapter_config_path = os.path.join(model_path, "adapter_config.json")
+            base_model_name = None
+            
+            if os.path.exists(adapter_config_path):
+                is_peft_adapter = True
+                with open(adapter_config_path, 'r') as f:
+                    adapter_config = json.load(f)
+                    base_model_name = adapter_config.get("base_model_name_or_path")
+                logger.info(f"🔧 Detected PEFT/LoRA adapter, base model: {base_model_name}")
+            
+            if is_peft_adapter and base_model_name:
+                # Load as PEFT adapter
+                from peft import PeftModel
+                
+                # Load tokenizer from adapter path (it has the correct vocab size used during training)
+                tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                
+                # Load base model
+                logger.info(f"Loading base model: {base_model_name}")
+                base_model = AutoModelForCausalLM.from_pretrained(
+                    base_model_name,
+                    trust_remote_code=True,
+                    device_map="auto" if device == "cuda" else None,
+                    torch_dtype=torch.float16 if device == "cuda" and torch else None,
+                    low_cpu_mem_usage=True
+                )
+                
+                # CRITICAL: Resize base model embeddings to match the tokenizer used during training
+                # This ensures adapter weights (which were trained with resized embeddings) can load correctly
+                if len(tokenizer) != base_model.config.vocab_size:
+                    logger.info(f"Resizing base model embeddings from {base_model.config.vocab_size} to {len(tokenizer)}")
+                    base_model.resize_token_embeddings(len(tokenizer))
+                
+                # Load PEFT adapter
+                logger.info(f"Loading PEFT adapter from: {model_path}")
+                model = PeftModel.from_pretrained(base_model, model_path)
+                
+                # Merge adapter weights for faster inference
+                logger.info("Merging adapter weights for inference...")
+                model = model.merge_and_unload()
+                
+            else:
+                # Standard model loading (not a PEFT adapter)
+                tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token
+                
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    trust_remote_code=True,
+                    device_map="auto" if device == "cuda" else None,
+                    torch_dtype=torch.float16 if device == "cuda" and torch else None,
+                    low_cpu_mem_usage=True
+                )
+            
+            # Get the model's max position embeddings (context window size)
+            max_position_embeddings = getattr(model.config, 'max_position_embeddings', 2048)
+            logger.info(f"Model max_position_embeddings: {max_position_embeddings}")
+            
+            # CRITICAL: Set tokenizer's model_max_length to match model's max position embeddings
+            # This ensures proper truncation when inputs are too long
+            tokenizer.model_max_length = max_position_embeddings
+            logger.info(f"Set tokenizer.model_max_length to {max_position_embeddings}")
+            
+            # Limit max_new_tokens to avoid exceeding position embeddings
+            # Leave room for input tokens (at least half for input, half for generation)
+            requested_max_tokens = self.model_parameters.get('max_tokens', 512)
+            # For small context models, cap at a reasonable value to leave room for input
+            # We need to leave enough room for the input prompt
+            safe_max_new_tokens = min(requested_max_tokens, max_position_embeddings // 4, 512)
+            max_input_length = max_position_embeddings - safe_max_new_tokens
+            logger.info(f"Setting max_new_tokens to {safe_max_new_tokens} (requested: {requested_max_tokens})")
+            logger.info(f"Max input length: {max_input_length} tokens")
+            
+            # Store these for context truncation in queries
+            self._hf_max_position_embeddings = max_position_embeddings
+            self._hf_max_new_tokens = safe_max_new_tokens
+            self._hf_max_input_length = max_input_length
+            self._hf_tokenizer = tokenizer
+            
+            # Create text generation pipeline with truncation enabled
+            pipe = pipeline(
+                "text-generation",
+                model=model,
+                tokenizer=tokenizer,
+                max_new_tokens=safe_max_new_tokens,
+                temperature=self.model_parameters.get('temperature', 0.7),
+                do_sample=True,
+                pad_token_id=tokenizer.pad_token_id,
+                truncation=True,  # Enable truncation for long inputs
+            )
+            
+            # Wrap in LangChain
+            self.model = HuggingFacePipeline(pipeline=pipe)
+            
+            download_complete.set()
+            elapsed = int(time.time() - start_time)
+            logger.info(f"✅ Successfully loaded HuggingFace LLM: {model_path} ({elapsed}s)")
+            
+        except Exception as e:
+            download_complete.set()
+            logger.error(f"Failed to load HuggingFace LLM: {e}")
+            raise e
 
     def clear_gpu_memory(self):
         """Clear GPU memory if available"""
@@ -582,6 +736,32 @@ class RAGEngine:
             # Format context
             context = "\n\n".join([doc.page_content for doc in docs])
             
+            # Truncate context for HuggingFace models with limited context windows
+            if hasattr(self, '_hf_tokenizer') and hasattr(self, '_hf_max_input_length'):
+                try:
+                    tokenizer = self._hf_tokenizer
+                    max_input_length = self._hf_max_input_length
+                    
+                    # Estimate prompt overhead (template tokens + question)
+                    question_tokens = len(tokenizer.encode(question, add_special_tokens=False))
+                    prompt_overhead = 150  # Estimate for prompt template
+                    
+                    # Calculate available tokens for context
+                    available_for_context = max_input_length - question_tokens - prompt_overhead
+                    available_for_context = max(available_for_context, 256)  # Minimum context
+                    
+                    # Tokenize and truncate context if needed
+                    context_tokens = tokenizer.encode(context, add_special_tokens=False)
+                    if len(context_tokens) > available_for_context:
+                        logger.warning(f"[HF CONTEXT] Context too long ({len(context_tokens)} tokens), truncating to {available_for_context} tokens")
+                        truncated_tokens = context_tokens[:available_for_context]
+                        context = tokenizer.decode(truncated_tokens, skip_special_tokens=True)
+                        logger.info(f"[HF CONTEXT] Truncated context to {len(truncated_tokens)} tokens")
+                    else:
+                        logger.info(f"[HF CONTEXT] Context fits: {len(context_tokens)} tokens (max: {available_for_context})")
+                except Exception as e:
+                    logger.error(f"[HF CONTEXT] Error truncating context: {e}")
+            
             # Select prompt based on style
             prompt = self.conversational_prompt if style == "conversational" else self.prompt
             
@@ -618,17 +798,26 @@ class RAGEngine:
         except Exception as e:
             logger.error(f"Error updating model parameters: {e}")
 
-    def reload_models(self, llm_model: str = None, embedding_model: str = None):
-        """Reload models with new model names"""
+    def reload_models(self, llm_model: str = None, embedding_model: str = None, 
+                       llm_provider: str = None, embedding_provider: str = None):
+        """Reload models with new model names and providers"""
         try:
             if llm_model:
                 self.llm_model = llm_model
                 self.model = None
             
+            if llm_provider:
+                self.llm_provider = llm_provider
+                logger.info(f"Setting LLM provider: {llm_provider}")
+            
             if embedding_model:
                 self.embedding_model = embedding_model
                 self.embeddings = None
                 self.vector_store = None
+            
+            if embedding_provider:
+                self.embedding_provider = embedding_provider
+                logger.info(f"Setting embedding provider: {embedding_provider}")
             
             self.models_loaded = False
             self.ensure_models_loaded()
@@ -636,7 +825,7 @@ class RAGEngine:
             if embedding_model:
                 self._initialize_vector_store()
             
-            logger.info(f"Models reloaded: LLM={self.llm_model}, Embedding={self.embedding_model}")
+            logger.info(f"Models reloaded: LLM={self.llm_model} (provider={getattr(self, 'llm_provider', 'ollama')}), Embedding={self.embedding_model}")
             
         except Exception as e:
             logger.error(f"Error reloading models: {e}")
